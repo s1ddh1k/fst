@@ -7,6 +7,15 @@
     "build": "pnpm -r build",
     "dev": "pnpm -r --parallel dev",
     "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "commitlint": "commitlint --edit"
+  },
+  "simple-git-hooks": {
+    "commit-msg": "pnpm commitlint $1"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^20.4.4",
+    "@commitlint/config-conventional": "^20.4.4",
+    "simple-git-hooks": "^2.13.1"
   }
 }
