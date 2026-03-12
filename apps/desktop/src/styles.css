@@ -1,6 +1,3 @@
-@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css");
-@import url("https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&display=swap");
-
 :root {
   --bg: #ece2cf;
   --ink: #151515;
@@ -24,6 +21,7 @@
 }
 
 html {
+  height: 100%;
   background:
     radial-gradient(circle at top left, rgba(23, 79, 70, 0.16), transparent 24%),
     radial-gradient(circle at top right, rgba(154, 90, 36, 0.12), transparent 22%),
@@ -31,9 +29,10 @@ html {
 }
 
 body {
+  height: 100%;
   margin: 0;
   font-family:
-    "Pretendard",
+    "Noto Sans KR",
     "Noto Sans KR",
     "Apple SD Gothic Neo",
     "Malgun Gothic",
@@ -45,6 +44,10 @@ body {
     linear-gradient(180deg, rgba(23, 79, 70, 0.03), transparent 28%);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+#root {
+  height: 100%;
 }
 
 button,
@@ -61,22 +64,26 @@ code {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
   padding: 18px;
+  overflow: hidden;
 }
 
 .workspace {
   display: grid;
-  grid-template-columns: 360px minmax(0, 1fr);
+  grid-template-columns: 312px minmax(0, 1fr);
   gap: 18px;
-  align-items: start;
+  align-items: stretch;
+  height: 100%;
+  overflow: hidden;
 }
 
 .mission-rail {
-  position: sticky;
-  top: 18px;
   display: grid;
   gap: 16px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 6px;
 }
 
 .mission-block,
@@ -103,7 +110,7 @@ code {
 }
 
 .mission-block-lead {
-  padding: 28px 26px 30px;
+  padding: 22px 22px 24px;
   background:
     linear-gradient(180deg, rgba(251, 247, 239, 0.96), rgba(245, 236, 219, 0.96)),
     linear-gradient(145deg, rgba(23, 79, 70, 0.04), transparent 48%);
@@ -131,27 +138,37 @@ code {
 }
 
 .eyebrow {
-  font-family: "Cormorant Garamond", serif;
-  font-size: 20px;
-  letter-spacing: 0.12em;
+  font-family:
+    "Noto Sans KR",
+    "Apple SD Gothic Neo",
+    "Malgun Gothic",
+    sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.1em;
   color: var(--teal);
+  font-weight: 700;
 }
 
 #hero-title {
   margin: 10px 0 0;
-  font-family: "Cormorant Garamond", serif;
-  font-size: clamp(48px, 5.6vw, 76px);
-  line-height: 0.9;
-  letter-spacing: -0.05em;
-  max-width: 8ch;
+  font-family:
+    "Noto Sans KR",
+    "Apple SD Gothic Neo",
+    "Malgun Gothic",
+    sans-serif;
+  font-size: clamp(28px, 3vw, 42px);
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  max-width: none;
+  font-weight: 800;
 }
 
 .hero-copy {
-  margin: 18px 0 0;
-  max-width: 30ch;
+  margin: 14px 0 0;
+  max-width: 26ch;
   color: var(--muted);
-  line-height: 1.72;
-  font-size: 14px;
+  line-height: 1.56;
+  font-size: 13px;
 }
 
 .signal-stack {
@@ -160,7 +177,7 @@ code {
 }
 
 .signal-card {
-  padding: 16px 18px;
+  padding: 14px 16px;
   border-radius: 22px;
   background:
     linear-gradient(180deg, rgba(251, 247, 239, 0.95), rgba(245, 236, 219, 0.92)),
@@ -182,7 +199,7 @@ code {
 .signal-card strong {
   display: block;
   margin-top: 6px;
-  font-size: 28px;
+  font-size: 22px;
   line-height: 1;
   letter-spacing: -0.05em;
 }
@@ -194,14 +211,19 @@ code {
 }
 
 .signal-card p {
-  margin: 8px 0 0;
-  font-size: 13px;
-  line-height: 1.5;
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--muted);
 }
 
+.runtime-path {
+  word-break: break-all;
+  font-size: 12px;
+}
+
 .control-panel {
-  padding: 22px;
+  padding: 18px;
   background:
     linear-gradient(180deg, rgba(245, 236, 219, 0.92), rgba(238, 229, 211, 0.92)),
     linear-gradient(140deg, rgba(154, 90, 36, 0.06), transparent 48%);
@@ -354,18 +376,21 @@ h3 {
 
 .live-canvas {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 18px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .overview-band {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
 
 .hero-stat {
-  min-height: 156px;
-  padding: 18px 18px 16px;
+  min-height: 118px;
+  padding: 16px 16px 14px;
   border-radius: 28px;
   display: grid;
   align-content: start;
@@ -382,8 +407,8 @@ h3 {
 
 .hero-stat strong {
   display: block;
-  margin-top: 14px;
-  font-size: 36px;
+  margin-top: 10px;
+  font-size: 30px;
   line-height: 0.95;
   letter-spacing: -0.06em;
   word-break: break-word;
@@ -397,23 +422,27 @@ h3 {
 }
 
 .hero-stat-log strong {
-  font-size: 16px;
-  line-height: 1.35;
+  font-size: 15px;
+  line-height: 1.3;
 }
 
 .board-grid {
   display: grid;
-  grid-template-columns: minmax(360px, 0.84fr) minmax(0, 1.16fr);
+  grid-template-columns: minmax(0, 1.06fr) minmax(360px, 0.94fr);
   gap: 18px;
+  min-height: 0;
 }
 
 .market-stage {
   display: grid;
   gap: 18px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 6px;
 }
 
 .panel-surface {
-  padding: 22px;
+  padding: 18px;
   background:
     linear-gradient(180deg, rgba(251, 247, 239, 0.94), rgba(244, 235, 219, 0.94)),
     linear-gradient(145deg, rgba(23, 79, 70, 0.04), transparent 52%);
@@ -421,6 +450,7 @@ h3 {
 
 .ops-columns {
   display: grid;
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1fr);
   gap: 12px;
   margin-bottom: 14px;
 }
@@ -513,11 +543,14 @@ h3 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 14px;
+  align-content: start;
 }
 
 .snapshot-list {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
+  align-content: start;
 }
 
 .snapshot-card {
@@ -658,7 +691,7 @@ h3 {
 .recommendation-card h3,
 .session-row h3 {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
   line-height: 1.2;
   letter-spacing: -0.04em;
 }
@@ -753,14 +786,32 @@ h3 {
 
 .dossier-grid {
   display: grid;
-  grid-template-columns: 330px minmax(0, 1fr);
-  gap: 18px;
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+  gap: 14px;
+  min-height: 0;
 }
 
 .session-column,
 .detail-stage {
   display: grid;
   gap: 12px;
+  min-height: 0;
+}
+
+.sessions-stage,
+.focus-stage {
+  min-height: 0;
+}
+
+.session-column {
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.detail-stage {
+  overflow: auto;
+  padding-right: 6px;
 }
 
 .session-row {
@@ -782,7 +833,7 @@ h3 {
 .session-balance {
   display: block;
   margin-top: 14px;
-  font-size: 28px;
+  font-size: 24px;
   line-height: 1;
   letter-spacing: -0.06em;
 }
@@ -866,25 +917,68 @@ h3 {
   box-shadow: none;
 }
 
-@media (max-width: 1280px) {
+.mission-rail::-webkit-scrollbar,
+.market-stage::-webkit-scrollbar,
+.session-column::-webkit-scrollbar,
+.detail-stage::-webkit-scrollbar {
+  width: 10px;
+}
+
+.mission-rail::-webkit-scrollbar-thumb,
+.market-stage::-webkit-scrollbar-thumb,
+.session-column::-webkit-scrollbar-thumb,
+.detail-stage::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(46, 35, 25, 0.18);
+}
+
+@media (max-width: 1120px) {
   .workspace {
-    grid-template-columns: 320px minmax(0, 1fr);
+    grid-template-columns: 1fr;
   }
 
   .overview-band,
+  .dossier-grid,
   .board-grid,
-  .dossier-grid {
+  .ops-columns {
     grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 980px) {
+  html,
+  body,
+  #root,
+  .app-shell,
+  .workspace {
+    height: auto;
+  }
+
   .workspace {
     grid-template-columns: 1fr;
+    overflow: visible;
   }
 
   .mission-rail {
-    position: static;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .live-canvas,
+  .market-stage,
+  .session-column,
+  .detail-stage {
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .board-grid,
+  .dossier-grid {
+    min-height: auto;
+  }
+
+  .dossier-grid {
+    grid-template-rows: none;
   }
 }
 

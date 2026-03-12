@@ -91,44 +91,48 @@ export function App() {
             opsSnapshot={opsSnapshot}
           />
 
-          <OpsBoard
-            t={t}
-            locale={locale}
-            apiHealthy={apiHealthy}
-            apiMessage={apiMessage}
-            opsSnapshot={opsSnapshot}
-          />
+          <section className="board-grid">
+            <div className="market-stage">
+              <RecommendationBoard
+                t={t}
+                locale={locale}
+                market={market}
+                apiHealthy={apiHealthy}
+                pendingAction={pendingAction}
+                recommendations={recommendations}
+                onStartSession={(rank) => {
+                  void startSession(rank);
+                }}
+              />
 
-          <SnapshotBoard t={t} locale={locale} snapshots={snapshots} />
+              <SnapshotBoard t={t} locale={locale} snapshots={snapshots} />
 
-          <RecommendationBoard
-            t={t}
-            locale={locale}
-            market={market}
-            apiHealthy={apiHealthy}
-            pendingAction={pendingAction}
-            recommendations={recommendations}
-            onStartSession={(rank) => {
-              void startSession(rank);
-            }}
-          />
+              <OpsBoard
+                t={t}
+                locale={locale}
+                apiHealthy={apiHealthy}
+                apiMessage={apiMessage}
+                opsSnapshot={opsSnapshot}
+              />
+            </div>
 
-          <SessionBoard
-            t={t}
-            locale={locale}
-            apiHealthy={apiHealthy}
-            sessions={sessions}
-            activeSessionId={activeSessionId}
-            sessionDetail={sessionDetail}
-            isDetailLoading={isDetailLoading}
-            pendingAction={pendingAction}
-            onSelectSession={(id) => {
-              void selectSession(id);
-            }}
-            onRunSession={() => {
-              void runSession();
-            }}
-          />
+            <SessionBoard
+              t={t}
+              locale={locale}
+              apiHealthy={apiHealthy}
+              sessions={sessions}
+              activeSessionId={activeSessionId}
+              sessionDetail={sessionDetail}
+              isDetailLoading={isDetailLoading}
+              pendingAction={pendingAction}
+              onSelectSession={(id) => {
+                void selectSession(id);
+              }}
+              onRunSession={() => {
+                void runSession();
+              }}
+            />
+          </section>
         </section>
       </main>
     </div>

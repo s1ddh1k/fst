@@ -88,6 +88,10 @@ export function useDesktopData(props: {
       const snapshot = await window.fstDesktop.getOpsSnapshot();
       startTransition(() => {
         setOpsSnapshot(snapshot);
+        if (snapshot.paperTrader.status === "starting") {
+          setApiHealthy(false);
+          setApiMessage(t("apiStartingMeta"));
+        }
       });
     }
 

@@ -83,13 +83,31 @@ export function Sidebar(props: SidebarProps) {
                   : t("runtimeEmbeddedStopped")
               : t("runtimeExternal")}
           </p>
+          {opsSnapshot?.paperTrader.pid ? (
+            <p>{`${t("runtimePid")} ${opsSnapshot.paperTrader.pid}`}</p>
+          ) : null}
+          {opsSnapshot?.paperTrader.logPath ? (
+            <p className="runtime-path">{`${t("runtimeLog")} ${opsSnapshot.paperTrader.logPath}`}</p>
+          ) : null}
         </article>
         <article className="signal-card">
           <span className="meta-label" id="label-paper-api">
             {t("labelPaperApi")}
           </span>
-          <strong id="api-status-text">{apiHealthy ? t("statusHealthy") : t("statusDown")}</strong>
-          <p id="api-status-meta">{isRefreshing ? t("apiSyncingMeta") : apiMessage}</p>
+          <strong id="api-status-text">
+            {opsSnapshot?.paperTrader.status === "starting"
+              ? t("statusSyncing")
+              : apiHealthy
+                ? t("statusHealthy")
+                : t("statusDown")}
+          </strong>
+          <p id="api-status-meta">
+            {opsSnapshot?.paperTrader.status === "starting"
+              ? t("apiStartingMeta")
+              : isRefreshing
+                ? t("apiSyncingMeta")
+                : apiMessage}
+          </p>
         </article>
         <article className="signal-card signal-card-dense">
           <span className="meta-label" id="label-api-base">
