@@ -5,7 +5,11 @@ import {
   createTemplateBreakoutTrendVolumeStrategy,
   createTemplateMeanReversionBandsStrategy,
   createVolatilityBreakoutStrategy,
-  createVolumeFilteredBreakoutStrategy
+  createVolumeFilteredBreakoutStrategy,
+  createZscoreRsiReversionGuardedStrategy,
+  createZscoreRsiReversionStrategy,
+  createZscoreRsiUptrendReversionStrategy,
+  createZscoreRsiTrendPullbackStrategy
 } from "../../strategies/src/index.js";
 
 export {
@@ -15,5 +19,9 @@ export {
   createTemplateBreakoutTrendVolumeStrategy,
   createTemplateMeanReversionBandsStrategy,
   createVolatilityBreakoutStrategy,
-  createVolumeFilteredBreakoutStrategy
+  createVolumeFilteredBreakoutStrategy,
+  createZscoreRsiReversionGuardedStrategy,
+  createZscoreRsiReversionStrategy,
+  createZscoreRsiUptrendReversionStrategy,
+  createZscoreRsiTrendPullbackStrategy
 };

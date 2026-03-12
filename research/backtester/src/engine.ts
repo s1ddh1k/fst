@@ -61,6 +61,8 @@ export function runBacktest(params: {
 
   let cash = initialCapital;
   let positionQuantity = 0;
+  let entryPrice = 0;
+  let entryIndex: number | null = null;
   const trades: Trade[] = [];
   const equityCurve: number[] = [];
 
@@ -69,7 +71,15 @@ export function runBacktest(params: {
     const signal = params.strategy.generateSignal({
       candles: params.candles,
       index: signalIndex,
-      hasPosition: positionQuantity > 0
+      hasPosition: positionQuantity > 0,
+      currentPosition:
+        positionQuantity > 0 && entryIndex !== null
+          ? {
+              entryPrice,
+              quantity: positionQuantity,
+              barsHeld: Math.max(0, signalIndex - entryIndex)
+            }
+          : undefined
     });
     const candle = params.candles[index];
     const executionPrice =
@@ -82,6 +92,8 @@ export function runBacktest(params: {
       const fee = cash * feeRate;
       const netCash = cash - fee;
       positionQuantity = netCash / executionPrice;
+      entryPrice = executionPrice;
+      entryIndex = index;
       cash = 0;
 
       trades.push({
@@ -107,6 +119,8 @@ export function runBacktest(params: {
       });
 
       positionQuantity = 0;
+      entryPrice = 0;
+      entryIndex = null;
     }
 
     const equity = cash + positionQuantity * candle.closePrice;

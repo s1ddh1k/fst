@@ -11,10 +11,17 @@ export type Candle = {
 
 export type Signal = "BUY" | "SELL" | "HOLD";
 
+export type PositionContext = {
+  entryPrice: number;
+  quantity: number;
+  barsHeld: number;
+};
+
 export type StrategyContext = {
   candles: Candle[];
   index: number;
   hasPosition: boolean;
+  currentPosition?: PositionContext;
 };
 
 export type Strategy = {

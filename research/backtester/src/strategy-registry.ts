@@ -6,7 +6,11 @@ import {
   createTemplateBreakoutTrendVolumeStrategy,
   createTemplateMeanReversionBandsStrategy,
   createVolatilityBreakoutStrategy,
-  createVolumeFilteredBreakoutStrategy
+  createVolumeFilteredBreakoutStrategy,
+  createZscoreRsiReversionGuardedStrategy,
+  createZscoreRsiReversionStrategy,
+  createZscoreRsiUptrendReversionStrategy,
+  createZscoreRsiTrendPullbackStrategy
 } from "./strategies-bridge.js";
 
 export function createStrategyByName(name: string): Strategy {
@@ -25,6 +29,14 @@ export function createStrategyByName(name: string): Strategy {
       return createTemplateBreakoutTrendVolumeStrategy();
     case "template-mean-reversion-bands":
       return createTemplateMeanReversionBandsStrategy();
+    case "zscore-rsi-reversion":
+      return createZscoreRsiReversionStrategy();
+    case "zscore-rsi-reversion-guarded":
+      return createZscoreRsiReversionGuardedStrategy();
+    case "zscore-rsi-uptrend-reversion":
+      return createZscoreRsiUptrendReversionStrategy();
+    case "zscore-rsi-trend-pullback":
+      return createZscoreRsiTrendPullbackStrategy();
     default:
       throw new Error(`Unknown strategy: ${name}`);
   }
@@ -38,6 +50,10 @@ export function listStrategyNames(): string[] {
     "rsi-mean-reversion",
     "regime-filtered-moving-average-cross",
     "template-breakout-trend-volume",
-    "template-mean-reversion-bands"
+    "template-mean-reversion-bands",
+    "zscore-rsi-reversion",
+    "zscore-rsi-reversion-guarded",
+    "zscore-rsi-uptrend-reversion",
+    "zscore-rsi-trend-pullback"
   ];
 }

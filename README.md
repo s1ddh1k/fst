@@ -15,6 +15,7 @@
 - [프로젝트 계획](/home/eugene/git/fst/docs/project-plan.md)
 - [MVP 기능 명세](/home/eugene/git/fst/docs/mvp-spec.md)
 - [기술 설계](/home/eugene/git/fst/docs/technical-design.md)
+- [정보 구조](/home/eugene/git/fst/docs/information-architecture.md)
 - [작업 분해](/home/eugene/git/fst/docs/work-breakdown.md)
 - [연구 로드맵](/home/eugene/git/fst/docs/research-roadmap.md)
 

@@ -22,6 +22,38 @@ function getOption(args: string[], key: string): string | undefined {
   return index === -1 ? undefined : args[index + 1];
 }
 
+function candlesPerDay(timeframe: string): number {
+  switch (timeframe) {
+    case "1m":
+      return 24 * 60;
+    case "5m":
+      return 24 * 12;
+    case "1h":
+      return 24;
+    case "1d":
+      return 1;
+    default:
+      return 1;
+  }
+}
+
+function resolveRequiredLimit(params: {
+  timeframe: string;
+  requestedLimit: number;
+  holdoutDays: number;
+  trainingDays: number;
+  stepDays: number;
+  walkForwardSweep: boolean;
+}): number {
+  const perDay = candlesPerDay(params.timeframe);
+  const baseDays = params.walkForwardSweep
+    ? params.trainingDays + params.holdoutDays + params.stepDays
+    : params.holdoutDays * 2;
+  const buffered = Math.ceil(baseDays * perDay * 1.1);
+
+  return Math.max(params.requestedLimit, buffered);
+}
+
 function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
 }
@@ -75,7 +107,7 @@ function mergeDateBounds(
 async function main(): Promise<void> {
   const marketCode = getOption(process.argv, "--market") ?? "KRW-BTC";
   const timeframe = getOption(process.argv, "--timeframe") ?? "1d";
-  const limit = Number.parseInt(getOption(process.argv, "--limit") ?? "500", 10);
+  const requestedLimit = Number.parseInt(getOption(process.argv, "--limit") ?? "500", 10);
   const holdoutDays = Number.parseInt(getOption(process.argv, "--holdout-days") ?? "365", 10);
   const strategyName = getOption(process.argv, "--strategy") ?? "moving-average-cross";
   const universeName = getOption(process.argv, "--universe") ?? "krw-top";
@@ -98,6 +130,14 @@ async function main(): Promise<void> {
     getOption(process.argv, "--min-candles") ?? String(Math.max(150, trainingDays + holdoutDays + 30)),
     10
   );
+  const limit = resolveRequiredLimit({
+    timeframe,
+    requestedLimit,
+    holdoutDays,
+    trainingDays,
+    stepDays,
+    walkForwardSweep
+  });
 
   try {
     if (walkForwardSweep) {

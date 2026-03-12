@@ -4,6 +4,7 @@ Electron 기반 데스크톱 앱 패키지다.
 
 현재 포함 기능:
 
+- `개요 / 전략 / 세션 / 운영` 허브 기반 화면 구조
 - `tmux` 워크스페이스 상태 조회
 - 최신 collector / paper session 로그 파일 표시
 - 로컬 운영 런북 커맨드 노출
@@ -32,7 +33,7 @@ pnpm --filter @fst/desktop dev
 pnpm --filter @fst/desktop smoke
 ```
 
-현재 렌더러는 정적 HTML/CSS/JS 기반 운영 대시보드다. 필요 시 이후 React 기반으로 올릴 수 있다.
+현재 렌더러는 React 기반 데스크톱 콘솔이며, 정보 구조는 [docs/information-architecture.md](/home/eugene/git/fst/docs/information-architecture.md)를 따른다.
 
 스모크 테스트:
 

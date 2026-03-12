@@ -1,8 +1,11 @@
 import type { Locale } from "../types";
 import type { TFunction } from "./shared";
 
+type AppSection = "overview" | "strategies" | "sessions" | "operations";
+
 type SidebarProps = {
   t: TFunction;
+  section: AppSection;
   locale: Locale;
   apiBaseUrl: string;
   timeframe: string;
@@ -13,6 +16,9 @@ type SidebarProps = {
   isRefreshing: boolean;
   actionError: string;
   opsSnapshot: FstDesktopOpsSnapshot | null;
+  recommendations: Array<{ id: number }>;
+  sessions: Array<{ id: number }>;
+  onSectionChange: (section: AppSection) => void;
   onLocaleChange: (locale: Locale) => void;
   onMarketChange: (market: string) => void;
   onTimeframeChange: (timeframe: string) => void;
@@ -23,6 +29,7 @@ type SidebarProps = {
 export function Sidebar(props: SidebarProps) {
   const {
     t,
+    section,
     locale,
     apiBaseUrl,
     timeframe,
@@ -32,101 +39,104 @@ export function Sidebar(props: SidebarProps) {
     apiMessage,
     isRefreshing,
     actionError,
-    opsSnapshot
+    opsSnapshot,
+    recommendations,
+    sessions
   } = props;
 
   return (
     <aside className="mission-rail">
       <div className="mission-block mission-block-lead">
-        <p className="eyebrow">fst desktop</p>
+        <div className="rail-kicker">
+          <p className="eyebrow">fst desktop</p>
+          <span className={`status-dot ${apiHealthy ? "status-dot-healthy" : "status-dot-danger"}`}></span>
+        </div>
         <h1 id="hero-title">{t("heroTitle")}</h1>
         <p id="hero-copy" className="hero-copy">
           {t("heroCopy")}
         </p>
-      </div>
-
-      <div className="signal-stack">
-        <article className="signal-card signal-card-primary">
-          <span className="meta-label" id="label-tmux-workspace">
-            {t("labelTmuxWorkspace")}
-          </span>
-          <strong id="tmux-status-text">
-            {!opsSnapshot?.tmux.available
-              ? t("statusTmuxUnavailable")
-              : !opsSnapshot.tmux.exists
-                ? t("statusTmuxMissing")
-                : t("statusTmuxReady")}
-          </strong>
-          <p id="tmux-status-meta">
-            {!opsSnapshot?.tmux.available
-              ? t("tmuxUnavailableMeta")
-              : !opsSnapshot.tmux.exists
-                ? t("tmuxMissingMeta", { sessionName: opsSnapshot.tmux.sessionName })
-                : t("tmuxReadyMeta", { sessionName: opsSnapshot.tmux.sessionName })}
-          </p>
-        </article>
-        <article className="signal-card">
-          <span className="meta-label" id="label-paper-runtime">
-            {t("labelPaperRuntime")}
-          </span>
-          <strong>
-            {opsSnapshot?.paperTrader.managed
-              ? t("statusEmbedded")
-              : t("statusExternal")}
-          </strong>
-          <p>
-            {opsSnapshot?.paperTrader.managed
-              ? opsSnapshot.paperTrader.status === "running"
-                ? t("runtimeEmbeddedHealthy")
-                : opsSnapshot.paperTrader.status === "starting"
-                  ? t("runtimeEmbeddedStarting")
-                  : t("runtimeEmbeddedStopped")
-              : t("runtimeExternal")}
-          </p>
-          {opsSnapshot?.paperTrader.pid ? (
-            <p>{`${t("runtimePid")} ${opsSnapshot.paperTrader.pid}`}</p>
-          ) : null}
-          {opsSnapshot?.paperTrader.logPath ? (
-            <p className="runtime-path">{`${t("runtimeLog")} ${opsSnapshot.paperTrader.logPath}`}</p>
-          ) : null}
-        </article>
-        <article className="signal-card">
-          <span className="meta-label" id="label-paper-api">
-            {t("labelPaperApi")}
-          </span>
-          <strong id="api-status-text">
-            {opsSnapshot?.paperTrader.status === "starting"
-              ? t("statusSyncing")
-              : apiHealthy
-                ? t("statusHealthy")
-                : t("statusDown")}
-          </strong>
-          <p id="api-status-meta">
-            {opsSnapshot?.paperTrader.status === "starting"
-              ? t("apiStartingMeta")
-              : isRefreshing
-                ? t("apiSyncingMeta")
-                : apiMessage}
-          </p>
-        </article>
-        <article className="signal-card signal-card-dense">
-          <span className="meta-label" id="label-api-base">
-            {t("labelApiBase")}
-          </span>
-          <strong id="api-base-url">{apiBaseUrl}</strong>
-          <p>
-            <span id="label-active-regime">{t("labelActiveRegime")}</span>{" "}
-            <span id="active-regime-label">{`paper-trading-candidate / ${timeframe}`}</span>
-          </p>
-        </article>
+        <div className="signal-stack">
+          <div className="signal-card signal-card-primary">
+            <span className="meta-label">{t("labelPaperApi")}</span>
+            <strong>
+              {opsSnapshot?.paperTrader.status === "starting"
+                ? t("statusSyncing")
+                : apiHealthy
+                  ? t("statusHealthy")
+                  : t("statusDown")}
+            </strong>
+            <p>
+              {opsSnapshot?.paperTrader.status === "starting"
+                ? t("apiStartingMeta")
+                : isRefreshing
+                  ? t("apiSyncingMeta")
+                  : apiMessage}
+            </p>
+          </div>
+          <div className="rail-snapshot-grid">
+            <article className="signal-card">
+              <span className="meta-label">{t("labelRecommendations")}</span>
+              <strong>{recommendations.length}</strong>
+              <p>{t("statsRecommendationsCopy")}</p>
+            </article>
+            <article className="signal-card">
+              <span className="meta-label">{t("labelLiveSessions")}</span>
+              <strong>{sessions.length}</strong>
+              <p>{t("statsSessionsCopy")}</p>
+            </article>
+          </div>
+        </div>
       </div>
 
       <section className="control-panel">
         <div className="section-head">
           <div>
-            <h2 id="trigger-title">{t("triggerTitle")}</h2>
+            <h2>{t("hubNavTitle")}</h2>
+            <p className="panel-caption">{t("hubNavCopy")}</p>
+          </div>
+        </div>
+        <div className="hub-nav" role="tablist" aria-label={t("hubNavTitle")}>
+          <button
+            type="button"
+            className={`hub-nav-item ${section === "overview" ? "active" : ""}`}
+            onClick={() => props.onSectionChange("overview")}
+          >
+            <span>{t("navOverview")}</span>
+            <strong>{recommendations.length}</strong>
+          </button>
+          <button
+            type="button"
+            className={`hub-nav-item ${section === "strategies" ? "active" : ""}`}
+            onClick={() => props.onSectionChange("strategies")}
+          >
+            <span>{t("navStrategies")}</span>
+            <strong>{recommendations.length}</strong>
+          </button>
+          <button
+            type="button"
+            className={`hub-nav-item ${section === "sessions" ? "active" : ""}`}
+            onClick={() => props.onSectionChange("sessions")}
+          >
+            <span>{t("navSessions")}</span>
+            <strong>{sessions.length}</strong>
+          </button>
+          <button
+            type="button"
+            className={`hub-nav-item ${section === "operations" ? "active" : ""}`}
+            onClick={() => props.onSectionChange("operations")}
+          >
+            <span>{t("navOperations")}</span>
+            <strong>{!opsSnapshot?.tmux.available ? "!" : apiHealthy ? "OK" : "API"}</strong>
+          </button>
+        </div>
+      </section>
+
+      <section className="control-panel">
+        <div className="section-head">
+          <div>
+            <h2 id="trigger-title">{t("settingsTitle")}</h2>
             <p id="trigger-copy" className="panel-caption">
-              {t("triggerCopy")}
+              {t("settingsCopy")}
             </p>
           </div>
         </div>
@@ -200,6 +210,21 @@ export function Sidebar(props: SidebarProps) {
           >
             {isRefreshing ? t("refreshBusy") : t("refresh")}
           </button>
+          <div className="signal-card signal-card-dense">
+            <span className="meta-label" id="label-paper-api">
+              {t("labelApiBase")}
+            </span>
+            <strong className="runtime-path" id="api-base-url">
+              {apiBaseUrl}
+            </strong>
+            <p id="api-status-meta">
+              {!opsSnapshot?.tmux.available
+                ? t("tmuxUnavailableMeta")
+                : !opsSnapshot.tmux.exists
+                  ? t("tmuxMissingMeta", { sessionName: opsSnapshot.tmux.sessionName })
+                  : t("tmuxReadyMeta", { sessionName: opsSnapshot.tmux.sessionName })}
+            </p>
+          </div>
         </div>
       </section>
     </aside>

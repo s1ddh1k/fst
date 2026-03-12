@@ -56,7 +56,6 @@ export function useDesktopData(props: {
   const [sessionDetail, setSessionDetail] = useState<SessionDetailPayload | null>(null);
   const [apiHealthy, setApiHealthy] = useState(false);
   const [apiMessage, setApiMessage] = useState("");
-  const [isRefreshing, setIsRefreshing] = useState(true);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [actionError, setActionError] = useState("");
   const [pendingAction, setPendingAction] = useState<"start-session" | "run-session" | "">("");
@@ -80,7 +79,6 @@ export function useDesktopData(props: {
 
   const refreshAll = useEffectEvent(async () => {
     startTransition(() => {
-      setIsRefreshing(true);
       setActionError("");
     });
 
@@ -97,11 +95,11 @@ export function useDesktopData(props: {
 
     try {
       const [snapshotPayload, recommendationPayload, sessionPayload] = await Promise.all([
-        request<{ items: RecommendationSnapshot[] }>("/recommendation-snapshots?limit=4"),
+        request<{ items: RecommendationSnapshot[] }>("/recommendation-snapshots?limit=2"),
         request<{ items: Recommendation[] }>(
-          `/recommendations?regime=${activeRegimeName}&timeframe=${timeframe}&limit=6`
+          `/recommendations?regime=${activeRegimeName}&timeframe=${timeframe}&limit=3`
         ),
-        request<{ items: Session[] }>("/sessions?limit=12")
+        request<{ items: Session[] }>("/sessions?limit=4")
       ]);
 
       const nextSessionId =
@@ -133,10 +131,6 @@ export function useDesktopData(props: {
         setSessions([]);
         setSessionDetail(null);
         setSnapshots([]);
-      });
-    } finally {
-      startTransition(() => {
-        setIsRefreshing(false);
       });
     }
   });
@@ -220,7 +214,6 @@ export function useDesktopData(props: {
   return {
     apiHealthy,
     apiMessage,
-    isRefreshing,
     isDetailLoading,
     actionError,
     pendingAction,

@@ -18,23 +18,6 @@ type SessionBoardProps = {
 export function SessionBoard(props: SessionBoardProps) {
   const { t, locale, apiHealthy, sessions, activeSessionId, sessionDetail, isDetailLoading, pendingAction } = props;
 
-  const timeline = sessionDetail
-    ? [
-        { label: t("timelineCreated"), value: formatDateTime(locale, sessionDetail.session.startedAt) },
-        { label: t("timelineRunning"), value: formatStatus(locale, sessionDetail.session.status) },
-        {
-          label: t("timelinePosition"),
-          value: `${t("markPrice")} ${formatNumber(locale, sessionDetail.position?.markPrice)}`
-        },
-        {
-          label: t("timelineOrders"),
-          value: sessionDetail.recentOrders[0]
-            ? `${sessionDetail.recentOrders[0].side} · ${formatNumber(locale, sessionDetail.recentOrders[0].quantity)}`
-            : t("timelineNoOrders")
-        }
-      ]
-    : [];
-
   return (
     <section className="dossier-grid">
       <section className="sessions-stage panel-surface">
@@ -61,9 +44,7 @@ export function SessionBoard(props: SessionBoardProps) {
                   </span>
                 </div>
                 <h3>{item.strategyName.replaceAll("-", " ")}</h3>
-                <p>
-                  {item.marketCode} / {item.timeframe}
-                </p>
+                <p>{item.marketCode}</p>
                 <strong className="session-balance">
                   {formatNumber(locale, item.currentBalance)}
                 </strong>
@@ -103,10 +84,6 @@ export function SessionBoard(props: SessionBoardProps) {
                 </div>
                 <div className="detail-grid">
                   <div>
-                    <span className="meta-label">{t("strategy")}</span>
-                    <strong>{sessionDetail.session.strategyName}</strong>
-                  </div>
-                  <div>
                     <span className="meta-label">{t("status")}</span>
                     <strong className={`status-badge status-${sessionDetail.session.status}`}>
                       {formatStatus(locale, sessionDetail.session.status)}
@@ -116,30 +93,18 @@ export function SessionBoard(props: SessionBoardProps) {
                     <span className="meta-label">{t("marketCode")}</span>
                     <strong>{sessionDetail.session.marketCode}</strong>
                   </div>
-                  <div>
-                    <span className="meta-label">{t("timeframe")}</span>
-                    <strong>{sessionDetail.session.timeframe}</strong>
-                  </div>
+                </div>
+              </div>
+              <div className="detail-block">
+                <h3>{t("position")}</h3>
+                <div className="detail-grid">
                   <div>
                     <span className="meta-label">{t("currentBalance")}</span>
                     <strong>{formatNumber(locale, sessionDetail.session.currentBalance)}</strong>
                   </div>
                   <div>
-                    <span className="meta-label">{t("startingBalance")}</span>
-                    <strong>{formatNumber(locale, sessionDetail.session.startingBalance)}</strong>
-                  </div>
-                </div>
-              </div>
-              <div className="detail-block">
-                <h3>{t("position")}</h3>
-                <div className="position-grid">
-                  <div>
                     <span className="meta-label">{t("quantity")}</span>
                     <strong>{formatNumber(locale, sessionDetail.position?.quantity)}</strong>
-                  </div>
-                  <div>
-                    <span className="meta-label">{t("avgEntryPrice")}</span>
-                    <strong>{formatNumber(locale, sessionDetail.position?.avgEntryPrice)}</strong>
                   </div>
                   <div>
                     <span className="meta-label">{t("markPrice")}</span>
@@ -149,42 +114,44 @@ export function SessionBoard(props: SessionBoardProps) {
                     <span className="meta-label">{t("unrealizedPnl")}</span>
                     <strong>{formatNumber(locale, sessionDetail.position?.unrealizedPnl)}</strong>
                   </div>
+                </div>
+              </div>
+              <details className="session-disclosure detail-block">
+                <summary>{t("moreInfo")}</summary>
+                <div className="detail-grid">
+                  <div>
+                    <span className="meta-label">{t("strategy")}</span>
+                    <strong>{sessionDetail.session.strategyName}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">{t("timeframe")}</span>
+                    <strong>{sessionDetail.session.timeframe}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">{t("avgEntryPrice")}</span>
+                    <strong>{formatNumber(locale, sessionDetail.position?.avgEntryPrice)}</strong>
+                  </div>
                   <div>
                     <span className="meta-label">{t("realizedPnl")}</span>
                     <strong>{formatNumber(locale, sessionDetail.position?.realizedPnl)}</strong>
                   </div>
                 </div>
-              </div>
-              <div className="detail-block">
-                <h3>{t("timelineTitle")}</h3>
-                <div className="timeline-list">
-                  {timeline.map((item) => (
-                    <div className="timeline-item" key={item.label}>
-                      <span className="timeline-dot"></span>
-                      <div>
-                        <span className="meta-label">{item.label}</span>
-                        <strong>{item.value}</strong>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="detail-block">
-                <h3>{t("recentOrders")}</h3>
-                <div className="orders">
-                  {sessionDetail.recentOrders.length ? (
-                    sessionDetail.recentOrders.map((order, index) => (
+                <div className="orders orders-compact">
+                  {sessionDetail.recentOrders.slice(0, 2).length ? (
+                    sessionDetail.recentOrders.slice(0, 2).map((order, index) => (
                       <div className="order-pill" key={`${order.side}-${index}`}>
                         <span>{order.side}</span>
                         <span>{formatNumber(locale, order.executedPrice)}</span>
-                        <span>{formatNumber(locale, order.quantity)}</span>
                       </div>
                     ))
                   ) : (
                     <p>{t("noOrders")}</p>
                   )}
                 </div>
-              </div>
+                <p className="panel-caption panel-caption-compact">
+                  {t("generatedAt", { value: formatDateTime(locale, sessionDetail.session.startedAt) })}
+                </p>
+              </details>
             </>
           ) : isDetailLoading ? (
             <p id="session-placeholder">{t("sessionDetailLoading")}</p>

@@ -6,6 +6,7 @@ type RecommendationBoardProps = {
   t: TFunction;
   locale: Locale;
   market: string;
+  onMarketChange: (market: string) => void;
   apiHealthy: boolean;
   pendingAction: string;
   recommendations: Recommendation[];
@@ -24,6 +25,19 @@ export function RecommendationBoard(props: RecommendationBoardProps) {
             {t("recommendationsCopy")}
           </p>
         </div>
+      </div>
+      <div className="recommendation-toolbar">
+        <p className="panel-caption">{t("marketPickerCopy")}</p>
+        <label className="field field-inline">
+          <span>{t("marketPickerLabel")}</span>
+          <select value={market} onChange={(event) => props.onMarketChange(event.target.value)}>
+            <option value="KRW-BTC">KRW-BTC</option>
+            <option value="KRW-ETH">KRW-ETH</option>
+            <option value="KRW-XRP">KRW-XRP</option>
+            <option value="KRW-SOL">KRW-SOL</option>
+            <option value="KRW-DOGE">KRW-DOGE</option>
+          </select>
+        </label>
       </div>
       <div id="recommendations" className="recommendation-grid">
         {recommendations.length ? (
@@ -51,15 +65,10 @@ export function RecommendationBoard(props: RecommendationBoardProps) {
                   <span>{t("avgMdd")}</span>
                   <strong>{formatPercent(locale, item.avgTestDrawdown)}</strong>
                 </div>
-                <div className="metric-box">
-                  <span>{t("markets")}</span>
-                  <strong>{item.marketCount}</strong>
-                </div>
               </div>
               <p className="recommendation-rankline">
-                {t("rankLabel").toUpperCase()} {item.rank}
+                {t("markets")} {item.marketCount} · {t("marketApplyTo", { market })}
               </p>
-              <p>{t("recommendationCopy", { market })}</p>
               <button
                 className="action-button"
                 onClick={() => props.onStartSession(item.rank)}

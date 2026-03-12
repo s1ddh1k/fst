@@ -7,4 +7,8 @@ export { createTemplateBreakoutTrendVolumeStrategy } from "./template-breakout-t
 export { createTemplateMeanReversionBandsStrategy } from "./template-mean-reversion-bands.js";
 export { createVolatilityBreakoutStrategy } from "./volatility-breakout.js";
 export { createVolumeFilteredBreakoutStrategy } from "./volume-filtered-breakout.js";
+export { createZscoreRsiReversionStrategy } from "./zscore-rsi-reversion.js";
+export { createZscoreRsiReversionGuardedStrategy } from "./zscore-rsi-reversion-guarded.js";
+export { createZscoreRsiUptrendReversionStrategy } from "./zscore-rsi-uptrend-reversion.js";
+export { createZscoreRsiTrendPullbackStrategy } from "./zscore-rsi-trend-pullback.js";
 export type { Candle, Signal, Strategy, StrategyContext } from "./types.js";

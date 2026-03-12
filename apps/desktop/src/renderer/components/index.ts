@@ -1,6 +1,9 @@
 export { OpsBoard } from "./OpsBoard";
+export { OperationsPage } from "./OperationsPage";
 export { OverviewBand } from "./OverviewBand";
+export { OverviewPage } from "./OverviewPage";
 export { RecommendationBoard } from "./RecommendationBoard";
 export { SessionBoard } from "./SessionBoard";
 export { Sidebar } from "./Sidebar";
 export { SnapshotBoard } from "./SnapshotBoard";
+export { StrategiesPage } from "./StrategiesPage";

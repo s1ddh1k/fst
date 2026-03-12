@@ -6,7 +6,11 @@ import {
   createTemplateBreakoutTrendVolumeStrategy,
   createTemplateMeanReversionBandsStrategy,
   createVolatilityBreakoutStrategy,
-  createVolumeFilteredBreakoutStrategy
+  createVolumeFilteredBreakoutStrategy,
+  createZscoreRsiReversionGuardedStrategy,
+  createZscoreRsiReversionStrategy,
+  createZscoreRsiUptrendReversionStrategy,
+  createZscoreRsiTrendPullbackStrategy
 } from "./strategies-bridge.js";
 
 function cartesianProduct<T>(items: T[][]): T[][] {
@@ -159,6 +163,189 @@ export function buildStrategyGrid(strategyName: string): Strategy[] {
             maxVolatility,
             cciWindow,
             minCci
+          })
+      );
+    }
+
+    case "zscore-rsi-reversion": {
+      const products = cartesianProduct<number>([
+        [20, 30],
+        [-1.75, -2],
+        [-0.25, 0],
+        [14],
+        [30, 35],
+        [50, 55],
+        [20],
+        [0.03, 0.04]
+      ]);
+
+      return products.map(
+        ([
+          zScoreWindow,
+          minNegativeZScore,
+          exitZScore,
+          rsiPeriod,
+          maxEntryRsi,
+          exitRsi,
+          volatilityWindow,
+          maxVolatility
+        ]) =>
+          createZscoreRsiReversionStrategy({
+            zScoreWindow,
+            minNegativeZScore,
+            exitZScore,
+            rsiPeriod,
+            maxEntryRsi,
+            exitRsi,
+            volatilityWindow,
+            maxVolatility
+          })
+      );
+    }
+
+    case "zscore-rsi-reversion-guarded": {
+      const products = cartesianProduct<number>([
+        [20],
+        [-2],
+        [0],
+        [14],
+        [35],
+        [55],
+        [20],
+        [0.03],
+        [0.02, 0.025, 0.03],
+        [24, 36, 48]
+      ]);
+
+      return products.map(
+        ([
+          zScoreWindow,
+          minNegativeZScore,
+          exitZScore,
+          rsiPeriod,
+          maxEntryRsi,
+          exitRsi,
+          volatilityWindow,
+          maxVolatility,
+          stopLossPct,
+          maxHoldBars
+        ]) =>
+          createZscoreRsiReversionGuardedStrategy({
+            zScoreWindow,
+            minNegativeZScore,
+            exitZScore,
+            rsiPeriod,
+            maxEntryRsi,
+            exitRsi,
+            volatilityWindow,
+            maxVolatility,
+            stopLossPct,
+            maxHoldBars
+          })
+      );
+    }
+
+    case "zscore-rsi-uptrend-reversion": {
+      const products = cartesianProduct<number>([
+        [20],
+        [-2],
+        [0],
+        [14],
+        [35],
+        [55],
+        [20],
+        [0.03],
+        [0.02, 0.025],
+        [24, 36],
+        [50],
+        [20],
+        [20],
+        [0.04, 0.05]
+      ]);
+
+      return products.map(
+        ([
+          zScoreWindow,
+          minNegativeZScore,
+          exitZScore,
+          rsiPeriod,
+          maxEntryRsi,
+          exitRsi,
+          volatilityWindow,
+          maxVolatility,
+          stopLossPct,
+          maxHoldBars,
+          regimeTrendWindow,
+          regimeMomentumLookback,
+          regimeVolatilityWindow,
+          regimeVolatilityThreshold
+        ]) =>
+          createZscoreRsiUptrendReversionStrategy({
+            zScoreWindow,
+            minNegativeZScore,
+            exitZScore,
+            rsiPeriod,
+            maxEntryRsi,
+            exitRsi,
+            volatilityWindow,
+            maxVolatility,
+            stopLossPct,
+            maxHoldBars,
+            regimeTrendWindow,
+            regimeMomentumLookback,
+            regimeVolatilityWindow,
+            regimeVolatilityThreshold
+          })
+      );
+    }
+
+    case "zscore-rsi-trend-pullback": {
+      const products = cartesianProduct<number>([
+        [20, 30],
+        [-1.75, -2],
+        [0],
+        [14],
+        [35, 40],
+        [55],
+        [20],
+        [0.03],
+        [0.02, 0.025],
+        [24, 36],
+        [30, 50],
+        [10, 20],
+        [-0.01, 0]
+      ]);
+
+      return products.map(
+        ([
+          zScoreWindow,
+          minNegativeZScore,
+          exitZScore,
+          rsiPeriod,
+          maxEntryRsi,
+          exitRsi,
+          volatilityWindow,
+          maxVolatility,
+          stopLossPct,
+          maxHoldBars,
+          trendWindow,
+          momentumLookback,
+          minMomentum
+        ]) =>
+          createZscoreRsiTrendPullbackStrategy({
+            zScoreWindow,
+            minNegativeZScore,
+            exitZScore,
+            rsiPeriod,
+            maxEntryRsi,
+            exitRsi,
+            volatilityWindow,
+            maxVolatility,
+            stopLossPct,
+            maxHoldBars,
+            trendWindow,
+            momentumLookback,
+            minMomentum
           })
       );
     }

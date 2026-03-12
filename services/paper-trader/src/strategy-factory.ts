@@ -5,7 +5,11 @@ import {
   createTemplateBreakoutTrendVolumeStrategy,
   createTemplateMeanReversionBandsStrategy,
   createVolatilityBreakoutStrategy,
-  createVolumeFilteredBreakoutStrategy
+  createVolumeFilteredBreakoutStrategy,
+  createZscoreRsiReversionGuardedStrategy,
+  createZscoreRsiReversionStrategy,
+  createZscoreRsiUptrendReversionStrategy,
+  createZscoreRsiTrendPullbackStrategy
 } from "../../../research/strategies/src/index.js";
 import type { Strategy } from "../../../research/strategies/src/types.js";
 
@@ -46,6 +50,14 @@ export function createStrategyFromRecommendation(params: {
       return createTemplateBreakoutTrendVolumeStrategy(strategyParameters);
     case "template-mean-reversion-bands":
       return createTemplateMeanReversionBandsStrategy(strategyParameters);
+    case "zscore-rsi-reversion":
+      return createZscoreRsiReversionStrategy(strategyParameters);
+    case "zscore-rsi-reversion-guarded":
+      return createZscoreRsiReversionGuardedStrategy(strategyParameters);
+    case "zscore-rsi-uptrend-reversion":
+      return createZscoreRsiUptrendReversionStrategy(strategyParameters);
+    case "zscore-rsi-trend-pullback":
+      return createZscoreRsiTrendPullbackStrategy(strategyParameters);
     default:
       throw new Error(`Unsupported strategy for paper trading: ${params.strategyName}`);
   }

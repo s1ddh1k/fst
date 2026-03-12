@@ -18,19 +18,28 @@ async function run() {
       DESKTOP_API_BASE_URL: process.env.DESKTOP_API_BASE_URL ?? "http://127.0.0.1:8787"
     }
   });
+  const electronProcess = app.process();
 
   try {
     const page = await app.firstWindow();
+    page.setDefaultTimeout(10000);
 
     await page.waitForLoadState("domcontentloaded");
-    await page.waitForSelector("#ops-title");
+    await page.waitForSelector(".market-strip");
+    await page.waitForSelector("#recommendation-count");
+
+    await page.getByRole("button", { name: /전략|Strategies/i }).click();
     await page.waitForSelector("#recommendations-title");
+
+    await page.getByRole("button", { name: /세션|Sessions/i }).click();
     await page.waitForSelector("#sessions-title");
     await page.waitForSelector("#session-focus-title");
+
+    await page.getByRole("button", { name: /운영|Operations/i }).click();
+    await page.waitForSelector("#ops-title");
     await page.waitForFunction(() => {
-      const tmuxText = document.querySelector("#tmux-status-text")?.textContent?.trim();
       const runbookCount = document.querySelectorAll("#runbook-list .runbook-item").length;
-      return tmuxText && tmuxText !== "확인 중" && runbookCount > 0;
+      return runbookCount > 0;
     });
 
     await page.screenshot({
@@ -39,19 +48,19 @@ async function run() {
     });
 
     const title = await page.title();
-    const tmuxText = await page.locator("#tmux-status-text").innerText();
-    const apiText = await page.locator("#api-status-text").innerText();
+    const activeStage = await page.locator(".stage-title").innerText();
+    const apiText = await page.locator("#api-banner").innerText();
     const recommendationCount = await page.locator("#recommendations .recommendation-card").count();
     const sessionCount = await page.locator("#sessions .session-row").count();
     const runbookCount = await page.locator("#runbook-list .runbook-item").count();
-    const detailText = await page.locator("#session-detail").innerText();
+    const detailText = await page.locator("#session-detail").innerText().catch(() => "");
 
     console.log(
       JSON.stringify(
         {
           ok: true,
           title,
-          tmuxText,
+          activeStage,
           apiText,
           recommendationCount,
           sessionCount,
@@ -64,11 +73,24 @@ async function run() {
       )
     );
   } finally {
-    await app.close();
+    await Promise.race([
+      app.close().catch(() => {}),
+      new Promise((resolve) => {
+        setTimeout(resolve, 2000);
+      })
+    ]);
+
+    if (electronProcess && !electronProcess.killed) {
+      electronProcess.kill("SIGKILL");
+    }
   }
 }
 
 run().catch((error) => {
   console.error(error);
   process.exitCode = 1;
+}).finally(() => {
+  setTimeout(() => {
+    process.exit(process.exitCode ?? 0);
+  }, 0);
 });

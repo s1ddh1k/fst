@@ -14,6 +14,7 @@ type RuntimeState = {
   quantity: number;
   avgEntryPrice: number;
   realizedPnl: number;
+  entryCandleIndex: number | null;
   candles: Array<{
     marketCode: string;
     timeframe: string;
@@ -133,6 +134,7 @@ export async function runRecommendedLivePaperTrading(params: {
     quantity: existingPosition?.quantity ?? 0,
     avgEntryPrice: existingPosition?.avgEntryPrice ?? 0,
     realizedPnl: existingPosition?.realizedPnl ?? 0,
+    entryCandleIndex: existingPosition ? Math.max(0, recentCandles.length - 1) : null,
     candles: recentCandles
   };
 
@@ -158,7 +160,15 @@ export async function runRecommendedLivePaperTrading(params: {
       const signal = strategy.generateSignal({
         candles: state.candles,
         index: state.candles.length - 1,
-        hasPosition: state.quantity > 0
+        hasPosition: state.quantity > 0,
+        currentPosition:
+          state.quantity > 0 && state.entryCandleIndex !== null
+            ? {
+                entryPrice: state.avgEntryPrice,
+                quantity: state.quantity,
+                barsHeld: Math.max(0, state.candles.length - 1 - state.entryCandleIndex)
+              }
+            : undefined
       });
 
       if (signal === "BUY" && state.quantity === 0 && state.cash > 0) {
@@ -181,6 +191,7 @@ export async function runRecommendedLivePaperTrading(params: {
         state.cash = 0;
         state.quantity = quantity;
         state.avgEntryPrice = executedPrice;
+        state.entryCandleIndex = state.candles.length - 1;
       }
 
       if (signal === "SELL" && state.quantity > 0) {
@@ -205,6 +216,7 @@ export async function runRecommendedLivePaperTrading(params: {
         state.realizedPnl += realizedTradePnl;
         state.quantity = 0;
         state.avgEntryPrice = 0;
+        state.entryCandleIndex = null;
       }
 
       await syncMarkToDb({
