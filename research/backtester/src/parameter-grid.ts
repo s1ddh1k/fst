@@ -302,18 +302,18 @@ export function buildStrategyGrid(strategyName: string): Strategy[] {
     case "zscore-rsi-trend-pullback": {
       const products = cartesianProduct<number>([
         [20, 30],
-        [-1.75, -2],
+        [-1.5, -1.75, -2],
         [0],
         [14],
-        [35, 40],
+        [35, 40, 45],
         [55],
         [20],
         [0.03],
         [0.02, 0.025],
         [24, 36],
-        [30, 50],
+        [30, 40, 50],
         [10, 20],
-        [-0.01, 0]
+        [-0.02, -0.01, -0.005, 0]
       ]);
 
       return products.map(

@@ -58,6 +58,32 @@ function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
 }
 
+function createStrategyByNameWithParameters(
+  strategyName: string,
+  parameters: Record<string, number>
+): ReturnType<typeof createStrategyByName> {
+  const strategy = createStrategyByName(strategyName);
+
+  return {
+    ...strategy,
+    parameters
+  };
+}
+
+function createStrategyCandidate(params: {
+  strategyName: string;
+  parametersJson?: string;
+}): ReturnType<typeof createStrategyByName> {
+  if (!params.parametersJson) {
+    return createStrategyByName(params.strategyName);
+  }
+
+  return createStrategyByNameWithParameters(
+    params.strategyName,
+    parseJson<Record<string, number>>(params.parametersJson)
+  );
+}
+
 function buildPortfolioLabel(
   portfolio: Array<{
     strategy: { name: string; parameters: Record<string, number> };
@@ -117,8 +143,13 @@ async function main(): Promise<void> {
   const sweep = process.argv.includes("--sweep");
   const sweepAll = process.argv.includes("--sweep-all");
   const walkForwardSweep = process.argv.includes("--walk-forward-sweep");
+  const baselineEvaluate = process.argv.includes("--baseline-evaluate");
+  const candidateSweep = process.argv.includes("--candidate-sweep");
+  const candidateWalkForward = process.argv.includes("--candidate-walk-forward");
   const paperCandidates = process.argv.includes("--paper-candidates");
   const portfolioSweep = process.argv.includes("--portfolio-sweep");
+  const saveRegime = process.argv.includes("--save-regime");
+  const parametersJson = getOption(process.argv, "--parameters-json");
   const trainingDays = Number.parseInt(
     getOption(process.argv, "--training-days") ?? String(holdoutDays * 2),
     10
@@ -140,7 +171,94 @@ async function main(): Promise<void> {
   });
 
   try {
-    if (walkForwardSweep) {
+    if (baselineEvaluate) {
+      const strategy = createStrategyCandidate({
+        strategyName,
+        parametersJson
+      });
+      const markets = await getSelectedUniverseMarketsWithMinimumCandles({
+        universeName,
+        timeframe,
+        minCandles,
+        limit: marketLimit
+      });
+      const holdoutRows = [];
+      const walkForwardSummaries = [];
+
+      for (const { marketCode: selectedMarketCode } of markets) {
+        try {
+          const holdout = await executeHoldoutBacktest({
+            marketCode: selectedMarketCode,
+            timeframe,
+            limit,
+            holdoutDays,
+            strategy
+          });
+          holdoutRows.push({
+            strategyName: holdout.strategyName,
+            marketCode: holdout.marketCode,
+            trainReturn: holdout.train.totalReturn,
+            testReturn: holdout.test.totalReturn,
+            testDrawdown: holdout.test.maxDrawdown,
+            testWinRate: holdout.test.winRate,
+            testTradeCount: holdout.test.tradeCount
+          });
+        } catch {
+          continue;
+        }
+
+        try {
+          walkForwardSummaries.push(
+            await executeWalkForwardBacktest({
+              marketCode: selectedMarketCode,
+              timeframe,
+              limit,
+              holdoutDays,
+              trainingDays,
+              stepDays,
+              strategy
+            })
+          );
+        } catch {
+          continue;
+        }
+      }
+
+      const walkForwardRows =
+        walkForwardSummaries.length === 0
+          ? []
+          : [
+              {
+                strategyName: strategy.name,
+                parameters: JSON.stringify(strategy.parameters),
+                marketCount: walkForwardSummaries.length,
+                averageWindows:
+                  walkForwardSummaries.reduce((sum, item) => sum + item.windowCount, 0) /
+                  walkForwardSummaries.length,
+                avgTrainReturn:
+                  walkForwardSummaries.reduce((sum, item) => sum + item.averageTrainReturn, 0) /
+                  walkForwardSummaries.length,
+                avgTestReturn:
+                  walkForwardSummaries.reduce((sum, item) => sum + item.averageTestReturn, 0) /
+                  walkForwardSummaries.length,
+                avgTestDrawdown:
+                  walkForwardSummaries.reduce((sum, item) => sum + item.averageTestDrawdown, 0) /
+                  walkForwardSummaries.length,
+                avgTestTradeCount:
+                  walkForwardSummaries.reduce((sum, item) => sum + item.averageTestTradeCount, 0) /
+                  walkForwardSummaries.length
+              }
+            ];
+
+      console.log("BASELINE HOLDOUT");
+      console.log(formatComparisonTable(holdoutRows));
+      console.log("");
+      console.log("BASELINE WALK_FORWARD");
+      console.log(formatWalkForwardRankingTable(walkForwardRows));
+      return;
+    }
+
+    if (walkForwardSweep || candidateWalkForward) {
       const markets = await getSelectedUniverseMarketsWithMinimumCandles({
         universeName,
         timeframe,
@@ -228,42 +346,46 @@ async function main(): Promise<void> {
         .filter((value) => value.marketCount >= minMarkets)
         .sort((left, right) => right.avgTestReturn - left.avgTestReturn);
 
-      await replaceStrategyRegimes({
-        regimeName: "walk-forward-recommendation",
-        universeName,
-        timeframe,
-        holdoutDays,
-        metadata: {
-          sourceLabel: "walk-forward-sweep",
-          trainingDays,
-          stepDays,
-          minMarkets,
-          candidatePoolSize: rows.length,
-          bestStrategyName: rows[0]?.strategyName,
-          trainStartAt: trainBounds?.start,
-          trainEndAt: trainBounds?.end,
-          testStartAt: testBounds?.start,
-          testEndAt: testBounds?.end
-        },
-        rows: rows.slice(0, 10).map((row, index) => ({
-          strategyType: "single",
-            strategyNames: [row.strategyName],
-            parameters: {
-              strategyParameters: parseJson<Record<string, number>>(row.parameters),
-              trainingDays,
-              holdoutDays,
-              stepDays,
-              averageWindows: row.averageWindows,
-              averageTestTradeCount: row.avgTestTradeCount
-            },
-            weights: [],
-            marketCount: row.marketCount,
-            avgTrainReturn: row.avgTrainReturn,
-            avgTestReturn: row.avgTestReturn,
-            avgTestDrawdown: row.avgTestDrawdown,
-            rank: index + 1
-          }))
-      });
+      if (walkForwardSweep || candidateWalkForward || saveRegime) {
+        await replaceStrategyRegimes({
+          regimeName: candidateWalkForward
+            ? "candidate-walk-forward-recommendation"
+            : "walk-forward-recommendation",
+          universeName,
+          timeframe,
+          holdoutDays,
+          metadata: {
+            sourceLabel: candidateWalkForward ? "candidate-walk-forward" : "walk-forward-sweep",
+            trainingDays,
+            stepDays,
+            minMarkets,
+            candidatePoolSize: rows.length,
+            bestStrategyName: rows[0]?.strategyName,
+            trainStartAt: trainBounds?.start,
+            trainEndAt: trainBounds?.end,
+            testStartAt: testBounds?.start,
+            testEndAt: testBounds?.end
+          },
+          rows: rows.slice(0, 10).map((row, index) => ({
+            strategyType: "single",
+              strategyNames: [row.strategyName],
+              parameters: {
+                strategyParameters: parseJson<Record<string, number>>(row.parameters),
+                trainingDays,
+                holdoutDays,
+                stepDays,
+                averageWindows: row.averageWindows,
+                averageTestTradeCount: row.avgTestTradeCount
+              },
+              weights: [],
+              marketCount: row.marketCount,
+              avgTrainReturn: row.avgTrainReturn,
+              avgTestReturn: row.avgTestReturn,
+              avgTestDrawdown: row.avgTestDrawdown,
+              rank: index + 1
+            }))
+        });
+      }
 
       if (paperCandidates) {
         const candidateRows = rows
@@ -431,7 +553,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (sweep || sweepAll) {
+    if (sweep || sweepAll || candidateSweep) {
       const markets = await getSelectedUniverseMarketsWithMinimumCandles({
         universeName,
         timeframe,
@@ -507,33 +629,39 @@ async function main(): Promise<void> {
         .filter((value) => value.marketCount >= minMarkets)
         .sort((left, right) => right.avgTestReturn - left.avgTestReturn);
 
-      await replaceStrategyRegimes({
-        regimeName: "strategy-recommendation",
-        universeName,
-        timeframe,
-        holdoutDays,
-        metadata: {
-          sourceLabel: sweepAll ? "holdout-sweep-all" : "holdout-sweep",
-          minMarkets,
-          candidatePoolSize: rankingRows.length,
-          bestStrategyName: rankingRows[0]?.strategyName,
-          trainStartAt: trainBounds?.start,
-          trainEndAt: trainBounds?.end,
-          testStartAt: testBounds?.start,
-          testEndAt: testBounds?.end
-        },
-        rows: rankingRows.slice(0, 10).map((row, index) => ({
-          strategyType: "single",
-          strategyNames: [row.strategyName],
-          parameters: parseJson<Record<string, number>>(row.parameters),
-          weights: [],
-          marketCount: row.marketCount,
-          avgTrainReturn: row.avgTrainReturn,
-          avgTestReturn: row.avgTestReturn,
-          avgTestDrawdown: row.avgTestDrawdown,
-          rank: index + 1
-        }))
-      });
+      if (sweep || sweepAll || candidateSweep || saveRegime) {
+        await replaceStrategyRegimes({
+          regimeName: candidateSweep ? "candidate-holdout-recommendation" : "strategy-recommendation",
+          universeName,
+          timeframe,
+          holdoutDays,
+          metadata: {
+            sourceLabel: candidateSweep
+              ? "candidate-holdout-sweep"
+              : sweepAll
+                ? "holdout-sweep-all"
+                : "holdout-sweep",
+            minMarkets,
+            candidatePoolSize: rankingRows.length,
+            bestStrategyName: rankingRows[0]?.strategyName,
+            trainStartAt: trainBounds?.start,
+            trainEndAt: trainBounds?.end,
+            testStartAt: testBounds?.start,
+            testEndAt: testBounds?.end
+          },
+          rows: rankingRows.slice(0, 10).map((row, index) => ({
+            strategyType: "single",
+            strategyNames: [row.strategyName],
+            parameters: parseJson<Record<string, number>>(row.parameters),
+            weights: [],
+            marketCount: row.marketCount,
+            avgTrainReturn: row.avgTrainReturn,
+            avgTestReturn: row.avgTestReturn,
+            avgTestDrawdown: row.avgTestDrawdown,
+            rank: index + 1
+          }))
+        });
+      }
 
       console.log(formatRankingTable(rankingRows));
       return;
@@ -599,7 +727,10 @@ async function main(): Promise<void> {
       return;
     }
 
-    const strategy = createStrategyByName(strategyName);
+    const strategy = createStrategyCandidate({
+      strategyName,
+      parametersJson
+    });
     const result = await executeHoldoutBacktest({
       marketCode,
       timeframe,
