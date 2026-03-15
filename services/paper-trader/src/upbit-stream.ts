@@ -7,8 +7,8 @@ export type UpbitTickerMessage = {
   stream_type: string;
 };
 
-export async function streamTicker(params: {
-  marketCode: string;
+export async function streamTickers(params: {
+  marketCodes: string[];
   onMessage: (message: UpbitTickerMessage) => Promise<void> | void;
   maxEvents?: number;
 }): Promise<void> {
@@ -24,7 +24,7 @@ export async function streamTicker(params: {
           },
           {
             type: "ticker",
-            codes: [params.marketCode],
+            codes: params.marketCodes,
             is_only_realtime: true
           },
           {
@@ -57,5 +57,17 @@ export async function streamTicker(params: {
 
     websocket.addEventListener("close", () => resolve());
     websocket.addEventListener("error", (error: Event) => reject(error));
+  });
+}
+
+export async function streamTicker(params: {
+  marketCode: string;
+  onMessage: (message: UpbitTickerMessage) => Promise<void> | void;
+  maxEvents?: number;
+}): Promise<void> {
+  await streamTickers({
+    marketCodes: [params.marketCode],
+    onMessage: params.onMessage,
+    maxEvents: params.maxEvents
   });
 }

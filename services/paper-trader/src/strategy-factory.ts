@@ -1,4 +1,5 @@
 import {
+  createIntegratedMultiFactorStrategy,
   createMovingAverageCrossStrategy,
   createRegimeFilteredMovingAverageCrossStrategy,
   createRsiMeanReversionStrategy,
@@ -9,9 +10,13 @@ import {
   createZscoreRsiReversionGuardedStrategy,
   createZscoreRsiReversionStrategy,
   createZscoreRsiUptrendReversionStrategy,
-  createZscoreRsiTrendPullbackStrategy
+  createZscoreRsiTrendPullbackStrategy,
+  createResidualReversionStrategy,
+  createRelativeMomentumPullbackStrategy,
+  createLeaderPullbackStateMachineStrategy,
+  createRelativeBreakoutRotationStrategy
 } from "../../../research/strategies/src/index.js";
-import type { Strategy } from "../../../research/strategies/src/types.js";
+import type { Strategy, ScoredStrategy } from "../../../research/strategies/src/types.js";
 
 function toNumberRecord(value: unknown): Record<string, number> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -36,6 +41,8 @@ export function createStrategyFromRecommendation(params: {
       : toNumberRecord(rootParameters);
 
   switch (params.strategyName) {
+    case "integrated-multi-factor":
+      return createIntegratedMultiFactorStrategy(strategyParameters);
     case "moving-average-cross":
       return createMovingAverageCrossStrategy(strategyParameters);
     case "volatility-breakout":
@@ -61,4 +68,39 @@ export function createStrategyFromRecommendation(params: {
     default:
       throw new Error(`Unsupported strategy for paper trading: ${params.strategyName}`);
   }
+}
+
+export function createScoredStrategyFromRecommendation(params: {
+  strategyName: string;
+  parametersJson: unknown;
+}): ScoredStrategy {
+  const rootParameters = params.parametersJson;
+  const strategyParameters =
+    rootParameters &&
+    typeof rootParameters === "object" &&
+    "strategyParameters" in rootParameters
+      ? toNumberRecord((rootParameters as Record<string, unknown>).strategyParameters)
+      : toNumberRecord(rootParameters);
+
+  switch (params.strategyName) {
+    case "relative-momentum-pullback":
+      return createRelativeMomentumPullbackStrategy(strategyParameters);
+    case "leader-pullback-state-machine":
+      return createLeaderPullbackStateMachineStrategy(strategyParameters);
+    case "relative-breakout-rotation":
+      return createRelativeBreakoutRotationStrategy(strategyParameters);
+    case "residual-reversion":
+      return createResidualReversionStrategy(strategyParameters);
+    default:
+      throw new Error(`Unsupported scored strategy for paper trading: ${params.strategyName}`);
+  }
+}
+
+export function isScoredStrategy(strategyName: string): boolean {
+  return [
+    "relative-momentum-pullback",
+    "leader-pullback-state-machine",
+    "relative-breakout-rotation",
+    "residual-reversion"
+  ].includes(strategyName);
 }

@@ -1,9 +1,2 @@
-export { OpsBoard } from "./OpsBoard";
-export { OperationsPage } from "./OperationsPage";
-export { OverviewBand } from "./OverviewBand";
-export { OverviewPage } from "./OverviewPage";
-export { RecommendationBoard } from "./RecommendationBoard";
-export { SessionBoard } from "./SessionBoard";
-export { Sidebar } from "./Sidebar";
-export { SnapshotBoard } from "./SnapshotBoard";
-export { StrategiesPage } from "./StrategiesPage";
+// All UI is now in App.tsx as a single-flow layout.
+// Legacy components have been removed.

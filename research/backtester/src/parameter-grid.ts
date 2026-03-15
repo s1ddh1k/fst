@@ -1,5 +1,7 @@
 import type { Strategy } from "./types.js";
+import type { ScoredStrategy } from "../../strategies/src/types.js";
 import {
+  createIntegratedMultiFactorStrategy,
   createMovingAverageCrossStrategy,
   createRegimeFilteredMovingAverageCrossStrategy,
   createRsiMeanReversionStrategy,
@@ -12,6 +14,10 @@ import {
   createZscoreRsiUptrendReversionStrategy,
   createZscoreRsiTrendPullbackStrategy
 } from "./strategies-bridge.js";
+import { createResidualReversionStrategy } from "../../strategies/src/residual-reversion-strategy.js";
+import { createLeaderPullbackStateMachineStrategy } from "../../strategies/src/leader-pullback-state-machine.js";
+import { createRelativeBreakoutRotationStrategy } from "../../strategies/src/relative-breakout-rotation.js";
+import { createRelativeMomentumPullbackStrategy } from "../../strategies/src/relative-momentum-pullback.js";
 
 function cartesianProduct<T>(items: T[][]): T[][] {
   return items.reduce<T[][]>(
@@ -23,6 +29,45 @@ function cartesianProduct<T>(items: T[][]): T[][] {
 
 export function buildStrategyGrid(strategyName: string): Strategy[] {
   switch (strategyName) {
+    case "integrated-multi-factor": {
+      const products = cartesianProduct<number>([
+        [34, 55],
+        [10, 20],
+        [-1.1, -1.5],
+        [38, 42],
+        [1.05, 1.15],
+        [0.025, 0.035],
+        [0.35, 0.45],
+        [-0.05, 0.05]
+      ]);
+
+      return products.map(
+        ([
+          trendWindow,
+          momentumLookback,
+          entryZScore,
+          entryRsi,
+          minVolumeSpike,
+          maxHistoricalVolatility,
+          entryThreshold,
+          minBreadthScore
+        ]) =>
+          createIntegratedMultiFactorStrategy({
+            trendWindow,
+            momentumLookback,
+            entryZScore,
+            entryRsi,
+            minVolumeSpike,
+            maxHistoricalVolatility,
+            entryThreshold,
+            minBreadthScore,
+            exitThreshold: 0.3,
+            entryMinFactors: 4,
+            exitMinFactors: 2
+          })
+      );
+    }
+
     case "moving-average-cross": {
       const pairs = [
         [5, 20],
@@ -352,5 +397,88 @@ export function buildStrategyGrid(strategyName: string): Strategy[] {
 
     default:
       throw new Error(`Unknown strategy grid: ${strategyName}`);
+  }
+}
+
+export function buildScoredStrategyGrid(strategyName: string): ScoredStrategy[] {
+  switch (strategyName) {
+    case "relative-momentum-pullback": {
+      const products = cartesianProduct<number>([
+        [0.70, 0.80, 0.90],
+        [0.05, 0.15],
+        [0.6, 0.9, 1.2],
+        [1.8, 2.2, 2.6]
+      ]);
+
+      return products.map(
+        ([minStrengthPct, minRiskOn, pullbackZ, trailAtrMult]) =>
+          createRelativeMomentumPullbackStrategy({
+            minStrengthPct,
+            minRiskOn,
+            pullbackZ,
+            trailAtrMult
+          })
+      );
+    }
+
+    case "residual-reversion": {
+      const products = cartesianProduct<number>([
+        [0.15, 0.20, 0.25, 0.30],
+        [0.10, 0.15, 0.20],
+        [0.020, 0.025, 0.030],
+        [24, 36, 48]
+      ]);
+
+      return products.map(
+        ([entryThreshold, exitThreshold, stopLossPct, maxHoldBars]) =>
+          createResidualReversionStrategy({
+            entryThreshold,
+            exitThreshold,
+            stopLossPct,
+            maxHoldBars
+          })
+      );
+    }
+
+    case "leader-pullback-state-machine": {
+      const products = cartesianProduct<number>([
+        [0.60, 0.70, 0.80],
+        [0.5, 0.9, 1.3],
+        [2, 4, 6],
+        [1.8, 2.2, 2.6]
+      ]);
+
+      return products.map(
+        ([strengthFloor, pullbackAtr, setupExpiryBars, trailAtrMult]) =>
+          createLeaderPullbackStateMachineStrategy({
+            strengthFloor,
+            pullbackAtr,
+            setupExpiryBars,
+            trailAtrMult
+          })
+      );
+    }
+
+    case "relative-breakout-rotation": {
+      const products = cartesianProduct<number>([
+        [10, 20, 30],
+        [0.60, 0.70, 0.80],
+        [0.8, 1.2, 1.6],
+        [1.8, 2.2, 2.6]
+      ]);
+
+      return products.map(
+        ([breakoutLookback, strengthFloor, maxExtensionAtr, trailAtrMult]) =>
+          createRelativeBreakoutRotationStrategy({
+            breakoutLookback,
+            strengthFloor,
+            maxExtensionAtr,
+            trailAtrMult
+          })
+      );
+    }
+
+    default:
+      throw new Error(`Unknown scored strategy grid: ${strategyName}`);
   }
 }

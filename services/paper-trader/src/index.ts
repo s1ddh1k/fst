@@ -2,6 +2,7 @@ import { closeDb } from "./db.js";
 import { runRecommendedLivePaperTrading } from "./runtime.js";
 import { startPaperTraderServer } from "./server.js";
 import {
+  getRecommendationForSession,
   getPaperSessionById,
   getPaperSessionStatus,
   getRecommendationSnapshots,
@@ -71,14 +72,8 @@ async function main(): Promise<void> {
     }
 
     if (command === "start-session") {
-      const marketCode = getOption(process.argv, "--market");
-
-      if (!marketCode) {
-        throw new Error("--market is required");
-      }
-
       const { recommendation, session } = await startRecommendedPaperSession({
-        marketCode,
+        marketCode: getOption(process.argv, "--market"),
         rank: Number.parseInt(getOption(process.argv, "--rank") ?? "1", 10),
         regimeName: getOption(process.argv, "--regime"),
         universeName: getOption(process.argv, "--universe"),
@@ -112,15 +107,10 @@ async function main(): Promise<void> {
         throw new Error(`Session not found: ${sessionId}`);
       }
 
-      const recommendations = await getRecommendations({
+      const recommendation = await getRecommendationForSession(session, {
         regimeName: getOption(process.argv, "--regime"),
-        universeName: getOption(process.argv, "--universe"),
-        timeframe: session.timeframe,
-        limit: 10
+        universeName: getOption(process.argv, "--universe")
       });
-      const recommendation =
-        recommendations.find((item) => item.strategyNames.join(" + ") === session.strategyName) ??
-        recommendations[0];
 
       if (!recommendation) {
         throw new Error("No active recommendation available for session");
@@ -128,11 +118,14 @@ async function main(): Promise<void> {
 
       await runRecommendedLivePaperTrading({
         sessionId: session.id,
+        strategyType: recommendation.strategyType,
         strategyName: recommendation.strategyNames[0],
         parametersJson: recommendation.parametersJson,
         marketCode: session.marketCode,
         timeframe: session.timeframe,
         startingBalance: session.startingBalance,
+        currentBalance: session.currentBalance,
+        universeName: recommendation.universeName,
         maxEvents: Number.parseInt(getOption(process.argv, "--max-events") ?? "0", 10) || undefined
       });
 
@@ -176,9 +169,23 @@ async function main(): Promise<void> {
         );
       }
 
+      for (const position of status.positions) {
+        console.log(
+          [
+            `positionMarket=${position.marketCode}`,
+            `positionQty=${position.quantity.toFixed(8)}`,
+            `avgEntry=${position.avgEntryPrice.toFixed(2)}`,
+            `mark=${(position.markPrice ?? 0).toFixed(2)}`,
+            `unrealized=${position.unrealizedPnl.toFixed(2)}`,
+            `realized=${position.realizedPnl.toFixed(2)}`
+          ].join(" | ")
+        );
+      }
+
       for (const order of status.recentOrders) {
         console.log(
           [
+            `market=${order.marketCode ?? "-"}`,
             `order=${order.side}`,
             `price=${(order.executedPrice ?? 0).toFixed(2)}`,
             `qty=${order.quantity.toFixed(8)}`,

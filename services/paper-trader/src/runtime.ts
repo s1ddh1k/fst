@@ -1,13 +1,31 @@
+import {
+  assertSupportedScoredDecisionTimeframe,
+  buildMarketStateContext,
+  type Candle,
+  type MarketStateContext
+} from "../../../research/strategies/src/index.js";
+import { createVolatilityTargetSizer } from "../../../research/strategies/src/position-sizer.js";
+import { createDrawdownCircuitBreaker } from "../../../research/strategies/src/portfolio-risk.js";
+import { getAtr } from "../../../research/strategies/src/factors/index.js";
 import { PAPER_FEE_RATE, PAPER_SLIPPAGE_RATE } from "./config.js";
 import {
   getPaperPosition,
   insertPaperOrder,
-  loadRecentCandles,
+  listSelectedUniverseMarkets,
+  loadRecentCandlesForMarkets,
   updatePaperSession,
+  upsertMarketFeatureSnapshot,
   upsertPaperPosition
 } from "./db.js";
-import { createStrategyFromRecommendation } from "./strategy-factory.js";
-import { streamTicker, type UpbitTickerMessage } from "./upbit-stream.js";
+import { createMarketOrderExecutionModel } from "./execution-model.js";
+import { createPaperRuntimeOpsGuard } from "./ops-guard.js";
+import { applyPaperSellNetValue, resolveAvailablePaperCash } from "./runtime-balance.js";
+import { createStrategyFromRecommendation, createScoredStrategyFromRecommendation, isScoredStrategy } from "./strategy-factory.js";
+import {
+  runRecommendedUniversePaperTrading,
+  runRecommendedUniverseScoredPaperTrading
+} from "./universe-runtime.js";
+import { streamTickers, type UpbitTickerMessage } from "./upbit-stream.js";
 
 type RuntimeState = {
   cash: number;
@@ -15,16 +33,14 @@ type RuntimeState = {
   avgEntryPrice: number;
   realizedPnl: number;
   entryCandleIndex: number | null;
-  candles: Array<{
-    marketCode: string;
-    timeframe: string;
-    candleTimeUtc: Date;
-    openPrice: number;
-    highPrice: number;
-    lowPrice: number;
-    closePrice: number;
-    volume: number;
-  }>;
+  candles: Candle[];
+  universeCandlesByMarket: Record<string, Candle[]>;
+};
+
+type SyntheticCandleUpdate = {
+  candles: Candle[];
+  openedNewBucket: boolean;
+  droppedCount: number;
 };
 
 function getBucketStart(timestamp: number, timeframe: string): Date {
@@ -41,15 +57,15 @@ function getBucketStart(timestamp: number, timeframe: string): Date {
 }
 
 function updateSyntheticCandle(
-  candles: RuntimeState["candles"],
+  candles: Candle[],
   timeframe: string,
   message: UpbitTickerMessage
-): RuntimeState["candles"] {
+): SyntheticCandleUpdate {
   const bucketStart = getBucketStart(message.timestamp, timeframe);
   const last = candles[candles.length - 1];
 
   if (!last || last.candleTimeUtc.getTime() !== bucketStart.getTime()) {
-    return [
+    const next = [
       ...candles,
       {
         marketCode: message.code,
@@ -59,9 +75,18 @@ function updateSyntheticCandle(
         highPrice: message.trade_price,
         lowPrice: message.trade_price,
         closePrice: message.trade_price,
-        volume: message.trade_volume
+        volume: message.trade_volume,
+        quoteVolume: message.trade_price * message.trade_volume,
+        isSynthetic: false
       }
     ];
+    const trimmed = next.slice(-400);
+
+    return {
+      candles: trimmed,
+      openedNewBucket: true,
+      droppedCount: Math.max(0, next.length - trimmed.length)
+    };
   }
 
   const nextCandles = candles.slice(0, -1);
@@ -70,9 +95,22 @@ function updateSyntheticCandle(
     highPrice: Math.max(last.highPrice, message.trade_price),
     lowPrice: Math.min(last.lowPrice, message.trade_price),
     closePrice: message.trade_price,
-    volume: last.volume + message.trade_volume
+    volume: last.volume + message.trade_volume,
+    quoteVolume: (last.quoteVolume ?? last.closePrice * last.volume) + message.trade_price * message.trade_volume,
+    isSynthetic: false
   });
-  return nextCandles;
+  const trimmed = nextCandles.slice(-400);
+
+  return {
+    candles: trimmed,
+    openedNewBucket: false,
+    droppedCount: Math.max(0, nextCandles.length - trimmed.length)
+  };
+}
+
+function ensureSubscribedMarkets(marketCode: string, universeMarkets: string[]): string[] {
+  const unique = new Set([marketCode, ...universeMarkets]);
+  return [...unique];
 }
 
 async function syncMarkToDb(params: {
@@ -105,46 +143,241 @@ async function syncMarkToDb(params: {
   });
 }
 
+async function buildSignalMarketState(params: {
+  marketCode: string;
+  timeframe: string;
+  universeName?: string;
+  benchmarkMarketCode?: string;
+  referenceTime: Date;
+  strategy: ReturnType<typeof createStrategyFromRecommendation>;
+  universeCandlesByMarket: Record<string, Candle[]>;
+}): Promise<MarketStateContext | undefined> {
+  const marketCodes = Object.keys(params.universeCandlesByMarket);
+
+  if (marketCodes.length === 0) {
+    return undefined;
+  }
+
+  const sampleMarketCode = marketCodes.includes(params.marketCode)
+    ? params.marketCode
+    : marketCodes[0];
+  const sampleMarketState = buildMarketStateContext({
+    marketCode: sampleMarketCode,
+    referenceTime: params.referenceTime,
+    universeName: params.universeName,
+    universeCandlesByMarket: params.universeCandlesByMarket,
+    config: params.strategy.contextConfig
+  });
+
+  if (!sampleMarketState) {
+    return undefined;
+  }
+
+  let targetMarketState =
+    params.marketCode === sampleMarketCode ? sampleMarketState : undefined;
+  const relativeStrengthRows = [];
+
+  if (sampleMarketState.relativeStrength) {
+    relativeStrengthRows.push({
+      marketCode: sampleMarketCode,
+      relativeStrength: sampleMarketState.relativeStrength
+    });
+  }
+
+  for (const marketCode of marketCodes) {
+    if (marketCode === sampleMarketCode) {
+      continue;
+    }
+
+    const marketState = buildMarketStateContext({
+      marketCode,
+      referenceTime: params.referenceTime,
+      universeName: params.universeName,
+      universeCandlesByMarket: params.universeCandlesByMarket,
+      config: params.strategy.contextConfig
+    });
+
+    if (marketCode === params.marketCode) {
+      targetMarketState = marketState;
+    }
+
+    if (!marketState?.relativeStrength) {
+      continue;
+    }
+
+    relativeStrengthRows.push({
+      marketCode,
+      relativeStrength: marketState.relativeStrength
+    });
+  }
+
+  if (params.universeName) {
+    await upsertMarketFeatureSnapshot({
+      universeName: params.universeName,
+      timeframe: params.timeframe,
+      config: params.strategy.contextConfig,
+      referenceTime: params.referenceTime,
+      sampleSize: sampleMarketState.sampleSize,
+      breadth: sampleMarketState.breadth,
+      benchmarkMarketCode: sampleMarketState.benchmarkMarketCode,
+      benchmark: sampleMarketState.benchmark,
+      relativeStrengthRows
+    });
+  }
+
+  return targetMarketState;
+}
+
 export async function runRecommendedLivePaperTrading(params: {
   sessionId: number;
+  strategyType?: string;
   strategyName: string;
   parametersJson: unknown;
   marketCode: string;
   timeframe: string;
   startingBalance: number;
+  currentBalance?: number;
+  universeName?: string;
+  benchmarkMarketCode?: string;
   maxEvents?: number;
 }): Promise<void> {
-  const strategy = createStrategyFromRecommendation({
-    strategyName: params.strategyName,
-    parametersJson: params.parametersJson
+  if (
+    params.strategyType === "universe_portfolio" ||
+    params.strategyType === "universe_scored" ||
+    (params.strategyType === "single_scored" && params.marketCode.startsWith("UNIVERSE:"))
+  ) {
+    if (!params.universeName) {
+      throw new Error("universeName is required for universe portfolio paper trading");
+    }
+
+    if (params.strategyType === "universe_scored" || params.marketCode.startsWith("UNIVERSE:")) {
+      assertSupportedScoredDecisionTimeframe(params.timeframe);
+    }
+
+    if (params.strategyType === "universe_portfolio") {
+      await runRecommendedUniversePaperTrading({
+        sessionId: params.sessionId,
+        strategyName: params.strategyName,
+        parametersJson: params.parametersJson,
+        timeframe: params.timeframe,
+        startingBalance: params.startingBalance,
+        currentBalance: params.currentBalance ?? params.startingBalance,
+        universeName: params.universeName,
+        maxEvents: params.maxEvents
+      });
+    } else {
+      await runRecommendedUniverseScoredPaperTrading({
+        sessionId: params.sessionId,
+        strategyName: params.strategyName,
+        parametersJson: params.parametersJson,
+        timeframe: params.timeframe,
+        startingBalance: params.startingBalance,
+        currentBalance: params.currentBalance ?? params.startingBalance,
+        universeName: params.universeName,
+        maxEvents: params.maxEvents
+      });
+    }
+    return;
+  }
+
+  const isScored = isScoredStrategy(params.strategyName);
+  if (isScored) {
+    assertSupportedScoredDecisionTimeframe(params.timeframe);
+  }
+  const scoredStrategy = isScored
+    ? createScoredStrategyFromRecommendation({
+        strategyName: params.strategyName,
+        parametersJson: params.parametersJson
+      })
+    : undefined;
+  const strategy = isScored
+    ? undefined
+    : createStrategyFromRecommendation({
+        strategyName: params.strategyName,
+        parametersJson: params.parametersJson
+      });
+  const positionSizer = isScored ? createVolatilityTargetSizer() : undefined;
+  const riskManager = isScored ? createDrawdownCircuitBreaker() : undefined;
+  const executionModel = createMarketOrderExecutionModel();
+  const opsGuard = createPaperRuntimeOpsGuard({
+    minSignalCandles: 2
   });
 
   const existingPosition = await getPaperPosition({
     sessionId: params.sessionId,
     marketCode: params.marketCode
   });
-  const recentCandles = await loadRecentCandles({
-    marketCode: params.marketCode,
+  const universeMarkets = params.universeName
+    ? await listSelectedUniverseMarkets({
+        universeName: params.universeName,
+        limit: 30
+      })
+    : [];
+  const subscribedMarkets = ensureSubscribedMarkets(params.marketCode, universeMarkets);
+  const recentCandlesByMarket = await loadRecentCandlesForMarkets({
+    marketCodes: subscribedMarkets,
     timeframe: params.timeframe,
     limit: 300
   });
+  const recentCandles = recentCandlesByMarket[params.marketCode] ?? [];
+  const openNotional =
+    existingPosition && existingPosition.quantity > 0
+      ? existingPosition.quantity * (existingPosition.markPrice ?? existingPosition.avgEntryPrice)
+      : 0;
+
+  const initialEquity = params.currentBalance ?? params.startingBalance;
+  let runtimePeakEquity = initialEquity;
 
   const state: RuntimeState = {
-    cash: existingPosition ? 0 : params.startingBalance,
+    cash: resolveAvailablePaperCash({
+      startingBalance: params.startingBalance,
+      currentBalance: params.currentBalance,
+      openNotional
+    }),
     quantity: existingPosition?.quantity ?? 0,
     avgEntryPrice: existingPosition?.avgEntryPrice ?? 0,
     realizedPnl: existingPosition?.realizedPnl ?? 0,
     entryCandleIndex: existingPosition ? Math.max(0, recentCandles.length - 1) : null,
-    candles: recentCandles
+    candles: recentCandles,
+    universeCandlesByMarket: recentCandlesByMarket
   };
 
-  await streamTicker({
-    marketCode: params.marketCode,
+  await streamTickers({
+    marketCodes: subscribedMarkets,
     maxEvents: params.maxEvents,
     onMessage: async (message) => {
-      state.candles = updateSyntheticCandle(state.candles, params.timeframe, message);
+      if (
+        !opsGuard.acceptsTicker({
+          marketCode: message.code,
+          timestamp: message.timestamp
+        })
+      ) {
+        return;
+      }
 
-      if (state.candles.length < 3) {
+      const candleUpdate = updateSyntheticCandle(
+        state.universeCandlesByMarket[message.code] ?? [],
+        params.timeframe,
+        message
+      );
+      state.universeCandlesByMarket[message.code] = candleUpdate.candles;
+
+      if (message.code !== params.marketCode) {
+        return;
+      }
+
+      state.candles = candleUpdate.candles;
+
+      if (state.entryCandleIndex !== null && candleUpdate.droppedCount > 0) {
+        state.entryCandleIndex = Math.max(0, state.entryCandleIndex - candleUpdate.droppedCount);
+      }
+
+      if (
+        !opsGuard.shouldEvaluateSignal({
+          openedNewBucket: candleUpdate.openedNewBucket,
+          candleCount: state.candles.length
+        })
+      ) {
         await syncMarkToDb({
           sessionId: params.sessionId,
           marketCode: params.marketCode,
@@ -157,63 +390,144 @@ export async function runRecommendedLivePaperTrading(params: {
         return;
       }
 
-      const signal = strategy.generateSignal({
+      const signalIndex = state.candles.length - 2;
+      const marketState = await buildSignalMarketState({
+        marketCode: params.marketCode,
+        timeframe: params.timeframe,
+        universeName: params.universeName,
+        benchmarkMarketCode: params.benchmarkMarketCode,
+        referenceTime: state.candles[signalIndex].candleTimeUtc,
+        strategy: isScored && scoredStrategy
+          ? { name: scoredStrategy.name, parameters: scoredStrategy.parameters, contextConfig: scoredStrategy.contextConfig, generateSignal: (ctx) => scoredStrategy.generateSignal(ctx).signal }
+          : strategy!,
+        universeCandlesByMarket: state.universeCandlesByMarket
+      });
+
+      const signalContext = {
         candles: state.candles,
-        index: state.candles.length - 1,
+        index: signalIndex,
         hasPosition: state.quantity > 0,
+        marketState,
         currentPosition:
           state.quantity > 0 && state.entryCandleIndex !== null
             ? {
                 entryPrice: state.avgEntryPrice,
                 quantity: state.quantity,
-                barsHeld: Math.max(0, state.candles.length - 1 - state.entryCandleIndex)
+                barsHeld: Math.max(0, signalIndex - state.entryCandleIndex)
               }
             : undefined
-      });
+      };
+
+      const signal = isScored && scoredStrategy
+        ? scoredStrategy.generateSignal(signalContext).signal
+        : strategy!.generateSignal(signalContext);
+      const conviction = isScored && scoredStrategy
+        ? scoredStrategy.generateSignal(signalContext).conviction
+        : 1;
+
+      if (isScored && riskManager) {
+        const currentEquity = state.cash + state.quantity * message.trade_price;
+        runtimePeakEquity = Math.max(runtimePeakEquity, currentEquity);
+        const riskCheck = riskManager.check({
+          currentEquity,
+          peakEquity: runtimePeakEquity,
+          currentExposure: currentEquity === 0 ? 0 : (state.quantity * message.trade_price) / currentEquity
+        });
+
+        if (riskCheck.mustLiquidateAll && state.quantity > 0) {
+          const execution = executionModel.executeSell({
+            quantity: state.quantity,
+            marketPrice: message.trade_price,
+            avgEntryPrice: state.avgEntryPrice,
+            feeRate: PAPER_FEE_RATE,
+            slippageRate: PAPER_SLIPPAGE_RATE
+          });
+
+          await insertPaperOrder({
+            sessionId: params.sessionId,
+            marketCode: params.marketCode,
+            side: "SELL",
+            orderType: "market",
+            requestedPrice: message.trade_price,
+            executedPrice: execution.executedPrice,
+            quantity: state.quantity,
+            fee: execution.fee,
+            slippage: message.trade_price - execution.executedPrice
+          });
+
+          state.cash = applyPaperSellNetValue(state.cash, execution.netValue);
+          state.realizedPnl += execution.realizedTradePnl;
+          state.quantity = 0;
+          state.avgEntryPrice = 0;
+          state.entryCandleIndex = null;
+        }
+
+        riskManager.onBarClose(state.cash + state.quantity * message.trade_price);
+      }
 
       if (signal === "BUY" && state.quantity === 0 && state.cash > 0) {
-        const executedPrice = message.trade_price * (1 + PAPER_SLIPPAGE_RATE);
-        const fee = state.cash * PAPER_FEE_RATE;
-        const netCash = state.cash - fee;
-        const quantity = netCash / executedPrice;
+        let allocatedCash = state.cash;
+
+        if (isScored && positionSizer) {
+          const atr = getAtr(state.candles, signalIndex, 14) ?? message.trade_price * 0.02;
+          const sizeResult = positionSizer.calculate({
+            conviction,
+            currentPrice: message.trade_price,
+            atr,
+            portfolioEquity: state.cash,
+            currentPositionValue: 0
+          });
+          allocatedCash = state.cash * sizeResult.targetWeight;
+        }
+
+        const execution = executionModel.executeBuy({
+          cash: allocatedCash,
+          marketPrice: message.trade_price,
+          feeRate: PAPER_FEE_RATE,
+          slippageRate: PAPER_SLIPPAGE_RATE
+        });
 
         await insertPaperOrder({
           sessionId: params.sessionId,
+          marketCode: params.marketCode,
           side: "BUY",
           orderType: "market",
           requestedPrice: message.trade_price,
-          executedPrice,
-          quantity,
-          fee,
-          slippage: executedPrice - message.trade_price
+          executedPrice: execution.executedPrice,
+          quantity: execution.quantity,
+          fee: execution.fee,
+          slippage: execution.executedPrice - message.trade_price
         });
 
-        state.cash = 0;
-        state.quantity = quantity;
-        state.avgEntryPrice = executedPrice;
-        state.entryCandleIndex = state.candles.length - 1;
+        state.cash -= allocatedCash;
+        state.quantity = execution.quantity;
+        state.avgEntryPrice = execution.executedPrice;
+        state.entryCandleIndex = signalIndex + 1;
       }
 
       if (signal === "SELL" && state.quantity > 0) {
-        const executedPrice = message.trade_price * (1 - PAPER_SLIPPAGE_RATE);
-        const grossValue = state.quantity * executedPrice;
-        const fee = grossValue * PAPER_FEE_RATE;
-        const netValue = grossValue - fee;
-        const realizedTradePnl = (executedPrice - state.avgEntryPrice) * state.quantity - fee;
+        const execution = executionModel.executeSell({
+          quantity: state.quantity,
+          marketPrice: message.trade_price,
+          avgEntryPrice: state.avgEntryPrice,
+          feeRate: PAPER_FEE_RATE,
+          slippageRate: PAPER_SLIPPAGE_RATE
+        });
 
         await insertPaperOrder({
           sessionId: params.sessionId,
+          marketCode: params.marketCode,
           side: "SELL",
           orderType: "market",
           requestedPrice: message.trade_price,
-          executedPrice,
+          executedPrice: execution.executedPrice,
           quantity: state.quantity,
-          fee,
-          slippage: message.trade_price - executedPrice
+          fee: execution.fee,
+          slippage: message.trade_price - execution.executedPrice
         });
 
-        state.cash = netValue;
-        state.realizedPnl += realizedTradePnl;
+        state.cash = applyPaperSellNetValue(state.cash, execution.netValue);
+        state.realizedPnl += execution.realizedTradePnl;
         state.quantity = 0;
         state.avgEntryPrice = 0;
         state.entryCandleIndex = null;

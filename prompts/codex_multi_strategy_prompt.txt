@@ -1,0 +1,59 @@
+이 저장소를 `docs/multi-strategy-system-design.md` 기준으로 재설계하고 구현해줘.
+
+중요 목표:
+- Upbit KRW 현물
+- 롱 전용
+- 멀티 전략
+- 멀티 포지션
+- 1m / 5m / 15m / 1h 지원
+- decision timeframe과 execution timeframe 분리
+- point-in-time universe
+- same-bar fill 금지
+- execution / fee / tick / min-order / supported order types는 전략과 분리
+- backtest / paper / live의 주문 상태 머신 최대한 공통화
+- 단일 전략 최적화가 아니라 멀티 sleeve 포트폴리오 구조로 전환
+
+작업 원칙:
+1. 먼저 아키텍처 변경이 필요한 파일을 식별하고 변경 계획을 세워라.
+2. 임시 if문 패치가 아니라 모듈 경계를 명확히 나눠라.
+3. 다음 Phase 순서로 구현하라.
+   - Phase 0: 공통 타입, full-grid normalization, PTI universe, event store
+   - Phase 1: portfolio engine 멀티 포지션/sleeve/conflict resolver
+   - Phase 2: Relative Strength Rotation (15m decision / 5m execution)
+   - Phase 3: Breakout Rotation (5m decision / 1m execution)
+   - Phase 4: Micro Strategy (1m)
+   - Phase 5: Upbit adapter/live reconciliation 강화
+4. 각 Phase마다 테스트를 추가하라.
+5. 각 Phase마다 문서와 CLI report를 업데이트하라.
+6. 구현 후에는 다음을 보고하라.
+   - 변경 파일 목록
+   - 새 타입/모듈 요약
+   - 테스트 결과
+   - 남은 리스크
+   - 다음 Phase 추천
+
+필수 구현 항목:
+- PortfolioEngine
+- SleeveAllocator
+- ConflictResolver
+- RiskEngine
+- OrderPlanner
+- OrderStateMachine
+- ExecutionRouter
+- StrategyAdapter(기존 ScoredStrategy 호환)
+- full-grid normalizer
+- universe snapshot builder
+- ghost/funnel/raw event logging
+
+필수 금지 항목:
+- 거래소 제약을 전략 코드에 하드코딩하지 말 것
+- same-bar fill 허용하지 말 것
+- 라이브와 백테스트의 주문 상태 전이를 따로 만들지 말 것
+- “1시간봉 전략만 지원” 같은 제약을 두지 말 것
+
+완료 후에는 `README` 또는 별도 문서에:
+- 시스템 구조
+- 실행 방법
+- 리포트 생성 방법
+- live/paper/backtest 차이점
+을 정리해줘.

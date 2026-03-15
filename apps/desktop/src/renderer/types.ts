@@ -4,10 +4,18 @@ export type Recommendation = {
   id: number;
   rank: number;
   strategyNames: string[];
+  strategyType: string;
   avgTestReturn: number;
   avgTestDrawdown: number;
   marketCount: number;
   timeframe: string;
+  parametersJson: unknown;
+};
+
+export type ScoredValidation = {
+  bootstrapPassRate: number;
+  randomPassRate: number;
+  avgTestTradeCount: number;
 };
 
 export type Session = {
@@ -22,6 +30,7 @@ export type Session = {
 };
 
 export type Position = {
+  marketCode?: string;
   quantity: number;
   avgEntryPrice: number;
   markPrice: number | null;
@@ -30,6 +39,7 @@ export type Position = {
 };
 
 export type Order = {
+  marketCode?: string | null;
   side: string;
   executedPrice: number | null;
   quantity: number;
@@ -38,32 +48,10 @@ export type Order = {
   executedAt: string | null;
 };
 
-export type RecommendationSnapshot = {
-  regimeName: string;
-  universeName: string;
-  timeframe: string;
-  holdoutDays: number;
-  sourceLabel: string | null;
-  trainingDays: number | null;
-  stepDays: number | null;
-  minMarkets: number | null;
-  minTrades: number | null;
-  candidatePoolSize: number | null;
-  bestStrategyName: string | null;
-  trainStartAt: string | null;
-  trainEndAt: string | null;
-  testStartAt: string | null;
-  testEndAt: string | null;
-  recommendationCount: number;
-  bestAvgTestReturn: number;
-  worstAvgTestDrawdown: number;
-  generatedAt: string;
-  updatedAt: string;
-};
-
 export type SessionDetailPayload = {
   session: Session;
   position: Position | null;
+  positions: Position[];
   recentOrders: Order[];
 };
 

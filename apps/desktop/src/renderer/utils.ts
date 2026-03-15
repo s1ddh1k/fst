@@ -1,4 +1,4 @@
-import type { DictionaryKey, Locale, RecommendationSnapshot } from "./types";
+import type { DictionaryKey, Locale } from "./types";
 import { dictionaries } from "./i18n";
 
 export function createTranslator(locale: Locale) {
@@ -42,19 +42,4 @@ export function getStrategyAccent(strategyNames: string[]) {
   const accents = ["accent-teal", "accent-amber", "accent-ink"];
   const hash = strategyNames.join("-").split("").reduce((sum, char) => sum + char.charCodeAt(0), 0);
   return accents[hash % accents.length];
-}
-
-export function formatSnapshotRules(
-  locale: Locale,
-  item: RecommendationSnapshot
-) {
-  const parts: string[] = [];
-
-  if (item.trainingDays) parts.push(`train ${item.trainingDays}d`);
-  if (item.stepDays) parts.push(`step ${item.stepDays}d`);
-  if (item.minMarkets) parts.push(`markets >= ${item.minMarkets}`);
-  if (item.minTrades) parts.push(`trades >= ${formatNumber(locale, item.minTrades)}`);
-  if (item.candidatePoolSize) parts.push(`pool ${item.candidatePoolSize}`);
-
-  return parts.length > 0 ? parts.join(" · ") : "-";
 }

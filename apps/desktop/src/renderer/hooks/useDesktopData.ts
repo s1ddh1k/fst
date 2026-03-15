@@ -4,7 +4,6 @@ import { activeRegimeName, apiBaseUrl } from "../config";
 import type {
   DictionaryKey,
   Recommendation,
-  RecommendationSnapshot,
   Session,
   SessionDetailPayload
 } from "../types";
@@ -15,11 +14,11 @@ function toUserMessage(error: unknown, t: TFunction) {
   const message = error instanceof Error ? error.message : String(error);
 
   if (/fetch failed|failed to fetch|networkerror/i.test(message)) {
-    return t("apiOfflineReasonFetch");
+    return t("connectionError");
   }
 
   if (/request failed:/i.test(message)) {
-    return t("apiOfflineReasonHttp");
+    return t("connectionHttpError");
   }
 
   return message;
@@ -48,8 +47,6 @@ export function useDesktopData(props: {
   t: TFunction;
 }) {
   const { timeframe, market, balance, t } = props;
-  const [opsSnapshot, setOpsSnapshot] = useState<FstDesktopOpsSnapshot | null>(null);
-  const [snapshots, setSnapshots] = useState<RecommendationSnapshot[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
@@ -58,7 +55,7 @@ export function useDesktopData(props: {
   const [apiMessage, setApiMessage] = useState("");
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [actionError, setActionError] = useState("");
-  const [pendingAction, setPendingAction] = useState<"start-session" | "run-session" | "">("");
+  const [pendingAction, setPendingAction] = useState<"start" | "run" | "">("");
 
   const loadSessionDetail = useEffectEvent(async (sessionId: number) => {
     startTransition(() => {
@@ -82,24 +79,12 @@ export function useDesktopData(props: {
       setActionError("");
     });
 
-    if (window.fstDesktop?.getOpsSnapshot) {
-      const snapshot = await window.fstDesktop.getOpsSnapshot();
-      startTransition(() => {
-        setOpsSnapshot(snapshot);
-        if (snapshot.paperTrader.status === "starting") {
-          setApiHealthy(false);
-          setApiMessage(t("apiStartingMeta"));
-        }
-      });
-    }
-
     try {
-      const [snapshotPayload, recommendationPayload, sessionPayload] = await Promise.all([
-        request<{ items: RecommendationSnapshot[] }>("/recommendation-snapshots?limit=2"),
+      const [recommendationPayload, sessionPayload] = await Promise.all([
         request<{ items: Recommendation[] }>(
-          `/recommendations?regime=${activeRegimeName}&timeframe=${timeframe}&limit=3`
+          `/recommendations?regime=${activeRegimeName}&timeframe=${timeframe}&limit=5`
         ),
-        request<{ items: Session[] }>("/sessions?limit=4")
+        request<{ items: Session[] }>("/sessions?limit=5")
       ]);
 
       const nextSessionId =
@@ -108,11 +93,10 @@ export function useDesktopData(props: {
           : sessionPayload.items[0]?.id ?? null;
 
       startTransition(() => {
-        setSnapshots(snapshotPayload.items ?? []);
         setRecommendations(recommendationPayload.items ?? []);
         setSessions(sessionPayload.items ?? []);
         setApiHealthy(true);
-        setApiMessage(t("apiHealthyMeta"));
+        setApiMessage("");
         setActiveSessionId(nextSessionId);
       });
 
@@ -126,11 +110,10 @@ export function useDesktopData(props: {
     } catch (error) {
       startTransition(() => {
         setApiHealthy(false);
-        setApiMessage(`${t("apiOfflineMeta")} ${toUserMessage(error, t)}`);
+        setApiMessage(toUserMessage(error, t));
         setRecommendations([]);
         setSessions([]);
         setSessionDetail(null);
-        setSnapshots([]);
       });
     }
   });
@@ -139,14 +122,14 @@ export function useDesktopData(props: {
     void refreshAll();
     const timer = window.setInterval(() => {
       void refreshAll();
-    }, 5000);
+    }, 30000);
 
     return () => window.clearInterval(timer);
   }, [refreshAll, timeframe, t]);
 
   async function startSession(rank: number) {
     startTransition(() => {
-      setPendingAction("start-session");
+      setPendingAction("start");
       setActionError("");
     });
 
@@ -180,7 +163,7 @@ export function useDesktopData(props: {
     }
 
     startTransition(() => {
-      setPendingAction("run-session");
+      setPendingAction("run");
       setActionError("");
     });
 
@@ -217,8 +200,6 @@ export function useDesktopData(props: {
     isDetailLoading,
     actionError,
     pendingAction,
-    opsSnapshot,
-    snapshots,
     recommendations,
     sessions,
     activeSessionId,

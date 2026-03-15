@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { PAPER_TRADER_HOST, PAPER_TRADER_PORT } from "./config.js";
 import { runRecommendedLivePaperTrading } from "./runtime.js";
 import {
+  getRecommendationForSession,
   getPaperSessionById,
   getPaperSessionStatus,
   getRecommendationSnapshots,
@@ -104,7 +105,10 @@ export async function startPaperTraderServer(): Promise<void> {
       if (request.method === "POST" && url.pathname === "/sessions") {
         const body = await readJsonBody(request);
         const result = await startRecommendedPaperSession({
-          marketCode: String(body.marketCode ?? body.market_code ?? "KRW-BTC"),
+          marketCode:
+            body.marketCode === undefined && body.market_code === undefined
+              ? undefined
+              : String(body.marketCode ?? body.market_code),
           rank: body.rank ? Number(body.rank) : undefined,
           regimeName: body.regimeName ? String(body.regimeName) : undefined,
           universeName: body.universeName ? String(body.universeName) : undefined,
@@ -144,15 +148,10 @@ export async function startPaperTraderServer(): Promise<void> {
             return;
           }
 
-          const recommendations = await getRecommendations({
+          const recommendation = await getRecommendationForSession(session, {
             regimeName: body.regimeName ? String(body.regimeName) : undefined,
-            universeName: body.universeName ? String(body.universeName) : undefined,
-            timeframe: session.timeframe,
-            limit: 10
+            universeName: body.universeName ? String(body.universeName) : undefined
           });
-          const recommendation =
-            recommendations.find((item) => item.strategyNames.join(" + ") === session.strategyName) ??
-            recommendations[0];
 
           if (!recommendation) {
             sendJson(response, 404, { error: "No active recommendation available for session" });
@@ -161,11 +160,14 @@ export async function startPaperTraderServer(): Promise<void> {
 
           void runRecommendedLivePaperTrading({
             sessionId: session.id,
+            strategyType: recommendation.strategyType,
             strategyName: recommendation.strategyNames[0],
             parametersJson: recommendation.parametersJson,
             marketCode: session.marketCode,
             timeframe: session.timeframe,
             startingBalance: session.startingBalance,
+            currentBalance: session.currentBalance,
+            universeName: recommendation.universeName,
             maxEvents: body.maxEvents ? Number(body.maxEvents) : undefined
           });
 

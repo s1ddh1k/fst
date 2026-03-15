@@ -6,7 +6,8 @@
   "scripts": {
     "build": "pnpm exec tsc -p tsconfig.json",
     "dev": "pnpm exec tsx src/index.ts",
-    "typecheck": "pnpm exec tsc -p tsconfig.json --noEmit"
+    "typecheck": "pnpm exec tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

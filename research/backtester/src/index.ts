@@ -1,11 +1,16 @@
 import {
   closeDb,
+  getCandidateMarketsWithMinimumCandles,
   getSelectedUniverseMarketsWithMinimumCandles,
+  loadCandlesForMarkets,
   replaceStrategyRegimes
 } from "./db.js";
-import { buildStrategyGrid } from "./parameter-grid.js";
+import { buildMarketFeaturePipeline } from "./market-feature-pipeline.js";
+import { buildStrategyGrid, buildScoredStrategyGrid } from "./parameter-grid.js";
 import { buildTwoStrategyPortfolios } from "./portfolio-grid.js";
 import { runPortfolioBacktest } from "./portfolio.js";
+import { runUniversePortfolioBacktest } from "./universe-portfolio.js";
+import { createCrossSectionalMultiFactorAlphaModel } from "./universe-alpha-model.js";
 import {
   formatComparisonTable,
   formatPortfolioRankingTable,
@@ -13,7 +18,9 @@ import {
   formatWalkForwardRankingTable
 } from "./report.js";
 import { executeHoldoutBacktest, executeWalkForwardBacktest } from "./runner.js";
-import { createStrategyByName, listStrategyNames } from "./strategy-registry.js";
+import { executeScoredHoldoutBacktest, executeScoredWalkForwardBacktest, preloadMarketData } from "./scored-runner.js";
+import { generateStrategyFollowupReport } from "./strategy-followup-report.js";
+import { createStrategyByName, listStrategyNames, createScoredStrategyByName, listScoredStrategyNames } from "./strategy-registry.js";
 import { loadCandles } from "./db.js";
 import { splitTrainTestByDays } from "./validation.js";
 
@@ -43,10 +50,10 @@ function resolveRequiredLimit(params: {
   holdoutDays: number;
   trainingDays: number;
   stepDays: number;
-  walkForwardSweep: boolean;
+  walkForwardMode: boolean;
 }): number {
   const perDay = candlesPerDay(params.timeframe);
-  const baseDays = params.walkForwardSweep
+  const baseDays = params.walkForwardMode
     ? params.trainingDays + params.holdoutDays + params.stepDays
     : params.holdoutDays * 2;
   const buffered = Math.ceil(baseDays * perDay * 1.1);
@@ -58,18 +65,6 @@ function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
 }
 
-function createStrategyByNameWithParameters(
-  strategyName: string,
-  parameters: Record<string, number>
-): ReturnType<typeof createStrategyByName> {
-  const strategy = createStrategyByName(strategyName);
-
-  return {
-    ...strategy,
-    parameters
-  };
-}
-
 function createStrategyCandidate(params: {
   strategyName: string;
   parametersJson?: string;
@@ -78,9 +73,40 @@ function createStrategyCandidate(params: {
     return createStrategyByName(params.strategyName);
   }
 
-  return createStrategyByNameWithParameters(
+  return createStrategyByName(
     params.strategyName,
     parseJson<Record<string, number>>(params.parametersJson)
+  );
+}
+
+function buildMarketFeatureConfig(params: {
+  strategyName: string;
+  parametersJson?: string;
+  benchmarkMarketCode?: string;
+}) {
+  const strategy = createStrategyCandidate({
+    strategyName: params.strategyName,
+    parametersJson: params.parametersJson
+  });
+
+  if (!strategy.contextConfig) {
+    return undefined;
+  }
+
+  return strategy.contextConfig;
+}
+
+function filterUniverseCandlesByRange(
+  universeCandlesByMarket: Record<string, Awaited<ReturnType<typeof loadCandles>>>,
+  range: { start: Date; end: Date }
+): Record<string, Awaited<ReturnType<typeof loadCandles>>> {
+  return Object.fromEntries(
+    Object.entries(universeCandlesByMarket).map(([marketCode, candles]) => [
+      marketCode,
+      candles.filter(
+        (candle) => candle.candleTimeUtc >= range.start && candle.candleTimeUtc <= range.end
+      )
+    ])
   );
 }
 
@@ -130,6 +156,24 @@ function mergeDateBounds(
   };
 }
 
+function chooseReferenceMarketCode(
+  universeCandlesByMarket: Record<string, Awaited<ReturnType<typeof loadCandles>>>
+): string | undefined {
+  return Object.entries(universeCandlesByMarket)
+    .slice()
+    .sort((left, right) => {
+      const byLength = right[1].length - left[1].length;
+
+      if (byLength !== 0) {
+        return byLength;
+      }
+
+      const leftLast = left[1][left[1].length - 1]?.candleTimeUtc.getTime() ?? 0;
+      const rightLast = right[1][right[1].length - 1]?.candleTimeUtc.getTime() ?? 0;
+      return rightLast - leftLast;
+    })[0]?.[0];
+}
+
 async function main(): Promise<void> {
   const marketCode = getOption(process.argv, "--market") ?? "KRW-BTC";
   const timeframe = getOption(process.argv, "--timeframe") ?? "1d";
@@ -144,12 +188,22 @@ async function main(): Promise<void> {
   const sweepAll = process.argv.includes("--sweep-all");
   const walkForwardSweep = process.argv.includes("--walk-forward-sweep");
   const baselineEvaluate = process.argv.includes("--baseline-evaluate");
+  const buildMarketFeatures = process.argv.includes("--build-market-features");
+  const universeCrossSectional = process.argv.includes("--universe-cross-sectional");
   const candidateSweep = process.argv.includes("--candidate-sweep");
   const candidateWalkForward = process.argv.includes("--candidate-walk-forward");
   const paperCandidates = process.argv.includes("--paper-candidates");
   const portfolioSweep = process.argv.includes("--portfolio-sweep");
   const saveRegime = process.argv.includes("--save-regime");
+  const scoredBaseline = process.argv.includes("--scored-baseline");
+  const scoredSweep = process.argv.includes("--scored-sweep");
+  const scoredWalkForward = process.argv.includes("--scored-walk-forward");
+  const strategyFollowupReport = process.argv.includes("--strategy-followup-report");
   const parametersJson = getOption(process.argv, "--parameters-json");
+  const benchmarkMarketCode = getOption(process.argv, "--benchmark-market");
+  const maxPositions = Number.parseInt(getOption(process.argv, "--max-positions") ?? "5", 10);
+  const rebalanceBars = Number.parseInt(getOption(process.argv, "--rebalance-bars") ?? "1", 10);
+  const minScore = Number.parseFloat(getOption(process.argv, "--min-score") ?? "0");
   const trainingDays = Number.parseInt(
     getOption(process.argv, "--training-days") ?? String(holdoutDays * 2),
     10
@@ -157,20 +211,474 @@ async function main(): Promise<void> {
   const stepDays = Number.parseInt(getOption(process.argv, "--step-days") ?? String(holdoutDays), 10);
   const minMarkets = Number.parseInt(getOption(process.argv, "--min-markets") ?? "2", 10);
   const minTrades = Number.parseFloat(getOption(process.argv, "--min-trades") ?? "1");
-  const minCandles = Number.parseInt(
-    getOption(process.argv, "--min-candles") ?? String(Math.max(150, trainingDays + holdoutDays + 30)),
-    10
-  );
+  const requestedMinCandles = getOption(process.argv, "--min-candles");
   const limit = resolveRequiredLimit({
     timeframe,
     requestedLimit,
     holdoutDays,
     trainingDays,
     stepDays,
-    walkForwardSweep
+    walkForwardMode:
+      walkForwardSweep || scoredWalkForward || candidateWalkForward || strategyFollowupReport
   });
+  const minCandles = Number.parseInt(
+    requestedMinCandles ?? String(Math.max(150, limit)),
+    10
+  );
 
   try {
+    if (strategyFollowupReport) {
+      const requestedSingleStrategy = listScoredStrategyNames().includes(strategyName)
+        ? [strategyName as import("./strategy-followup-report.js").FollowupStrategyName]
+        : undefined;
+      const report = await generateStrategyFollowupReport({
+        timeframe,
+        limit,
+        holdoutDays,
+        trainingDays,
+        stepDays,
+        universeName,
+        marketLimit,
+        minCandles,
+        strategyNames: requestedSingleStrategy,
+        artifactLabel:
+          requestedSingleStrategy && requestedSingleStrategy.length === 1
+            ? requestedSingleStrategy[0]
+            : undefined
+      });
+
+      console.log(
+        JSON.stringify(
+          {
+            generatedAt: report.generatedAt,
+            baselineDiagnosis: report.baselineDiagnosis,
+            recommendation: report.recommendation,
+            bestRows: report.bestByStrategy.map((strategy) => ({
+              strategyName: strategy.strategyName,
+              parameters: strategy.parameters,
+              avgTestReturn: strategy.avgTestReturn,
+              medianTestReturn: strategy.medianTestReturn,
+              executedTradeCount: strategy.executedTradeCount,
+              signalCount: strategy.signalCount,
+              ghostSignalCount: strategy.ghostSignalCount,
+              bootstrapPassRate: strategy.bootstrapPassRate,
+              randomPassRate: strategy.randomPassRate,
+              promotionEligible: strategy.promotionEligible
+            })),
+            artifacts: report.artifacts
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
+    if (scoredBaseline || scoredSweep || scoredWalkForward) {
+      const markets = await getCandidateMarketsWithMinimumCandles({
+        timeframe,
+        minCandles
+      });
+      const marketCodes = markets.map((m) => m.marketCode);
+      const scoredStrategyNames = sweepAll ? listScoredStrategyNames() : [strategyName];
+
+      if (scoredBaseline) {
+        const strategy = createScoredStrategyByName(strategyName, parametersJson ? parseJson(parametersJson) : undefined);
+
+        const result = await executeScoredHoldoutBacktest({
+          marketCode: `UNIVERSE:${universeName}`,
+          timeframe,
+          limit,
+          holdoutDays,
+          strategy,
+          universeName,
+          universeMarketCodes: marketCodes,
+          universeConfig: {
+            topN: marketLimit
+          },
+          runBootstrap: true,
+          runRandomBenchmark: true
+        });
+
+        console.log(JSON.stringify({
+          universe: universeName,
+          candidateMarkets: marketCodes.length,
+          activeUniverseSize: marketLimit,
+          train: result.train.totalReturn,
+          test: result.test.totalReturn,
+          testDrawdown: result.test.maxDrawdown,
+          signalCount: result.scoredTest.signalCount,
+          ghostSignalCount: result.scoredTest.ghostSignalCount,
+          turnover: result.test.turnover,
+          avgHoldBars: result.test.avgHoldBars,
+          feePaid: result.test.feePaid,
+          slippagePaid: result.test.slippagePaid,
+          rejectedOrdersCount: result.test.rejectedOrdersCount,
+          cooldownSkipsCount: result.test.cooldownSkipsCount,
+          avgWeight: result.scoredTest.averagePositionWeight,
+          circuitBreaker: result.scoredTest.circuitBreakerTriggered,
+          bootstrap: result.scoredTest.bootstrap,
+          randomBenchmark: result.scoredTest.randomBenchmark
+        }, null, 2));
+
+        return;
+      }
+
+      if (scoredSweep || scoredWalkForward) {
+        const strategies = scoredStrategyNames.flatMap((name) => buildScoredStrategyGrid(name));
+        let trainBounds: { start: Date; end: Date } | undefined;
+        let testBounds: { start: Date; end: Date } | undefined;
+
+        const grouped = new Map<string, {
+          strategyName: string;
+          parameters: string;
+          universeCount: number;
+          trainTotal: number;
+          testTotal: number;
+          drawdownTotal: number;
+          tradeCountTotal: number;
+          bootstrapPassCount: number;
+          randomPassCount: number;
+          turnoverTotal: number;
+        }>();
+
+        let preloaded: Awaited<ReturnType<typeof preloadMarketData>> | undefined;
+        if (scoredSweep || scoredWalkForward) {
+          console.log(`[preload] universe=${universeName} — loading candidate candles...`);
+          preloaded = await preloadMarketData({
+            marketCode: `UNIVERSE:${universeName}`,
+            timeframe,
+            limit,
+            holdoutDays,
+            universeName,
+            universeMarketCodes: marketCodes,
+            config: strategies[0]?.contextConfig
+          });
+          console.log(`[preload] universe=${universeName} — done (${preloaded.marketCodes.length} candidate markets)`);
+        }
+
+        const totalJobs = strategies.length;
+
+        for (const [index, strategy] of strategies.entries()) {
+          const pct = (((index + 1) / totalJobs) * 100).toFixed(1);
+          const strategyParams = JSON.stringify(strategy.parameters);
+          console.log(`[${index + 1}/${totalJobs}] (${pct}%) ${strategy.name} ${strategyParams}`);
+
+          const summary = scoredWalkForward
+            ? await executeScoredWalkForwardBacktest({
+                marketCode: `UNIVERSE:${universeName}`,
+                timeframe,
+                limit,
+                holdoutDays,
+                trainingDays,
+                stepDays,
+                strategy,
+                universeName,
+                universeMarketCodes: marketCodes,
+                universeConfig: {
+                  topN: marketLimit
+                },
+                runBootstrap: true,
+                runRandomBenchmark: true,
+                preloaded
+              })
+            : await executeScoredHoldoutBacktest({
+                marketCode: `UNIVERSE:${universeName}`,
+                timeframe,
+                limit,
+                holdoutDays,
+                strategy,
+                universeName,
+                universeMarketCodes: marketCodes,
+                universeConfig: {
+                  topN: marketLimit
+                },
+                runBootstrap: true,
+                runRandomBenchmark: true,
+                preloaded
+              });
+
+          const params = JSON.stringify(strategy.parameters);
+          const key = `${strategy.name}:${params}`;
+          const current = grouped.get(key) ?? {
+            strategyName: strategy.name,
+            parameters: params,
+            universeCount: 0,
+            trainTotal: 0,
+            testTotal: 0,
+            drawdownTotal: 0,
+            tradeCountTotal: 0,
+            bootstrapPassCount: 0,
+            randomPassCount: 0,
+            turnoverTotal: 0
+          };
+
+          if (scoredWalkForward) {
+            const wf = summary as Awaited<ReturnType<typeof executeScoredWalkForwardBacktest>>;
+            current.universeCount += 1;
+            current.trainTotal += wf.averageTrainReturn;
+            current.testTotal += wf.averageTestReturn;
+            current.drawdownTotal += wf.averageTestDrawdown;
+            current.tradeCountTotal += wf.averageTestTradeCount;
+            current.turnoverTotal += wf.scoredWindows.reduce(
+              (sum, window) => sum + window.metrics.turnover,
+              0
+            ) / Math.max(wf.scoredWindows.length, 1);
+            for (const window of wf.scoredWindows) {
+              if (window.bootstrap?.isSignificant) current.bootstrapPassCount += 1;
+              if ((window.randomBenchmark?.percentileVsRandom ?? 0) >= 0.9) current.randomPassCount += 1;
+            }
+            for (const window of wf.windows) {
+              trainBounds = mergeDateBounds(trainBounds, window.trainRange);
+              testBounds = mergeDateBounds(testBounds, window.testRange);
+            }
+          } else {
+            const ho = summary as Awaited<ReturnType<typeof executeScoredHoldoutBacktest>>;
+            current.universeCount += 1;
+            current.trainTotal += ho.train.totalReturn;
+            current.testTotal += ho.test.totalReturn;
+            current.drawdownTotal += ho.test.maxDrawdown;
+            current.tradeCountTotal += ho.test.tradeCount;
+            current.turnoverTotal += ho.test.turnover;
+            if (ho.scoredTest.bootstrap?.isSignificant) current.bootstrapPassCount += 1;
+            if ((ho.scoredTest.randomBenchmark?.percentileVsRandom ?? 0) >= 0.9) current.randomPassCount += 1;
+            trainBounds = mergeDateBounds(trainBounds, ho.trainRange);
+            testBounds = mergeDateBounds(testBounds, ho.testRange);
+          }
+
+          grouped.set(key, current);
+        }
+
+        const rows = [...grouped.values()]
+          .filter((value) => value.universeCount >= 1)
+          .map((v) => ({
+            strategyName: v.strategyName,
+            parameters: v.parameters,
+            marketCount: marketLimit,
+            avgTrainReturn: v.trainTotal / v.universeCount,
+            avgTestReturn: v.testTotal / v.universeCount,
+            avgTestDrawdown: v.drawdownTotal / v.universeCount,
+            avgTestTradeCount: v.tradeCountTotal / v.universeCount,
+            avgTurnover: v.turnoverTotal / v.universeCount,
+            bootstrapPassRate: v.bootstrapPassCount === 0 ? 0 : v.bootstrapPassCount / Math.max(v.universeCount, 1),
+            randomPassRate: v.randomPassCount === 0 ? 0 : v.randomPassCount / Math.max(v.universeCount, 1)
+          }))
+          .sort((a, b) => b.avgTestReturn - a.avgTestReturn);
+
+        if (saveRegime || paperCandidates) {
+          const regimeRows = rows
+            .filter((r) => r.bootstrapPassRate > 0 || r.randomPassRate > 0)
+            .slice(0, 10)
+            .map((r, i) => ({
+              strategyType: "universe_scored",
+              strategyNames: [r.strategyName],
+              parameters: {
+                strategyParameters: parseJson<Record<string, number>>(r.parameters),
+                bootstrapPassRate: r.bootstrapPassRate,
+                randomPassRate: r.randomPassRate,
+                avgTestTradeCount: r.avgTestTradeCount,
+                avgTurnover: r.avgTurnover,
+                activeUniverseSize: marketLimit
+              },
+              weights: [],
+              marketCount: r.marketCount,
+              avgTrainReturn: r.avgTrainReturn,
+              avgTestReturn: r.avgTestReturn,
+              avgTestDrawdown: r.avgTestDrawdown,
+              rank: i + 1
+            }));
+
+          const regimeName = paperCandidates
+            ? "paper-trading-candidate"
+            : scoredWalkForward
+              ? "scored-walk-forward-recommendation"
+              : "scored-holdout-recommendation";
+
+          await replaceStrategyRegimes({
+            regimeName,
+            universeName,
+            timeframe,
+            holdoutDays,
+            metadata: {
+              sourceLabel: scoredWalkForward ? "scored-walk-forward" : "scored-holdout-sweep",
+              trainingDays,
+              stepDays,
+              minMarkets,
+              candidatePoolSize: rows.length,
+              bestStrategyName: rows[0]?.strategyName,
+              trainStartAt: trainBounds?.start,
+              trainEndAt: trainBounds?.end,
+              testStartAt: testBounds?.start,
+              testEndAt: testBounds?.end
+            },
+            rows: regimeRows
+          });
+        }
+
+        console.log(JSON.stringify(rows, null, 2));
+        return;
+      }
+    }
+
+    if (buildMarketFeatures) {
+      const summary = await buildMarketFeaturePipeline({
+        universeName,
+        timeframe,
+        limit,
+        minCandles,
+        marketLimit,
+        config: buildMarketFeatureConfig({
+          strategyName,
+          parametersJson,
+          benchmarkMarketCode
+        })
+      });
+
+      console.log(JSON.stringify(summary, null, 2));
+      return;
+    }
+
+    if (universeCrossSectional) {
+      const markets = await getSelectedUniverseMarketsWithMinimumCandles({
+        universeName,
+        timeframe,
+        minCandles,
+        limit: marketLimit
+      });
+      const marketCodes = markets.map((item) => item.marketCode);
+
+      if (marketCodes.length === 0) {
+        throw new Error("No universe markets available for cross-sectional backtest");
+      }
+
+      const alphaParameters = parametersJson
+        ? parseJson<Record<string, number>>(parametersJson)
+        : undefined;
+      const alphaModel = createCrossSectionalMultiFactorAlphaModel(alphaParameters);
+      const universeCandlesByMarket = await loadCandlesForMarkets({
+        marketCodes,
+        timeframe,
+        limit
+      });
+      const referenceMarketCode = chooseReferenceMarketCode(universeCandlesByMarket);
+      const referenceCandles =
+        referenceMarketCode === undefined ? [] : universeCandlesByMarket[referenceMarketCode] ?? [];
+
+      if (referenceCandles.length < 2) {
+        throw new Error("Not enough reference candles for cross-sectional backtest");
+      }
+
+      const { trainRange, testRange } = splitTrainTestByDays(referenceCandles, holdoutDays);
+      const trainResult = runUniversePortfolioBacktest({
+        strategyName: alphaModel.name,
+        universeName,
+        timeframe,
+        marketCodes,
+        universeCandlesByMarket: filterUniverseCandlesByRange(universeCandlesByMarket, trainRange),
+        alphaModel,
+        referenceMarketCode,
+        maxPositions,
+        minScore,
+        rebalanceEveryBars: rebalanceBars
+      });
+      const testResult = runUniversePortfolioBacktest({
+        strategyName: alphaModel.name,
+        universeName,
+        timeframe,
+        marketCodes,
+        universeCandlesByMarket: filterUniverseCandlesByRange(universeCandlesByMarket, testRange),
+        alphaModel,
+        referenceMarketCode,
+        maxPositions,
+        minScore,
+        rebalanceEveryBars: rebalanceBars
+      });
+
+      if (saveRegime || paperCandidates) {
+        const row = {
+          strategyType: "universe_portfolio",
+          strategyNames: [alphaModel.name],
+          parameters: {
+            alphaModelName: alphaModel.name,
+            alphaParameters: alphaModel.parameters,
+            portfolioParameters: {
+              maxPositions,
+              rebalanceBars,
+              minScore,
+              marketLimit
+            },
+            holdoutDays
+          },
+          weights: [],
+          marketCount: marketCodes.length,
+          avgTrainReturn: trainResult.metrics.totalReturn,
+          avgTestReturn: testResult.metrics.totalReturn,
+          avgTestDrawdown: testResult.metrics.maxDrawdown,
+          rank: 1
+        };
+
+        if (saveRegime) {
+          await replaceStrategyRegimes({
+            regimeName: "universe-portfolio-recommendation",
+            universeName,
+            timeframe,
+            holdoutDays,
+            metadata: {
+              sourceLabel: "universe-cross-sectional",
+              minMarkets: maxPositions,
+              candidatePoolSize: 1,
+              bestStrategyName: alphaModel.name,
+              trainStartAt: trainRange.start,
+              trainEndAt: trainRange.end,
+              testStartAt: testRange.start,
+              testEndAt: testRange.end
+            },
+            rows: [row]
+          });
+        }
+
+        if (paperCandidates) {
+          await replaceStrategyRegimes({
+            regimeName: "paper-trading-candidate",
+            universeName,
+            timeframe,
+            holdoutDays,
+            metadata: {
+              sourceLabel: "universe-cross-sectional-paper",
+              minMarkets: maxPositions,
+              candidatePoolSize: 1,
+              bestStrategyName: alphaModel.name,
+              trainStartAt: trainRange.start,
+              trainEndAt: trainRange.end,
+              testStartAt: testRange.start,
+              testEndAt: testRange.end
+            },
+            rows: [row]
+          });
+        }
+      }
+
+      console.log(
+        JSON.stringify(
+          {
+            strategyName: alphaModel.name,
+            parameters: alphaModel.parameters,
+            universeName,
+            timeframe,
+            marketCount: marketCodes.length,
+            trainRange,
+            testRange,
+            train: trainResult.metrics,
+            test: testResult.metrics,
+            latestSelections: testResult.selectedHistory.slice(-5)
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
     if (baselineEvaluate) {
       const strategy = createStrategyCandidate({
         strategyName,
@@ -192,7 +700,9 @@ async function main(): Promise<void> {
             timeframe,
             limit,
             holdoutDays,
-            strategy
+            strategy,
+            universeName,
+            universeMarketCodes: markets.map((item) => item.marketCode)
           });
           holdoutRows.push({
             strategyName: holdout.strategyName,
@@ -216,7 +726,9 @@ async function main(): Promise<void> {
               holdoutDays,
               trainingDays,
               stepDays,
-              strategy
+              strategy,
+              universeName,
+              universeMarketCodes: markets.map((item) => item.marketCode)
             })
           );
         } catch {
@@ -282,7 +794,9 @@ async function main(): Promise<void> {
               holdoutDays,
               trainingDays,
               stepDays,
-              strategy
+              strategy,
+              universeName,
+              universeMarketCodes: marketCodes
             });
             summaries.push(summary);
             for (const window of summary.windows) {
@@ -575,7 +1089,9 @@ async function main(): Promise<void> {
               timeframe,
               limit,
               holdoutDays,
-              strategy
+              strategy,
+              universeName,
+              universeMarketCodes: marketCodes
             });
             summaries.push(summary);
             trainBounds = mergeDateBounds(trainBounds, summary.trainRange);
@@ -685,7 +1201,9 @@ async function main(): Promise<void> {
               timeframe,
               limit,
               holdoutDays,
-              strategy
+              strategy,
+              universeName,
+              universeMarketCodes: markets.map((item) => item.marketCode)
             });
 
             rows.push({
@@ -708,6 +1226,12 @@ async function main(): Promise<void> {
     }
 
     if (compareAll) {
+      const contextMarkets = await getSelectedUniverseMarketsWithMinimumCandles({
+        universeName,
+        timeframe,
+        minCandles,
+        limit: marketLimit
+      });
       const results = [];
 
       for (const candidate of listStrategyNames()) {
@@ -718,7 +1242,9 @@ async function main(): Promise<void> {
             timeframe,
             limit,
             holdoutDays,
-            strategy
+            strategy,
+            universeName,
+            universeMarketCodes: contextMarkets.map((item) => item.marketCode)
           })
         );
       }
@@ -731,12 +1257,20 @@ async function main(): Promise<void> {
       strategyName,
       parametersJson
     });
+    const contextMarkets = await getSelectedUniverseMarketsWithMinimumCandles({
+      universeName,
+      timeframe,
+      minCandles,
+      limit: marketLimit
+    });
     const result = await executeHoldoutBacktest({
       marketCode,
       timeframe,
       limit,
       holdoutDays,
-      strategy
+      strategy,
+      universeName,
+      universeMarketCodes: contextMarkets.map((item) => item.marketCode)
     });
 
     console.log(JSON.stringify(result, null, 2));

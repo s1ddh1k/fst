@@ -9,11 +9,25 @@ import {
   getLatestPaperOrders,
   getPaperPosition,
   getPaperSession,
+  listPaperPositions,
   listActiveStrategyRegimeSnapshots,
   listPaperSessions,
-  loadActiveStrategyRegimes
+  loadActiveStrategyRegimes,
+  loadStrategyRegimeById
 } from "./db.js";
 import type { PaperSessionRow, StrategyRegimeRow, StrategyRegimeSnapshotRow } from "./types.js";
+
+function getDefaultSessionMarketCode(recommendation: StrategyRegimeRow, requestedMarketCode?: string): string {
+  if (recommendation.strategyType === "single") {
+    if (!requestedMarketCode) {
+      throw new Error("--market is required for single-market recommendations");
+    }
+
+    return requestedMarketCode;
+  }
+
+  return `UNIVERSE:${recommendation.universeName}`;
+}
 
 export async function getRecommendations(params?: {
   regimeName?: string;
@@ -38,7 +52,7 @@ export async function getRecommendationSnapshots(limit = 20): Promise<StrategyRe
 }
 
 export async function startRecommendedPaperSession(params: {
-  marketCode: string;
+  marketCode?: string;
   rank?: number;
   regimeName?: string;
   universeName?: string;
@@ -64,6 +78,8 @@ export async function startRecommendedPaperSession(params: {
     parametersJson: {
       recommendationId: recommendation.id,
       regimeName: recommendation.regimeName,
+      universeName: recommendation.universeName,
+      timeframe: recommendation.timeframe,
       strategyType: recommendation.strategyType,
       strategyNames: recommendation.strategyNames,
       parameters: recommendation.parametersJson,
@@ -72,7 +88,7 @@ export async function startRecommendedPaperSession(params: {
       avgTestReturn: recommendation.avgTestReturn,
       avgTestDrawdown: recommendation.avgTestDrawdown
     },
-    marketCode: params.marketCode,
+    marketCode: getDefaultSessionMarketCode(recommendation, params.marketCode),
     timeframe: recommendation.timeframe,
     startingBalance: params.startingBalance ?? PAPER_STARTING_BALANCE
   });
@@ -90,6 +106,7 @@ export async function getPaperSessionById(sessionId: number): Promise<PaperSessi
 export async function getPaperSessionStatus(sessionId: number): Promise<{
   session: PaperSessionRow | null;
   position: Awaited<ReturnType<typeof getPaperPosition>>;
+  positions: Awaited<ReturnType<typeof listPaperPositions>>;
   recentOrders: Awaited<ReturnType<typeof getLatestPaperOrders>>;
 }> {
   const session = await getPaperSession(sessionId);
@@ -98,19 +115,62 @@ export async function getPaperSessionStatus(sessionId: number): Promise<{
     return {
       session: null,
       position: null,
+      positions: [],
       recentOrders: []
     };
   }
 
-  const position = await getPaperPosition({
-    sessionId,
-    marketCode: session.marketCode
-  });
+  const positions = await listPaperPositions(sessionId);
+  const position = session.marketCode.startsWith("UNIVERSE:")
+    ? null
+    : await getPaperPosition({
+        sessionId,
+        marketCode: session.marketCode
+      });
   const recentOrders = await getLatestPaperOrders(sessionId, 10);
 
   return {
     session,
     position,
+    positions,
     recentOrders
   };
+}
+
+export async function getRecommendationForSession(
+  session: PaperSessionRow,
+  params?: {
+    regimeName?: string;
+    universeName?: string;
+  }
+): Promise<StrategyRegimeRow | null> {
+  const sessionParameters =
+    session.parametersJson && typeof session.parametersJson === "object"
+      ? (session.parametersJson as Record<string, unknown>)
+      : {};
+  const recommendationId =
+    typeof sessionParameters.recommendationId === "number"
+      ? sessionParameters.recommendationId
+      : Number(sessionParameters.recommendationId);
+
+  if (Number.isFinite(recommendationId) && recommendationId > 0) {
+    const recommendation = await loadStrategyRegimeById(recommendationId);
+
+    if (recommendation) {
+      return recommendation;
+    }
+  }
+
+  const recommendations = await getRecommendations({
+    regimeName: params?.regimeName,
+    universeName: params?.universeName,
+    timeframe: session.timeframe,
+    limit: 20
+  });
+
+  return (
+    recommendations.find((item) => item.strategyNames.join(" + ") === session.strategyName) ??
+    recommendations[0] ??
+    null
+  );
 }

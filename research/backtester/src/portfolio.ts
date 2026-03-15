@@ -21,9 +21,17 @@ function calculatePortfolioMetrics(
     initialCapital,
     finalCapital,
     totalReturn: initialCapital === 0 ? 0 : (finalCapital - initialCapital) / initialCapital,
+    grossReturn: initialCapital === 0 ? 0 : (finalCapital - initialCapital) / initialCapital,
+    netReturn: initialCapital === 0 ? 0 : (finalCapital - initialCapital) / initialCapital,
     maxDrawdown,
     tradeCount: 0,
-    winRate: 0
+    winRate: 0,
+    turnover: 0,
+    avgHoldBars: 0,
+    feePaid: 0,
+    slippagePaid: 0,
+    rejectedOrdersCount: 0,
+    cooldownSkipsCount: 0
   };
 }
 

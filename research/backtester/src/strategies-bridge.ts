@@ -1,4 +1,5 @@
 import {
+  createIntegratedMultiFactorStrategy,
   createMovingAverageCrossStrategy,
   createRegimeFilteredMovingAverageCrossStrategy,
   createRsiMeanReversionStrategy,
@@ -13,6 +14,7 @@ import {
 } from "../../strategies/src/index.js";
 
 export {
+  createIntegratedMultiFactorStrategy,
   createMovingAverageCrossStrategy,
   createRegimeFilteredMovingAverageCrossStrategy,
   createRsiMeanReversionStrategy,

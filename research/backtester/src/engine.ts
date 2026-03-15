@@ -3,6 +3,12 @@ import {
   DEFAULT_INITIAL_CAPITAL,
   DEFAULT_SLIPPAGE_RATE
 } from "./config.js";
+import { buildMarketStateContext } from "../../strategies/src/index.js";
+import type { MarketStateContext } from "../../strategies/src/index.js";
+import {
+  createBarOpenExecutionModel,
+  type ExecutionModel
+} from "./execution-model.js";
 import type { BacktestMetrics, BacktestResult, Candle, Strategy, Trade } from "./types.js";
 
 function calculateMetrics(
@@ -40,9 +46,17 @@ function calculateMetrics(
     initialCapital,
     finalCapital,
     totalReturn: initialCapital === 0 ? 0 : (finalCapital - initialCapital) / initialCapital,
+    grossReturn: initialCapital === 0 ? 0 : (finalCapital - initialCapital) / initialCapital,
+    netReturn: initialCapital === 0 ? 0 : (finalCapital - initialCapital) / initialCapital,
     maxDrawdown,
     tradeCount: trades.length,
-    winRate: completedTradeCount === 0 ? 0 : winningTradeCount / completedTradeCount
+    winRate: completedTradeCount === 0 ? 0 : winningTradeCount / completedTradeCount,
+    turnover: 0,
+    avgHoldBars: 0,
+    feePaid: trades.reduce((sum, trade) => sum + trade.fee, 0),
+    slippagePaid: 0,
+    rejectedOrdersCount: 0,
+    cooldownSkipsCount: 0
   };
 }
 
@@ -51,6 +65,11 @@ export function runBacktest(params: {
   timeframe: string;
   candles: Candle[];
   strategy: Strategy;
+  universeName?: string;
+  benchmarkMarketCode?: string;
+  universeCandlesByMarket?: Record<string, Candle[]>;
+  precomputedMarketStateByTime?: Record<string, MarketStateContext>;
+  executionModel?: ExecutionModel;
   initialCapital?: number;
   feeRate?: number;
   slippageRate?: number;
@@ -58,6 +77,7 @@ export function runBacktest(params: {
   const initialCapital = params.initialCapital ?? DEFAULT_INITIAL_CAPITAL;
   const feeRate = params.feeRate ?? DEFAULT_FEE_RATE;
   const slippageRate = params.slippageRate ?? DEFAULT_SLIPPAGE_RATE;
+  const executionModel = params.executionModel ?? createBarOpenExecutionModel();
 
   let cash = initialCapital;
   let positionQuantity = 0;
@@ -68,10 +88,28 @@ export function runBacktest(params: {
 
   for (let index = 1; index < params.candles.length; index += 1) {
     const signalIndex = index - 1;
+    const referenceTime = params.candles[signalIndex]?.candleTimeUtc;
+    const precomputedMarketState =
+      referenceTime === undefined
+        ? undefined
+        : params.precomputedMarketStateByTime?.[referenceTime.toISOString()];
     const signal = params.strategy.generateSignal({
       candles: params.candles,
       index: signalIndex,
       hasPosition: positionQuantity > 0,
+      marketState:
+        precomputedMarketState ??
+        (params.universeCandlesByMarket
+          ? buildMarketStateContext({
+              marketCode: params.marketCode,
+              candles: params.candles,
+              index: signalIndex,
+              universeName: params.universeName,
+              benchmarkMarketCode: params.benchmarkMarketCode,
+              universeCandlesByMarket: params.universeCandlesByMarket,
+              config: params.strategy.contextConfig
+            })
+          : undefined),
       currentPosition:
         positionQuantity > 0 && entryIndex !== null
           ? {
@@ -82,10 +120,11 @@ export function runBacktest(params: {
           : undefined
     });
     const candle = params.candles[index];
-    const executionPrice =
-      signal === "BUY"
-        ? candle.openPrice * (1 + slippageRate)
-        : candle.openPrice * (1 - slippageRate);
+    const executionPrice = executionModel.getExecutionPrice({
+      side: signal === "BUY" ? "BUY" : "SELL",
+      openPrice: candle.openPrice,
+      slippageRate
+    });
 
     if (signal === "BUY" && positionQuantity === 0 && cash > 0) {
       const grossQuantity = cash / executionPrice;

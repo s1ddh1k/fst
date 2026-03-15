@@ -276,12 +276,13 @@ function stopPaperTraderServer(): void {
 
 async function createWindow(): Promise<void> {
   const window = new BrowserWindow({
-    width: 1280,
-    height: 900,
+    width: 1600,
+    height: 1000,
     minWidth: 960,
     minHeight: 720,
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs")
+      preload: path.join(__dirname, "preload.cjs"),
+      zoomFactor: 1.5
     },
     backgroundColor: "#f1ebdc",
     title: "fst desktop"

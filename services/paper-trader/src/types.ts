@@ -47,6 +47,7 @@ export type PaperSessionRow = {
   currentBalance: number;
   status: string;
   startedAt: Date;
+  parametersJson: unknown;
 };
 
 export type PaperPositionRow = {
@@ -59,4 +60,14 @@ export type PaperPositionRow = {
   unrealizedPnl: number;
   realizedPnl: number;
   updatedAt: Date;
+};
+
+export type PaperOrderRow = {
+  marketCode: string | null;
+  side: string;
+  executedPrice: number | null;
+  quantity: number;
+  fee: number;
+  status: string;
+  executedAt: Date | null;
 };

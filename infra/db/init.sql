@@ -52,6 +52,94 @@ CREATE TABLE IF NOT EXISTS candles (
 CREATE INDEX IF NOT EXISTS idx_candles_market_timeframe_time
   ON candles (market_code, timeframe, candle_time_utc DESC);
 
+CREATE TABLE IF NOT EXISTS market_breadth_features (
+  id BIGSERIAL PRIMARY KEY,
+  universe_name TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  config_key TEXT NOT NULL,
+  config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  feature_time_utc TIMESTAMPTZ NOT NULL,
+  sample_size INTEGER NOT NULL,
+  advancing_ratio NUMERIC(18, 8) NOT NULL,
+  above_trend_ratio NUMERIC(18, 8) NOT NULL,
+  positive_momentum_ratio NUMERIC(18, 8) NOT NULL,
+  average_momentum NUMERIC(18, 8),
+  average_z_score NUMERIC(18, 8),
+  average_volume_spike NUMERIC(18, 8),
+  average_historical_volatility NUMERIC(18, 8),
+  dispersion_score NUMERIC(18, 8),
+  liquidity_score NUMERIC(18, 8),
+  composite_trend_score NUMERIC(18, 8),
+  composite_change NUMERIC(18, 8),
+  composite_momentum NUMERIC(18, 8),
+  composite_historical_volatility NUMERIC(18, 8),
+  composite_regime TEXT,
+  risk_on_score NUMERIC(18, 8) NOT NULL,
+  benchmark_market_code TEXT,
+  benchmark_momentum NUMERIC(18, 8),
+  benchmark_above_trend BOOLEAN,
+  benchmark_historical_volatility NUMERIC(18, 8),
+  benchmark_regime TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (universe_name, timeframe, config_key, feature_time_utc)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_breadth_features_lookup
+  ON market_breadth_features (universe_name, timeframe, config_key, feature_time_utc DESC);
+
+ALTER TABLE market_breadth_features
+  ADD COLUMN IF NOT EXISTS dispersion_score NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS liquidity_score NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS composite_trend_score NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS composite_change NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS composite_momentum NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS composite_historical_volatility NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS composite_regime TEXT;
+
+CREATE TABLE IF NOT EXISTS market_relative_strength_features (
+  id BIGSERIAL PRIMARY KEY,
+  universe_name TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  config_key TEXT NOT NULL,
+  config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  market_code TEXT NOT NULL,
+  feature_time_utc TIMESTAMPTZ NOT NULL,
+  momentum_spread NUMERIC(18, 8),
+  z_score_spread NUMERIC(18, 8),
+  volume_spike_spread NUMERIC(18, 8),
+  benchmark_momentum_spread NUMERIC(18, 8),
+  momentum_percentile NUMERIC(18, 8),
+  cohort_momentum_spread NUMERIC(18, 8),
+  cohort_z_score_spread NUMERIC(18, 8),
+  cohort_volume_spike_spread NUMERIC(18, 8),
+  composite_momentum_spread NUMERIC(18, 8),
+  composite_change_spread NUMERIC(18, 8),
+  liquidity_spread NUMERIC(18, 8),
+  return_percentile NUMERIC(18, 8),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (universe_name, timeframe, config_key, feature_time_utc, market_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_relative_strength_features_lookup
+  ON market_relative_strength_features (
+    universe_name,
+    timeframe,
+    config_key,
+    market_code,
+    feature_time_utc DESC
+  );
+
+ALTER TABLE market_relative_strength_features
+  ADD COLUMN IF NOT EXISTS cohort_momentum_spread NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS cohort_z_score_spread NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS cohort_volume_spike_spread NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS composite_momentum_spread NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS composite_change_spread NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS liquidity_spread NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS return_percentile NUMERIC(18, 8);
+
 CREATE TABLE IF NOT EXISTS collector_runs (
   id BIGSERIAL PRIMARY KEY,
   run_type TEXT NOT NULL,
@@ -115,6 +203,8 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
   strategy_version TEXT NOT NULL DEFAULT '0.1.0',
   parameters_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   market_code TEXT NOT NULL,
+  universe_name TEXT,
+  market_count INTEGER,
   timeframe TEXT NOT NULL,
   train_start_at TIMESTAMPTZ NOT NULL,
   train_end_at TIMESTAMPTZ NOT NULL,
@@ -130,13 +220,21 @@ CREATE TABLE IF NOT EXISTS backtest_metrics (
   backtest_run_id BIGINT NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
   segment_type TEXT NOT NULL,
   total_return NUMERIC(18, 8),
+  gross_return NUMERIC(18, 8),
+  net_return NUMERIC(18, 8),
   annualized_return NUMERIC(18, 8),
   max_drawdown NUMERIC(18, 8),
   sharpe_ratio NUMERIC(18, 8),
   sortino_ratio NUMERIC(18, 8),
   win_rate NUMERIC(18, 8),
   profit_factor NUMERIC(18, 8),
-  trade_count INTEGER NOT NULL DEFAULT 0
+  trade_count INTEGER NOT NULL DEFAULT 0,
+  turnover NUMERIC(18, 8),
+  avg_hold_bars NUMERIC(18, 8),
+  fee_paid NUMERIC(24, 8),
+  slippage_paid NUMERIC(24, 8),
+  rejected_orders_count INTEGER,
+  cooldown_skips_count INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS strategy_regimes (
@@ -191,6 +289,7 @@ CREATE TABLE IF NOT EXISTS paper_sessions (
 CREATE TABLE IF NOT EXISTS paper_orders (
   id BIGSERIAL PRIMARY KEY,
   paper_session_id BIGINT NOT NULL REFERENCES paper_sessions(id) ON DELETE CASCADE,
+  market_code TEXT,
   side TEXT NOT NULL,
   order_type TEXT NOT NULL,
   requested_price NUMERIC(24, 8),
@@ -202,6 +301,8 @@ CREATE TABLE IF NOT EXISTS paper_orders (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   executed_at TIMESTAMPTZ
 );
+
+ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS market_code TEXT;
 
 CREATE TABLE IF NOT EXISTS paper_positions (
   id BIGSERIAL PRIMARY KEY,
@@ -224,3 +325,26 @@ CREATE TABLE IF NOT EXISTS system_logs (
   context_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE backtest_runs
+  ADD COLUMN IF NOT EXISTS universe_name TEXT,
+  ADD COLUMN IF NOT EXISTS market_count INTEGER;
+
+-- v2 validation columns
+ALTER TABLE backtest_metrics
+  ADD COLUMN IF NOT EXISTS gross_return NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS net_return NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS turnover NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS avg_hold_bars NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS fee_paid NUMERIC(24, 8),
+  ADD COLUMN IF NOT EXISTS slippage_paid NUMERIC(24, 8),
+  ADD COLUMN IF NOT EXISTS rejected_orders_count INTEGER,
+  ADD COLUMN IF NOT EXISTS cooldown_skips_count INTEGER,
+  ADD COLUMN IF NOT EXISTS bootstrap_p_value NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS bootstrap_ci_lower NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS bootstrap_ci_upper NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS random_benchmark_percentile NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS trade_to_parameter_ratio NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS avg_position_weight NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS max_position_weight NUMERIC(18, 8),
+  ADD COLUMN IF NOT EXISTS circuit_breaker_count INTEGER;
