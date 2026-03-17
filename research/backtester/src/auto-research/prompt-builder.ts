@@ -68,6 +68,111 @@ function compactCodeMutationResults(results: CodeMutationExecutionResult[]) {
   }));
 }
 
+function parameterKey(parameters: Record<string, number>) {
+  return JSON.stringify(
+    Object.keys(parameters)
+      .sort((left, right) => left.localeCompare(right))
+      .reduce<Record<string, number>>((result, key) => {
+        const value = parameters[key];
+        result[key] = Number.isFinite(value) ? Number(value.toFixed(4)) : value;
+        return result;
+      }, {})
+  );
+}
+
+function compactCandidateLedger(history: ResearchIterationRecord[]) {
+  const ledger = new Map<string, {
+    familyId: string;
+    parameters: Record<string, number>;
+    appearances: number;
+    bestNetReturn: number;
+    tradefulAppearances: number;
+    lastIteration: number;
+  }>();
+
+  for (const iteration of history) {
+    for (const evaluation of iteration.evaluations) {
+      const key = `${evaluation.candidate.familyId}:${parameterKey(evaluation.candidate.parameters)}`;
+      const existing = ledger.get(key);
+
+      if (!existing) {
+        ledger.set(key, {
+          familyId: evaluation.candidate.familyId,
+          parameters: evaluation.candidate.parameters,
+          appearances: 1,
+          bestNetReturn: evaluation.summary.netReturn,
+          tradefulAppearances: evaluation.summary.tradeCount > 0 ? 1 : 0,
+          lastIteration: iteration.iteration
+        });
+        continue;
+      }
+
+      existing.appearances += 1;
+      existing.bestNetReturn = Math.max(existing.bestNetReturn, evaluation.summary.netReturn);
+      existing.tradefulAppearances += evaluation.summary.tradeCount > 0 ? 1 : 0;
+      existing.lastIteration = iteration.iteration;
+    }
+  }
+
+  return [...ledger.values()]
+    .sort((left, right) => {
+      if (right.bestNetReturn !== left.bestNetReturn) {
+        return right.bestNetReturn - left.bestNetReturn;
+      }
+
+      return right.appearances - left.appearances;
+    })
+    .slice(0, 20);
+}
+
+function compactFamilyPerformance(history: ResearchIterationRecord[]) {
+  const byFamily = new Map<string, {
+    evaluations: number;
+    tradeful: number;
+    positive: number;
+    bestNetReturn: number;
+    bestTradeCount: number;
+    topReasons: Record<string, number>;
+  }>();
+
+  for (const iteration of history) {
+    for (const evaluation of iteration.evaluations) {
+      const current = byFamily.get(evaluation.candidate.familyId) ?? {
+        evaluations: 0,
+        tradeful: 0,
+        positive: 0,
+        bestNetReturn: Number.NEGATIVE_INFINITY,
+        bestTradeCount: 0,
+        topReasons: {}
+      };
+
+      current.evaluations += 1;
+      current.tradeful += evaluation.summary.tradeCount > 0 ? 1 : 0;
+      current.positive += evaluation.summary.netReturn > 0 ? 1 : 0;
+      current.bestNetReturn = Math.max(current.bestNetReturn, evaluation.summary.netReturn);
+      current.bestTradeCount = Math.max(current.bestTradeCount, evaluation.summary.tradeCount);
+      for (const [reason, count] of Object.entries(evaluation.diagnostics.reasons.strategy)) {
+        current.topReasons[reason] = (current.topReasons[reason] ?? 0) + count;
+      }
+      byFamily.set(evaluation.candidate.familyId, current);
+    }
+  }
+
+  return [...byFamily.entries()]
+    .map(([familyId, value]) => ({
+      familyId,
+      evaluations: value.evaluations,
+      tradeful: value.tradeful,
+      positive: value.positive,
+      bestNetReturn: value.bestNetReturn,
+      bestTradeCount: value.bestTradeCount,
+      topStrategyReasons: Object.entries(value.topReasons)
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 5)
+    }))
+    .sort((left, right) => right.bestNetReturn - left.bestNetReturn);
+}
+
 export function buildProposalPrompt(params: {
   config: AutoResearchRunConfig;
   families: StrategyFamilyDefinition[];
@@ -96,6 +201,8 @@ ${jsonBlock({
   candidatesPerIteration: params.config.candidatesPerIteration,
   marketCodes: params.marketCodes,
   families: compactFamilies(params.families),
+  familyPerformanceSummary: compactFamilyPerformance(params.history),
+  candidateLedgerSummary: compactCandidateLedger(params.history),
   priorHistory: compactHistory(params.history)
 })}
 
@@ -212,6 +319,8 @@ ${jsonBlock({
   latestCodeMutationResults: compactCodeMutationResults(params.codeMutationResults),
   latestValidationResults: params.validationResults,
   latestEvaluations: params.evaluations.map(compactEvaluation),
+  familyPerformanceSummary: compactFamilyPerformance(params.history),
+  candidateLedgerSummary: compactCandidateLedger(params.history),
   priorHistory: compactHistory(params.history)
 })}
 

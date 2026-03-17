@@ -11,6 +11,34 @@ type AutoResearchLeaderboardEntry = {
   parameters?: Record<string, number>;
 };
 
+type AutoResearchCandidateLedgerEntry = {
+  fingerprint: string;
+  familyId: string;
+  parameters: Record<string, number>;
+  firstCandidateId: string;
+  lastCandidateId: string;
+  firstIteration: number;
+  lastIteration: number;
+  appearances: number;
+  bestNetReturn: number;
+  bestTradeCount: number;
+  positiveAppearances: number;
+  tradefulAppearances: number;
+};
+
+type AutoResearchFamilySummaryEntry = {
+  familyId: string;
+  evaluations: number;
+  uniqueCandidates: number;
+  positiveEvaluations: number;
+  tradefulEvaluations: number;
+  bestNetReturn: number;
+  bestTradeNetReturn?: number;
+  bestTradeCount: number;
+  totalTrades: number;
+  lastIteration: number;
+};
+
 function pct(value: number | undefined): string {
   if (typeof value !== "number" || Number.isNaN(value)) {
     return "-";
@@ -49,6 +77,8 @@ export function renderAutoResearchHtmlWithOptions(
     status?: AutoResearchStatus;
     leaderboard?: AutoResearchLeaderboardEntry[];
     rawLeaderboard?: AutoResearchLeaderboardEntry[];
+    candidateLedger?: AutoResearchCandidateLedgerEntry[];
+    familySummary?: AutoResearchFamilySummaryEntry[];
   }
 ): string {
   const best = report.bestCandidate;
@@ -80,6 +110,38 @@ export function renderAutoResearchHtmlWithOptions(
               <td>${pct(entry.netReturn)}</td>
               <td>${pct(entry.maxDrawdown)}</td>
               <td>${entry.tradeCount}</td>
+            </tr>`
+    )
+    .join("");
+  const candidateLedgerRows = (options.candidateLedger ?? [])
+    .slice(0, 12)
+    .map(
+      (entry) => `
+            <tr>
+              <td>${esc(entry.familyId)}</td>
+              <td><code>${esc(JSON.stringify(entry.parameters ?? {}))}</code></td>
+              <td>${entry.appearances}</td>
+              <td>${entry.tradefulAppearances}</td>
+              <td>${pct(entry.bestNetReturn)}</td>
+              <td>${entry.bestTradeCount}</td>
+              <td>${entry.firstIteration} -> ${entry.lastIteration}</td>
+            </tr>`
+    )
+    .join("");
+  const familySummaryRows = (options.familySummary ?? [])
+    .slice(0, 12)
+    .map(
+      (entry) => `
+            <tr>
+              <td>${esc(entry.familyId)}</td>
+              <td>${entry.evaluations}</td>
+              <td>${entry.uniqueCandidates}</td>
+              <td>${entry.tradefulEvaluations}</td>
+              <td>${entry.positiveEvaluations}</td>
+              <td>${pct(entry.bestNetReturn)}</td>
+              <td>${pct(entry.bestTradeNetReturn)}</td>
+              <td>${entry.bestTradeCount}</td>
+              <td>${entry.lastIteration}</td>
             </tr>`
     )
     .join("");
@@ -172,8 +234,33 @@ export function renderAutoResearchHtmlWithOptions(
         <div class="stat"><span class="label">Best Raw Net</span><span class="value">${pct(best?.summary.netReturn)}</span></div>
         <div class="stat"><span class="label">Best With Trades</span><span class="value">${esc(bestTrade?.candidate.candidateId ?? "-")}</span></div>
         <div class="stat"><span class="label">Best Trade Net</span><span class="value">${pct(bestTrade?.summary.netReturn)}</span></div>
+        <div class="stat"><span class="label">Unique Candidates</span><span class="value">${options.candidateLedger?.length ?? 0}</span></div>
+        <div class="stat"><span class="label">Tracked Families</span><span class="value">${options.familySummary?.length ?? 0}</span></div>
       </div>
     </section>
+    ${
+      familySummaryRows
+        ? `<section class="iteration">
+          <h2>Family Summary</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Family</th>
+                <th>Evals</th>
+                <th>Unique Candidates</th>
+                <th>Tradeful</th>
+                <th>Positive</th>
+                <th>Best Net</th>
+                <th>Best Trade Net</th>
+                <th>Best Trade Count</th>
+                <th>Last Iter</th>
+              </tr>
+            </thead>
+            <tbody>${familySummaryRows}</tbody>
+          </table>
+        </section>`
+        : ""
+    }
     ${
       leaderboardRows
         ? `<section class="iteration">
@@ -190,6 +277,27 @@ export function renderAutoResearchHtmlWithOptions(
               </tr>
             </thead>
             <tbody>${leaderboardRows}</tbody>
+          </table>
+        </section>`
+        : ""
+    }
+    ${
+      candidateLedgerRows
+        ? `<section class="iteration">
+          <h2>Candidate Ledger</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Family</th>
+                <th>Parameters</th>
+                <th>Appearances</th>
+                <th>Tradeful</th>
+                <th>Best Net</th>
+                <th>Best Trades</th>
+                <th>Iteration Span</th>
+              </tr>
+            </thead>
+            <tbody>${candidateLedgerRows}</tbody>
           </table>
         </section>`
         : ""

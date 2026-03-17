@@ -271,9 +271,9 @@ async function main(): Promise<void> {
   const autoResearchFamilies = process.argv
     .flatMap((value, index, args) => (value === "--auto-research-family" ? [args[index + 1]] : []))
     .filter((value): value is string => Boolean(value));
-  const autoResearchMode = getOption(process.argv, "--auto-research-mode") === "walk-forward"
-    ? "walk-forward"
-    : "holdout";
+  const autoResearchMode = getOption(process.argv, "--auto-research-mode") === "holdout"
+    ? "holdout"
+    : "walk-forward";
   const autoResearchIterations = Number.parseInt(getOption(process.argv, "--auto-research-iterations") ?? "3", 10);
   const autoResearchCandidates = Number.parseInt(getOption(process.argv, "--auto-research-candidates") ?? "3", 10);
   const autoResearchParallelism = Number.parseInt(

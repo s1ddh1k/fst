@@ -353,7 +353,7 @@ test("auto research fallback review diversifies next candidates instead of cloni
   assert.ok(review?.nextCandidates.some((candidate) => candidate.familyId === "leader-pullback-state-machine"));
 });
 
-test("auto research saves unique leaderboard separately from raw repeated rows", async () => {
+test("auto research persists raw rows separately even when repeat suggestions are novelized", async () => {
   const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-unique-board-"));
   let reviewCalls = 0;
 
@@ -444,10 +444,208 @@ test("auto research saves unique leaderboard separately from raw repeated rows",
   const rawLeaderboard = JSON.parse(await readFile(path.join(outputDir, "leaderboard.raw.json"), "utf8"));
   const savedHtml = await readFile(path.join(outputDir, "report.html"), "utf8");
 
-  assert.equal(uniqueLeaderboard.length, 1);
+  assert.equal(uniqueLeaderboard.length, 2);
   assert.equal(rawLeaderboard.length, 2);
+  assert.notEqual(uniqueLeaderboard[0].candidateId, uniqueLeaderboard[1].candidateId);
   assert.match(savedHtml, /Unique Leaderboard/);
   assert.match(savedHtml, /Raw Leaderboard/);
+});
+
+test("auto research novelizes repeated historical candidates and persists family artifacts", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-novelize-"));
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "repeat candidate across iterations",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "repeat-lpsm",
+            familyId: "leader-pullback-state-machine",
+            thesis: "repeat leader pullback",
+            parameters: {
+              strengthFloor: 0.7,
+              pullbackAtr: 0.9,
+              setupExpiryBars: 4,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      return {
+        summary: "repeat it again",
+        verdict: "keep_searching",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [
+          {
+            candidateId: "repeat-lpsm",
+            familyId: "leader-pullback-state-machine",
+            thesis: "repeat leader pullback",
+            parameters: {
+              strengthFloor: 0.7,
+              pullbackAtr: 0.9,
+              setupExpiryBars: 4,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          }
+        ],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, candidate.parameters.pullbackAtr > 0.9 ? 0.05 : 0.03);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  const report = await orchestrator.run({
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 5,
+    limit: 2000,
+    holdoutDays: 180,
+    iterations: 2,
+    candidatesPerIteration: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false
+  });
+
+  assert.equal(report.iterations.length, 2);
+  assert.equal(report.iterations[0]?.evaluations[0]?.candidate.parameters.pullbackAtr, 0.9);
+  assert.notEqual(
+    JSON.stringify(report.iterations[1]?.evaluations[0]?.candidate.parameters),
+    JSON.stringify(report.iterations[0]?.evaluations[0]?.candidate.parameters)
+  );
+  assert.match(report.iterations[1]?.evaluations[0]?.candidate.candidateId ?? "", /novel-02/);
+
+  const ledger = JSON.parse(await readFile(path.join(outputDir, "candidate-ledger.json"), "utf8"));
+  const familySummary = JSON.parse(await readFile(path.join(outputDir, "family-summary.json"), "utf8"));
+  const html = await readFile(path.join(outputDir, "report.html"), "utf8");
+
+  assert.equal(ledger.length, 2);
+  assert.equal(familySummary[0].familyId, "leader-pullback-state-machine");
+  assert.match(html, /Family Summary/);
+  assert.match(html, /Candidate Ledger/);
+});
+
+test("auto research prefers family diversity when selecting candidates for evaluation", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-diversity-"));
+  const seenFamilies: string[] = [];
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "prefer one candidate per family first",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            familyId: "leader-pullback-state-machine",
+            thesis: "leader idea A",
+            parameters: {
+              strengthFloor: 0.7,
+              pullbackAtr: 0.7,
+              setupExpiryBars: 4,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          },
+          {
+            familyId: "leader-pullback-state-machine",
+            thesis: "leader idea B",
+            parameters: {
+              strengthFloor: 0.8,
+              pullbackAtr: 0.8,
+              setupExpiryBars: 4,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          },
+          {
+            familyId: "momentum-reacceleration",
+            thesis: "momentum idea",
+            parameters: {
+              strengthFloor: 0.72,
+              minRiskOn: 0.1,
+              resetRsiFloor: 52,
+              trailAtrMult: 2.0
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      return {
+        summary: "stop",
+        verdict: "stop_no_edge",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      seenFamilies.push(candidate.familyId);
+      return buildEvaluation(candidate, 0.01);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  await orchestrator.run({
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 5,
+    limit: 2000,
+    holdoutDays: 180,
+    iterations: 1,
+    candidatesPerIteration: 2,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false
+  });
+
+  assert.deepEqual(seenFamilies.sort(), ["leader-pullback-state-machine", "momentum-reacceleration"].sort());
 });
 
 test("auto research run lock prevents concurrent writes to the same output dir", async () => {

@@ -174,6 +174,49 @@ type LiveLeaderboardEntry = {
   parameters: Record<string, number>;
 };
 
+type CandidateLedgerEntry = {
+  fingerprint: string;
+  familyId: string;
+  parameters: Record<string, number>;
+  firstCandidateId: string;
+  lastCandidateId: string;
+  firstIteration: number;
+  lastIteration: number;
+  appearances: number;
+  bestNetReturn: number;
+  bestTradeCount: number;
+  positiveAppearances: number;
+  tradefulAppearances: number;
+};
+
+type FamilySummaryEntry = {
+  familyId: string;
+  evaluations: number;
+  uniqueCandidates: number;
+  positiveEvaluations: number;
+  tradefulEvaluations: number;
+  bestNetReturn: number;
+  bestTradeNetReturn?: number;
+  bestTradeCount: number;
+  totalTrades: number;
+  lastIteration: number;
+};
+
+function stableParametersKey(parameters: Record<string, number>): string {
+  return JSON.stringify(
+    Object.keys(parameters)
+      .sort((left, right) => left.localeCompare(right))
+      .reduce<Record<string, number>>((result, key) => {
+        result[key] = quantize(parameters[key] ?? 0);
+        return result;
+      }, {})
+  );
+}
+
+function candidateFingerprint(candidate: Pick<NormalizedCandidateProposal, "familyId" | "parameters">): string {
+  return `${candidate.familyId}:${stableParametersKey(candidate.parameters)}`;
+}
+
 function buildLeaderboard(
   iterations: ResearchIterationRecord[],
   liveEvaluations: CandidateBacktestEvaluation[] = []
@@ -216,13 +259,120 @@ function buildUniqueLeaderboard(entries: LiveLeaderboardEntry[]): LiveLeaderboar
   const bestByKey = new Map<string, LiveLeaderboardEntry>();
 
   for (const entry of entries) {
-    const key = `${entry.familyId}:${JSON.stringify(entry.parameters)}`;
+    const key = candidateFingerprint(entry);
     if (!bestByKey.has(key)) {
       bestByKey.set(key, entry);
     }
   }
 
   return [...bestByKey.values()];
+}
+
+function buildCandidateLedger(
+  iterations: ResearchIterationRecord[],
+  liveEvaluations: CandidateBacktestEvaluation[] = []
+): CandidateLedgerEntry[] {
+  const ledger = new Map<string, CandidateLedgerEntry>();
+
+  const register = (iteration: number, evaluation: CandidateBacktestEvaluation) => {
+    const fingerprint = candidateFingerprint(evaluation.candidate);
+    const existing = ledger.get(fingerprint);
+
+    if (!existing) {
+      ledger.set(fingerprint, {
+        fingerprint,
+        familyId: evaluation.candidate.familyId,
+        parameters: evaluation.candidate.parameters,
+        firstCandidateId: evaluation.candidate.candidateId,
+        lastCandidateId: evaluation.candidate.candidateId,
+        firstIteration: iteration,
+        lastIteration: iteration,
+        appearances: 1,
+        bestNetReturn: evaluation.summary.netReturn,
+        bestTradeCount: evaluation.summary.tradeCount,
+        positiveAppearances: evaluation.summary.netReturn > 0 ? 1 : 0,
+        tradefulAppearances: evaluation.summary.tradeCount > 0 ? 1 : 0
+      });
+      return;
+    }
+
+    existing.lastCandidateId = evaluation.candidate.candidateId;
+    existing.lastIteration = iteration;
+    existing.appearances += 1;
+    existing.bestNetReturn = Math.max(existing.bestNetReturn, evaluation.summary.netReturn);
+    existing.bestTradeCount = Math.max(existing.bestTradeCount, evaluation.summary.tradeCount);
+    existing.positiveAppearances += evaluation.summary.netReturn > 0 ? 1 : 0;
+    existing.tradefulAppearances += evaluation.summary.tradeCount > 0 ? 1 : 0;
+  };
+
+  for (const iteration of iterations) {
+    for (const evaluation of iteration.evaluations) {
+      register(iteration.iteration, evaluation);
+    }
+  }
+
+  for (const evaluation of liveEvaluations) {
+    register(iterations.length + 1, evaluation);
+  }
+
+  return [...ledger.values()].sort((left, right) => {
+    if (right.bestNetReturn !== left.bestNetReturn) {
+      return right.bestNetReturn - left.bestNetReturn;
+    }
+
+    if (right.bestTradeCount !== left.bestTradeCount) {
+      return right.bestTradeCount - left.bestTradeCount;
+    }
+
+    return right.appearances - left.appearances;
+  });
+}
+
+function buildFamilySummary(ledger: CandidateLedgerEntry[]): FamilySummaryEntry[] {
+  const byFamily = new Map<string, FamilySummaryEntry>();
+
+  for (const entry of ledger) {
+    const current = byFamily.get(entry.familyId) ?? {
+      familyId: entry.familyId,
+      evaluations: 0,
+      uniqueCandidates: 0,
+      positiveEvaluations: 0,
+      tradefulEvaluations: 0,
+      bestNetReturn: Number.NEGATIVE_INFINITY,
+      bestTradeNetReturn: undefined,
+      bestTradeCount: 0,
+      totalTrades: 0,
+      lastIteration: 0
+    };
+
+    current.evaluations += entry.appearances;
+    current.uniqueCandidates += 1;
+    current.positiveEvaluations += entry.positiveAppearances;
+    current.tradefulEvaluations += entry.tradefulAppearances;
+    current.bestNetReturn = Math.max(current.bestNetReturn, entry.bestNetReturn);
+    if (entry.bestTradeCount > 0) {
+      current.bestTradeCount = Math.max(current.bestTradeCount, entry.bestTradeCount);
+      current.bestTradeNetReturn =
+        typeof current.bestTradeNetReturn === "number"
+          ? Math.max(current.bestTradeNetReturn, entry.bestNetReturn)
+          : entry.bestNetReturn;
+    }
+    current.totalTrades += entry.bestTradeCount;
+    current.lastIteration = Math.max(current.lastIteration, entry.lastIteration);
+    byFamily.set(entry.familyId, current);
+  }
+
+  return [...byFamily.values()].sort((left, right) => {
+    if (right.bestNetReturn !== left.bestNetReturn) {
+      return right.bestNetReturn - left.bestNetReturn;
+    }
+
+    if (right.tradefulEvaluations !== left.tradefulEvaluations) {
+      return right.tradefulEvaluations - left.tradefulEvaluations;
+    }
+
+    return right.evaluations - left.evaluations;
+  });
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -233,11 +383,134 @@ function quantize(value: number): number {
   return Number(value.toFixed(4));
 }
 
+function mutateCandidateToNovelVariant(params: {
+  candidate: NormalizedCandidateProposal;
+  family: StrategyFamilyDefinition | undefined;
+  usedFingerprints: Set<string>;
+  seed: number;
+  suffix: string;
+}): NormalizedCandidateProposal | undefined {
+  if (!params.family || params.family.parameterSpecs.length === 0) {
+    return undefined;
+  }
+
+  const directions = [1, -1, 2, -2];
+
+  for (let offset = 0; offset < params.family.parameterSpecs.length; offset += 1) {
+    const spec = params.family.parameterSpecs[(params.seed + offset) % params.family.parameterSpecs.length];
+    const width = spec.max - spec.min;
+    const current = params.candidate.parameters[spec.name];
+
+    if (!Number.isFinite(current) || width <= 0) {
+      continue;
+    }
+
+    const step = Math.max(width * 0.05, width / 20);
+
+    for (const direction of directions) {
+      const next = clamp(current + step * direction, spec.min, spec.max);
+      if (Math.abs(next - current) < 1e-9) {
+        continue;
+      }
+
+      const candidate: NormalizedCandidateProposal = {
+        ...params.candidate,
+        candidateId: `${params.candidate.familyId}-${params.suffix}-${String(params.seed + offset + Math.abs(direction)).padStart(2, "0")}`,
+        thesis: `${params.candidate.thesis} Novelized from historical duplicate.`,
+        parameters: {
+          ...params.candidate.parameters,
+          [spec.name]: quantize(next)
+        }
+      };
+      const fingerprint = candidateFingerprint(candidate);
+
+      if (!params.usedFingerprints.has(fingerprint)) {
+        return candidate;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function ensureNovelCandidates(params: {
+  candidates: NormalizedCandidateProposal[];
+  families: StrategyFamilyDefinition[];
+  iterations: ResearchIterationRecord[];
+  iteration: number;
+}): NormalizedCandidateProposal[] {
+  const historicalFingerprints = new Set<string>(
+    params.iterations.flatMap((iteration) =>
+      iteration.evaluations.map((evaluation) => candidateFingerprint(evaluation.candidate))
+    )
+  );
+  const usedFingerprints = new Set<string>();
+  const result: NormalizedCandidateProposal[] = [];
+
+  for (const [index, candidate] of params.candidates.entries()) {
+    const fingerprint = candidateFingerprint(candidate);
+    if (!historicalFingerprints.has(fingerprint) && !usedFingerprints.has(fingerprint)) {
+      result.push(candidate);
+      usedFingerprints.add(fingerprint);
+      continue;
+    }
+
+    const family = params.families.find((item) => item.familyId === candidate.familyId);
+    const mutated = mutateCandidateToNovelVariant({
+      candidate,
+      family,
+      usedFingerprints: new Set([...historicalFingerprints, ...usedFingerprints]),
+      seed: index + params.iteration,
+      suffix: `novel-${String(params.iteration).padStart(2, "0")}`
+    });
+
+    if (mutated) {
+      result.push(mutated);
+      usedFingerprints.add(candidateFingerprint(mutated));
+    }
+  }
+
+  return result;
+}
+
+function selectDiversifiedCandidates(
+  candidates: NormalizedCandidateProposal[],
+  limit: number
+): NormalizedCandidateProposal[] {
+  const byFamily = new Map<string, NormalizedCandidateProposal[]>();
+
+  for (const candidate of candidates) {
+    const bucket = byFamily.get(candidate.familyId) ?? [];
+    bucket.push(candidate);
+    byFamily.set(candidate.familyId, bucket);
+  }
+
+  const selected: NormalizedCandidateProposal[] = [];
+  for (const bucket of byFamily.values()) {
+    if (bucket[0]) {
+      selected.push(bucket[0]);
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (selected.length >= limit) {
+      break;
+    }
+
+    if (!selected.includes(candidate)) {
+      selected.push(candidate);
+    }
+  }
+
+  return selected.slice(0, limit);
+}
+
 function buildFallbackNextCandidates(params: {
   evaluations: CandidateBacktestEvaluation[];
   families: StrategyFamilyDefinition[];
   limit: number;
   iteration: number;
+  seenFingerprints?: Set<string>;
 }): CandidateProposal[] {
   const ranked = params.evaluations
     .slice()
@@ -276,7 +549,9 @@ function buildFallbackNextCandidates(params: {
     }
   }
 
-  return selected.slice(0, params.limit).map((evaluation, candidateIndex) => {
+  const usedFingerprints = new Set(params.seenFingerprints ?? []);
+
+  return selected.slice(0, params.limit).flatMap((evaluation, candidateIndex) => {
     const family = params.families.find((item) => item.familyId === evaluation.candidate.familyId);
     const parameters = { ...evaluation.candidate.parameters };
 
@@ -298,7 +573,7 @@ function buildFallbackNextCandidates(params: {
       }
     }
 
-    return {
+    const proposal = {
       candidateId: `${evaluation.candidate.familyId}-fallback-${String(params.iteration).padStart(2, "0")}-${String(candidateIndex + 1).padStart(2, "0")}`,
       familyId: evaluation.candidate.familyId,
       thesis: `Fallback diversified from ${evaluation.candidate.candidateId} after review failure.`,
@@ -309,6 +584,38 @@ function buildFallbackNextCandidates(params: {
         "net return falls below prior fallback source"
       ]
     };
+    let fingerprint = candidateFingerprint(proposal);
+
+    if (usedFingerprints.has(fingerprint)) {
+      const familyDefinition = params.families.find((item) => item.familyId === proposal.familyId);
+      const mutated = mutateCandidateToNovelVariant({
+        candidate: {
+          ...evaluation.candidate,
+          candidateId: proposal.candidateId,
+          parameters: proposal.parameters,
+          thesis: proposal.thesis
+        },
+        family: familyDefinition,
+        usedFingerprints,
+        seed: params.iteration + candidateIndex,
+        suffix: `fallback-novel-${String(params.iteration).padStart(2, "0")}`
+      });
+
+      if (mutated) {
+        fingerprint = candidateFingerprint(mutated);
+        usedFingerprints.add(fingerprint);
+        return [{
+          candidateId: mutated.candidateId,
+          familyId: mutated.familyId,
+          thesis: mutated.thesis,
+          parameters: mutated.parameters,
+          invalidationSignals: proposal.invalidationSignals
+        }];
+      }
+    }
+
+    usedFingerprints.add(fingerprint);
+    return [proposal];
   });
 }
 
@@ -340,10 +647,14 @@ async function persistRunArtifacts(params: {
   const report = toReport(state);
   const rawLeaderboard = buildLeaderboard(params.iterations, params.liveEvaluations);
   const leaderboard = buildUniqueLeaderboard(rawLeaderboard);
+  const candidateLedger = buildCandidateLedger(params.iterations, params.liveEvaluations);
+  const familySummary = buildFamilySummary(candidateLedger);
 
   await saveRunState(params.outputDir, state);
   await saveLeaderboard(params.outputDir, leaderboard);
   await saveLeaderboard(params.outputDir, rawLeaderboard, "leaderboard.raw.json");
+  await saveJson(path.join(params.outputDir, "candidate-ledger.json"), candidateLedger);
+  await saveJson(path.join(params.outputDir, "family-summary.json"), familySummary);
   await saveJson(path.join(params.outputDir, "report.json"), report);
   await writeFile(path.join(params.outputDir, "report.md"), summarizeMarkdown(report));
   await writeFile(
@@ -351,7 +662,9 @@ async function persistRunArtifacts(params: {
     renderAutoResearchHtmlWithOptions(report, {
       status: params.status,
       leaderboard,
-      rawLeaderboard
+      rawLeaderboard,
+      candidateLedger,
+      familySummary
     })
   );
 
@@ -554,11 +867,20 @@ export function createAutoResearchOrchestrator(deps: {
         catalog = mergeProposedFamilies(catalog, proposal.proposedFamilies);
         runtimeFamilies = buildRuntimeFamilies(catalog);
         await saveCatalogArtifact(config.outputDir, catalog);
-        const normalizedCandidates = dedupeCandidates(
-          normalizeCandidates(proposal.candidates, runtimeFamilies).slice(0, config.candidatesPerIteration)
+        const baseCandidates = dedupeCandidates(normalizeCandidates(proposal.candidates, runtimeFamilies));
+        const novelCandidates = ensureNovelCandidates({
+          candidates: baseCandidates,
+          families: runtimeFamilies,
+          iterations,
+          iteration
+        });
+        const normalizedCandidates = novelCandidates.length > 0 ? novelCandidates : baseCandidates;
+        const diversifiedCandidates = selectDiversifiedCandidates(
+          normalizedCandidates,
+          config.candidatesPerIteration
         );
         await log(
-          `[auto-research] iteration ${iteration}/${config.iterations} candidates=${normalizedCandidates.length}`
+          `[auto-research] iteration ${iteration}/${config.iterations} candidates=${diversifiedCandidates.length} families=${Array.from(new Set(diversifiedCandidates.map((candidate) => candidate.familyId))).join(",") || "none"}`
         );
         await log(
           `[auto-research] iteration ${iteration}/${config.iterations} preparation-actions=${
@@ -572,7 +894,7 @@ export function createAutoResearchOrchestrator(deps: {
           phase: "preparation",
           iteration,
           totalIterations: config.iterations,
-          message: `Preparation for ${normalizedCandidates.length} candidates.`
+          message: `Preparation for ${diversifiedCandidates.length} candidates.`
         };
         await saveRunStatus(config.outputDir, preparationStatus);
         const preparationResults = await prepareActions({
@@ -628,17 +950,17 @@ export function createAutoResearchOrchestrator(deps: {
           phase: "evaluation",
           iteration,
           totalIterations: config.iterations,
-          message: `Evaluating ${normalizedCandidates.length} candidates with parallelism ${parallelism}.`,
+          message: `Evaluating ${diversifiedCandidates.length} candidates with parallelism ${parallelism}.`,
           completedCandidates: 0,
-          candidateTotal: normalizedCandidates.length,
+          candidateTotal: diversifiedCandidates.length,
           bestCandidateId: bestCandidate?.candidate.candidateId,
           bestNetReturn: bestCandidate?.summary.netReturn
         };
         await saveRunStatus(config.outputDir, evaluationStatusBase);
         const liveEvaluations: CandidateBacktestEvaluation[] = [];
-        const evaluations = await runWithConcurrency(normalizedCandidates, parallelism, async (candidate, index) => {
+        const evaluations = await runWithConcurrency(diversifiedCandidates, parallelism, async (candidate, index) => {
           await log(
-            `[auto-research] iteration ${iteration}/${config.iterations} evaluate ${index + 1}/${normalizedCandidates.length} ${candidate.candidateId}`
+            `[auto-research] iteration ${iteration}/${config.iterations} evaluate ${index + 1}/${diversifiedCandidates.length} ${candidate.candidateId}`
           );
           let evaluation: CandidateBacktestEvaluation;
           try {
@@ -735,9 +1057,9 @@ export function createAutoResearchOrchestrator(deps: {
             phase: "evaluation",
             iteration,
             totalIterations: config.iterations,
-            message: `Evaluated ${liveEvaluations.length}/${normalizedCandidates.length} candidates.`,
+            message: `Evaluated ${liveEvaluations.length}/${diversifiedCandidates.length} candidates.`,
             completedCandidates: liveEvaluations.length,
-            candidateTotal: normalizedCandidates.length,
+            candidateTotal: diversifiedCandidates.length,
             bestCandidateId: liveEvaluations[0]?.candidate.candidateId ?? bestCandidate?.candidate.candidateId,
             bestNetReturn: liveEvaluations[0]?.summary.netReturn ?? bestCandidate?.summary.netReturn
           };
@@ -801,7 +1123,12 @@ export function createAutoResearchOrchestrator(deps: {
               evaluations,
               families: runtimeFamilies,
               limit: config.candidatesPerIteration,
-              iteration
+              iteration,
+              seenFingerprints: new Set(
+                iterations.flatMap((record) =>
+                  record.evaluations.map((evaluation) => candidateFingerprint(evaluation.candidate))
+                )
+              )
             });
             review = {
               summary: `Fallback review after LLM failure: ${message}`,
