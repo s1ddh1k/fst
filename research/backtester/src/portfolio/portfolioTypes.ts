@@ -5,6 +5,9 @@ export type CandidateSignal = {
   conviction: number;
   lastPrice: number;
   metadata?: {
+    signalReason?: string;
+    signalTags?: string[];
+    signalMetrics?: Record<string, number | null>;
     estimatedSpreadBps?: number;
     liquidityScore?: number;
     avgDailyNotional?: number;
@@ -65,6 +68,7 @@ export type CoordinationDiagnostics = {
   cooldownSkips: number;
   consideredBuys: number;
   eligibleBuys: number;
+  reasonCounts: Record<string, number>;
 };
 
 export type CoordinationResult = {

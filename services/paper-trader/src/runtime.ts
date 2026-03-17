@@ -10,7 +10,6 @@ import { getAtr } from "../../../research/strategies/src/factors/index.js";
 import { PAPER_FEE_RATE, PAPER_SLIPPAGE_RATE } from "./config.js";
 import {
   getPaperPosition,
-  insertPaperOrder,
   listSelectedUniverseMarkets,
   loadRecentCandlesForMarkets,
   updatePaperSession,
@@ -18,7 +17,9 @@ import {
   upsertPaperPosition
 } from "./db.js";
 import { createMarketOrderExecutionModel } from "./execution-model.js";
+import { createMarketPolicyCache } from "./market-policy-cache.js";
 import { createPaperRuntimeOpsGuard } from "./ops-guard.js";
+import { createPaperOrderStateBridge } from "./order-state-bridge.js";
 import { applyPaperSellNetValue, resolveAvailablePaperCash } from "./runtime-balance.js";
 import { createStrategyFromRecommendation, createScoredStrategyFromRecommendation, isScoredStrategy } from "./strategy-factory.js";
 import {
@@ -299,6 +300,11 @@ export async function runRecommendedLivePaperTrading(params: {
   const positionSizer = isScored ? createVolatilityTargetSizer() : undefined;
   const riskManager = isScored ? createDrawdownCircuitBreaker() : undefined;
   const executionModel = createMarketOrderExecutionModel();
+  const marketPolicyCache = createMarketPolicyCache({
+    minOrderNotional: 5_000,
+    takerFeeRate: PAPER_FEE_RATE
+  });
+  const orderStateBridge = createPaperOrderStateBridge();
   const opsGuard = createPaperRuntimeOpsGuard({
     minSignalCandles: 2
   });
@@ -443,7 +449,7 @@ export async function runRecommendedLivePaperTrading(params: {
             slippageRate: PAPER_SLIPPAGE_RATE
           });
 
-          await insertPaperOrder({
+          await orderStateBridge.recordFilledOrder({
             sessionId: params.sessionId,
             marketCode: params.marketCode,
             side: "SELL",
@@ -452,7 +458,9 @@ export async function runRecommendedLivePaperTrading(params: {
             executedPrice: execution.executedPrice,
             quantity: state.quantity,
             fee: execution.fee,
-            slippage: message.trade_price - execution.executedPrice
+            slippage: message.trade_price - execution.executedPrice,
+            marketPolicy: marketPolicyCache.get(params.marketCode, message.trade_price),
+            reason: "risk_liquidation"
           });
 
           state.cash = applyPaperSellNetValue(state.cash, execution.netValue);
@@ -487,7 +495,7 @@ export async function runRecommendedLivePaperTrading(params: {
           slippageRate: PAPER_SLIPPAGE_RATE
         });
 
-        await insertPaperOrder({
+        await orderStateBridge.recordFilledOrder({
           sessionId: params.sessionId,
           marketCode: params.marketCode,
           side: "BUY",
@@ -496,7 +504,9 @@ export async function runRecommendedLivePaperTrading(params: {
           executedPrice: execution.executedPrice,
           quantity: execution.quantity,
           fee: execution.fee,
-          slippage: execution.executedPrice - message.trade_price
+          slippage: execution.executedPrice - message.trade_price,
+          marketPolicy: marketPolicyCache.get(params.marketCode, message.trade_price),
+          reason: "signal_buy"
         });
 
         state.cash -= allocatedCash;
@@ -514,7 +524,7 @@ export async function runRecommendedLivePaperTrading(params: {
           slippageRate: PAPER_SLIPPAGE_RATE
         });
 
-        await insertPaperOrder({
+        await orderStateBridge.recordFilledOrder({
           sessionId: params.sessionId,
           marketCode: params.marketCode,
           side: "SELL",
@@ -523,7 +533,9 @@ export async function runRecommendedLivePaperTrading(params: {
           executedPrice: execution.executedPrice,
           quantity: state.quantity,
           fee: execution.fee,
-          slippage: message.trade_price - execution.executedPrice
+          slippage: message.trade_price - execution.executedPrice,
+          marketPolicy: marketPolicyCache.get(params.marketCode, message.trade_price),
+          reason: "signal_sell"
         });
 
         state.cash = applyPaperSellNetValue(state.cash, execution.netValue);

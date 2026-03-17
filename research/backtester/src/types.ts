@@ -128,6 +128,25 @@ export type BacktestMetrics = {
   cooldownSkipsCount: number;
 };
 
+export type BacktestReasonCounts = {
+  strategy: Record<string, number>;
+  strategyTags: Record<string, number>;
+  coordinator: Record<string, number>;
+  execution: Record<string, number>;
+  risk: Record<string, number>;
+};
+
+export type BacktestCoverageSummary = {
+  rawBuySignals: number;
+  rawSellSignals: number;
+  rawHoldSignals: number;
+  avgUniverseSize: number;
+  minUniverseSize: number;
+  maxUniverseSize: number;
+  avgConsideredBuys: number;
+  avgEligibleBuys: number;
+};
+
 export type BacktestResult = {
   strategyName: string;
   marketCode: string;
@@ -274,6 +293,13 @@ export type ScoredBacktestResult = BacktestResult & {
   circuitBreakerTriggered: number;
   signalCount: number;
   ghostSignalCount: number;
+  decisionCounts: {
+    rawBuySignals: number;
+    rawSellSignals: number;
+    rawHoldSignals: number;
+  };
+  reasonCounts: BacktestReasonCounts;
+  coverageSummary: BacktestCoverageSummary;
   ghostStudy: GhostTradeStudySummary;
   universeName?: string;
   marketCount?: number;

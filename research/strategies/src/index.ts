@@ -24,6 +24,10 @@ export { createResidualReversionStrategy } from "./residual-reversion-strategy.j
 export { createRelativeMomentumPullbackStrategy } from "./relative-momentum-pullback.js";
 export { createLeaderPullbackStateMachineStrategy } from "./leader-pullback-state-machine.js";
 export { createRelativeBreakoutRotationStrategy } from "./relative-breakout-rotation.js";
+export { createMomentumReaccelerationStrategy } from "./momentum-reacceleration.js";
+export { createLeaderBreakoutRetestStrategy } from "./leader-breakout-retest.js";
+export { createCompressionBreakoutTrendStrategy } from "./compression-breakout-trend.js";
+export { createLeaderTrendContinuationStrategy } from "./leader-trend-continuation.js";
 export {
   SCORED_DECISION_TIMEFRAME,
   assertSupportedScoredDecisionTimeframe,

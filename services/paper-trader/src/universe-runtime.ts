@@ -10,7 +10,6 @@ import { createVolatilityTargetSizer } from "../../../research/strategies/src/po
 import { createPortfolioCoordinator, createInitialPortfolioState } from "../../../research/backtester/src/portfolio/PortfolioCoordinator.js";
 import { PAPER_FEE_RATE, PAPER_SLIPPAGE_RATE } from "./config.js";
 import {
-  insertPaperOrder,
   listPaperPositions,
   listSelectedUniverseMarkets,
   loadRecentCandlesForMarkets,
@@ -19,7 +18,9 @@ import {
   upsertPaperPosition
 } from "./db.js";
 import { createMarketOrderExecutionModel } from "./execution-model.js";
+import { createMarketPolicyCache } from "./market-policy-cache.js";
 import { createPaperRuntimeOpsGuard } from "./ops-guard.js";
+import { createPaperOrderStateBridge } from "./order-state-bridge.js";
 import { resolveAvailablePaperCash } from "./runtime-balance.js";
 import {
   createUniverseAlphaModelFromRecommendation,
@@ -452,6 +453,11 @@ export async function runRecommendedUniverseScoredPaperTrading(params: {
     universeCandlesByMarket: recentCandlesByMarket
   };
   const executionModel = createMarketOrderExecutionModel();
+  const marketPolicyCache = createMarketPolicyCache({
+    minOrderNotional: 5_000,
+    takerFeeRate: PAPER_FEE_RATE
+  });
+  const orderStateBridge = createPaperOrderStateBridge();
   const opsGuard = createPaperRuntimeOpsGuard({
     minSignalCandles: 2
   });
@@ -652,7 +658,7 @@ export async function runRecommendedUniverseScoredPaperTrading(params: {
             slippageRate: PAPER_SLIPPAGE_RATE
           });
 
-          await insertPaperOrder({
+          await orderStateBridge.recordFilledOrder({
             sessionId: params.sessionId,
             marketCode: intent.market,
             side: "BUY",
@@ -661,7 +667,9 @@ export async function runRecommendedUniverseScoredPaperTrading(params: {
             executedPrice: execution.executedPrice,
             quantity: execution.quantity,
             fee: execution.fee,
-            slippage: execution.executedPrice - marketPrice
+            slippage: execution.executedPrice - marketPrice,
+            marketPolicy: marketPolicyCache.get(intent.market, marketPrice),
+            reason: "portfolio_buy"
           });
 
           const allocatedCash = Math.min(state.cash, intent.targetNotional ?? state.cash);
@@ -695,7 +703,7 @@ export async function runRecommendedUniverseScoredPaperTrading(params: {
             slippageRate: PAPER_SLIPPAGE_RATE
           });
 
-          await insertPaperOrder({
+          await orderStateBridge.recordFilledOrder({
             sessionId: params.sessionId,
             marketCode: intent.market,
             side: "SELL",
@@ -704,7 +712,9 @@ export async function runRecommendedUniverseScoredPaperTrading(params: {
             executedPrice: execution.executedPrice,
             quantity: portfolioState.position.quantity,
             fee: execution.fee,
-            slippage: marketPrice - execution.executedPrice
+            slippage: marketPrice - execution.executedPrice,
+            marketPolicy: marketPolicyCache.get(intent.market, marketPrice),
+            reason: intent.reason
           });
 
           state.cash += execution.netValue;
@@ -831,6 +841,11 @@ export async function runRecommendedUniversePaperTrading(params: {
     universeCandlesByMarket: recentCandlesByMarket
   };
   const executionModel = createMarketOrderExecutionModel();
+  const marketPolicyCache = createMarketPolicyCache({
+    minOrderNotional: 5_000,
+    takerFeeRate: PAPER_FEE_RATE
+  });
+  const orderStateBridge = createPaperOrderStateBridge();
   const opsGuard = createPaperRuntimeOpsGuard({
     minSignalCandles: 2
   });
@@ -919,7 +934,7 @@ export async function runRecommendedUniversePaperTrading(params: {
           slippageRate: PAPER_SLIPPAGE_RATE
         });
 
-        await insertPaperOrder({
+        await orderStateBridge.recordFilledOrder({
           sessionId: params.sessionId,
           marketCode,
           side: "SELL",
@@ -928,7 +943,9 @@ export async function runRecommendedUniversePaperTrading(params: {
           executedPrice: execution.executedPrice,
           quantity: position.quantity,
           fee: execution.fee,
-          slippage: marketPrice - execution.executedPrice
+          slippage: marketPrice - execution.executedPrice,
+          marketPolicy: marketPolicyCache.get(marketCode, marketPrice),
+          reason: "rebalance_sell"
         });
 
         state.cash += execution.netValue;
@@ -966,7 +983,7 @@ export async function runRecommendedUniversePaperTrading(params: {
           slippageRate: PAPER_SLIPPAGE_RATE
         });
 
-        await insertPaperOrder({
+        await orderStateBridge.recordFilledOrder({
           sessionId: params.sessionId,
           marketCode: candidate.marketCode,
           side: "BUY",
@@ -975,7 +992,9 @@ export async function runRecommendedUniversePaperTrading(params: {
           executedPrice: execution.executedPrice,
           quantity: execution.quantity,
           fee: execution.fee,
-          slippage: execution.executedPrice - marketPrice
+          slippage: execution.executedPrice - marketPrice,
+          marketPolicy: marketPolicyCache.get(candidate.marketCode, marketPrice),
+          reason: "rebalance_buy"
         });
 
         state.cash -= allocation;

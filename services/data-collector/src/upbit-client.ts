@@ -13,6 +13,8 @@ function getCandlePath(timeframe: Timeframe): string {
       return "/candles/minutes/1";
     case "5m":
       return "/candles/minutes/5";
+    case "15m":
+      return "/candles/minutes/15";
     case "1h":
       return "/candles/minutes/60";
     case "1d":

@@ -34,7 +34,10 @@ export function createExecutionSimulator(params?: {
     policy,
 
     simulate(request: ExecutionRequest): FillResult {
-      if (request.executionBarIndex <= request.decisionBarIndex) {
+      if (
+        request.nextBar &&
+        request.nextBar.candleTimeUtc.getTime() <= request.orderIntent.timestamp.getTime()
+      ) {
         return {
           status: "REJECTED",
           side: request.orderIntent.side,

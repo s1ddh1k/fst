@@ -66,7 +66,9 @@ test("Universe scored backtest enforces single-position flow flat -> buy -> hold
   assert.equal(result.trades[1]?.side, "SELL");
   assert.equal(result.trades[1]?.marketCode, "KRW-A");
   assert.equal(result.signalCount, 1);
+  assert.equal(result.decisionCounts.rawBuySignals, 2);
   assert.equal(result.ghostSignalCount, 2);
+  assert.equal(result.reasonCounts.coordinator.ranked_out_by_single_position, 1);
   assert.equal(result.ghostStudy.entryReference, "next_bar_open");
   assert.ok(result.metrics.tradeCount === 2);
   assert.ok(result.metrics.winRate >= 0);
@@ -128,6 +130,7 @@ test("Universe scored backtest blocks immediate re-entry after a losing exit", (
 
   assert.equal(result.trades.length, 2);
   assert.ok(result.metrics.cooldownSkipsCount >= 1);
+  assert.ok((result.reasonCounts.coordinator.cooldown_active ?? 0) >= 1);
 });
 
 test("Universe scored backtest rejects non-hourly decision timeframes", () => {

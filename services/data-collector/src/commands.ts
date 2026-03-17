@@ -32,7 +32,7 @@ function getOption(args: string[], key: string): string | undefined {
 }
 
 function isTimeframe(value: string): value is Timeframe {
-  return value === "1m" || value === "5m" || value === "1h" || value === "1d";
+  return value === "1m" || value === "5m" || value === "15m" || value === "1h" || value === "1d";
 }
 
 function parseMarkets(value: string | undefined): string[] {
@@ -82,7 +82,7 @@ export async function fetchCandles(args: string[]): Promise<void> {
   }
 
   if (!timeframeValue || !isTimeframe(timeframeValue)) {
-    throw new Error("Missing or invalid option: --timeframe (allowed: 1m, 5m, 1h, 1d)");
+    throw new Error("Missing or invalid option: --timeframe (allowed: 1m, 5m, 15m, 1h, 1d)");
   }
 
   const count = countValue ? Number.parseInt(countValue, 10) : 200;
@@ -135,7 +135,7 @@ export async function syncLatest(args: string[]): Promise<void> {
   }
 
   if (!timeframeValue || !isTimeframe(timeframeValue)) {
-    throw new Error("Missing or invalid option: --timeframe (allowed: 1m, 5m, 1h, 1d)");
+    throw new Error("Missing or invalid option: --timeframe (allowed: 1m, 5m, 15m, 1h, 1d)");
   }
 
   try {
@@ -156,7 +156,7 @@ export async function backfill(args: string[]): Promise<void> {
   }
 
   if (!timeframeValue || !isTimeframe(timeframeValue)) {
-    throw new Error("Missing or invalid option: --timeframe (allowed: 1m, 5m, 1h, 1d)");
+    throw new Error("Missing or invalid option: --timeframe (allowed: 1m, 5m, 15m, 1h, 1d)");
   }
 
   const pages = pagesValue ? Number.parseInt(pagesValue, 10) : 1;
@@ -187,7 +187,7 @@ export async function backfillBatch(args: string[]): Promise<void> {
   }
 
   if (timeframes.length === 0 || !timeframes.every(isTimeframe)) {
-    throw new Error("Missing or invalid option: --timeframes (allowed: 1m, 5m, 1h, 1d)");
+    throw new Error("Missing or invalid option: --timeframes (allowed: 1m, 5m, 15m, 1h, 1d)");
   }
 
   try {
@@ -218,7 +218,7 @@ export async function syncLatestBatch(args: string[]): Promise<void> {
   }
 
   if (timeframes.length === 0) {
-    throw new Error("Missing or invalid option: --timeframes (allowed: 1m, 5m, 1h, 1d)");
+    throw new Error("Missing or invalid option: --timeframes (allowed: 1m, 5m, 15m, 1h, 1d)");
   }
 
   try {
@@ -404,7 +404,7 @@ export async function scanGaps(args: string[]): Promise<void> {
   }
 
   if (!timeframeValue || !isTimeframe(timeframeValue)) {
-    throw new Error("Missing or invalid option: --timeframe (allowed: 1m, 5m, 1h, 1d)");
+    throw new Error("Missing or invalid option: --timeframe (allowed: 1m, 5m, 15m, 1h, 1d)");
   }
 
   try {
@@ -437,8 +437,8 @@ export function printHelp(): void {
   pnpm --filter @fst/data-collector dev fetch-candles --market KRW-BTC --timeframe 1d [--count 30] [--to 2025-12-31T00:00:00]
   pnpm --filter @fst/data-collector dev sync-latest --market KRW-BTC --timeframe 1d
   pnpm --filter @fst/data-collector dev backfill --market KRW-BTC --timeframe 1d [--pages 10]
-  pnpm --filter @fst/data-collector dev backfill-batch --markets KRW-BTC,KRW-ETH --timeframes 1h,1d [--pages 10]
-  pnpm --filter @fst/data-collector dev sync-latest-batch --markets KRW-BTC,KRW-ETH --timeframes 1h,1d
+  pnpm --filter @fst/data-collector dev backfill-batch --markets KRW-BTC,KRW-ETH --timeframes 15m,1h,1d [--pages 10]
+  pnpm --filter @fst/data-collector dev sync-latest-batch --markets KRW-BTC,KRW-ETH --timeframes 15m,1h,1d
   pnpm --filter @fst/data-collector dev backfill-default
   pnpm --filter @fst/data-collector dev sync-latest-default
   pnpm --filter @fst/data-collector dev run-overnight [--pages 10]

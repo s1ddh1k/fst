@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLeaderPullbackStateMachineStrategy } from "../../strategies/src/leader-pullback-state-machine.js";
+import { createLeaderBreakoutRetestStrategy } from "../../strategies/src/leader-breakout-retest.js";
+import { createLeaderTrendContinuationStrategy } from "../../strategies/src/leader-trend-continuation.js";
+import { createMomentumReaccelerationStrategy } from "../../strategies/src/momentum-reacceleration.js";
+import { createCompressionBreakoutTrendStrategy } from "../../strategies/src/compression-breakout-trend.js";
 import { createRelativeBreakoutRotationStrategy } from "../../strategies/src/relative-breakout-rotation.js";
 import { createRelativeMomentumPullbackStrategy } from "../../strategies/src/relative-momentum-pullback.js";
 import { createHourlyCandles } from "./test-helpers.js";
@@ -21,6 +25,18 @@ function buildWindowReclaimCandles() {
   const closes = [
     ...Array.from({ length: 50 }, (_, index) => 100 + index),
     146, 142, 138, 141, 145, 147, 149
+  ];
+
+  return createHourlyCandles({
+    marketCode: "KRW-A",
+    closes
+  });
+}
+
+function buildShallowDipCandles() {
+  const closes = [
+    ...Array.from({ length: 50 }, (_, index) => 100 + index),
+    149, 148.5, 149.2, 150.1, 151, 152
   ];
 
   return createHourlyCandles({
@@ -66,6 +82,17 @@ function buildBreakoutCandles() {
   return createHourlyCandles({
     marketCode: "KRW-A",
     closes
+  });
+}
+
+function buildGentleContinuationCandles() {
+  return createHourlyCandles({
+    marketCode: "KRW-A",
+    closes: [
+      ...Array.from({ length: 50 }, (_, index) => 100 + index * 0.4),
+      119, 117, 115, 116, 117, 118, 119
+    ],
+    volumes: [...Array.from({ length: 50 }, () => 1), 1, 1, 1, 1, 2, 3, 5]
   });
 }
 
@@ -197,6 +224,25 @@ test("relative momentum pullback exits failed reclaim trades before they turn in
   assert.ok(result.conviction >= 0.85);
 });
 
+test("relative momentum pullback ignores shallow pauses that are not real pullbacks", () => {
+  const candles = buildShallowDipCandles();
+  const strategy = createRelativeMomentumPullbackStrategy({
+    minStrengthPct: 0.7,
+    minRiskOn: 0.05,
+    pullbackZ: 0.6
+  });
+
+  const result = strategy.generateSignal({
+    candles,
+    index: 54,
+    hasPosition: false,
+    marketState: strongMarketState()
+  });
+
+  assert.equal(result.signal, "HOLD");
+  assert.equal(result.metadata?.reason, "pullback_not_deep_enough");
+});
+
 test("leader pullback state machine emits BUY after a recent ATR pullback re-accelerates", () => {
   const candles = buildLeaderSetupCandles();
   const strategy = createLeaderPullbackStateMachineStrategy({
@@ -287,4 +333,85 @@ test("relative breakout rotation exits when trend leadership breaks", () => {
 
   assert.equal(result.signal, "SELL");
   assert.ok(result.conviction >= 0.8);
+});
+
+test("momentum reacceleration emits BUY on leader reset and reclaim", () => {
+  const candles = buildGentleContinuationCandles();
+  const strategy = createMomentumReaccelerationStrategy({
+    strengthFloor: 0.6,
+    minRiskOn: 0,
+    resetRsiFloor: 45,
+    trailAtrMult: 2
+  });
+
+  const result = strategy.generateSignal({
+    candles,
+    index: 54,
+    hasPosition: false,
+    marketState: strongMarketState()
+  });
+
+  assert.equal(result.signal, "BUY");
+  assert.ok(result.conviction >= 0.55);
+  assert.equal(result.metadata?.reason, "momentum_reacceleration_entry");
+});
+
+test("leader breakout retest emits BUY on breakout hold and close-back-strong", () => {
+  const candles = buildBreakoutCandles();
+  const strategy = createLeaderBreakoutRetestStrategy({
+    strengthFloor: 0.6,
+    breakoutLookback: 10,
+    retestAtrBuffer: 0.6,
+    trailAtrMult: 2
+  });
+
+  const result = strategy.generateSignal({
+    candles,
+    index: candles.length - 1,
+    hasPosition: false,
+    marketState: strongMarketState()
+  });
+
+  assert.equal(result.signal, "BUY");
+  assert.ok(result.conviction >= 0.55);
+});
+
+test("compression breakout trend emits BUY on compressed range expansion", () => {
+  const candles = buildBreakoutCandles();
+  const strategy = createCompressionBreakoutTrendStrategy({
+    strengthFloor: 0.55,
+    compressionWindow: 8,
+    compressionAtr: 4,
+    trailAtrMult: 2
+  });
+
+  const result = strategy.generateSignal({
+    candles,
+    index: candles.length - 1,
+    hasPosition: false,
+    marketState: strongMarketState()
+  });
+
+  assert.equal(result.signal, "BUY");
+  assert.ok(result.conviction >= 0.55);
+});
+
+test("leader trend continuation emits BUY on orderly continuation", () => {
+  const candles = buildGentleContinuationCandles();
+  const strategy = createLeaderTrendContinuationStrategy({
+    strengthFloor: 0.6,
+    minRiskOn: 0,
+    maxExtensionAtr: 2.5,
+    trailAtrMult: 2
+  });
+
+  const result = strategy.generateSignal({
+    candles,
+    index: 54,
+    hasPosition: false,
+    marketState: strongMarketState()
+  });
+
+  assert.equal(result.signal, "BUY");
+  assert.ok(result.conviction >= 0.55);
 });

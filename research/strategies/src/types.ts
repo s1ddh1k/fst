@@ -133,9 +133,17 @@ export type Strategy = {
 
 // --- v2 types ---
 
+export type SignalMetadata = {
+  reason?: string;
+  tags?: string[];
+  orderReason?: string;
+  metrics?: Record<string, number | null>;
+};
+
 export type SignalResult = {
   signal: Signal;
   conviction: number;
+  metadata?: SignalMetadata;
 };
 
 export type ScoredStrategy = {

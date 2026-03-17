@@ -7,6 +7,14 @@ import type {
 } from "./portfolioTypes.js";
 import { toDayKey } from "../universe/timeframe.js";
 
+function incrementReason(
+  reasonCounts: Record<string, number>,
+  reason: string,
+  amount = 1
+): void {
+  reasonCounts[reason] = (reasonCounts[reason] ?? 0) + amount;
+}
+
 function normalize01(value: number, low: number, high: number): number {
   if (!Number.isFinite(value)) {
     return 0;
@@ -100,11 +108,19 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
       barIndex: number;
     }): CoordinationResult {
       resetDailyTradeCounterIfNeeded(params.state, params.timestamp);
+      const reasonCounts: Record<string, number> = {};
 
       if (params.state.position) {
         const heldSignal = params.signals.find(
           (signal) => signal.market === params.state.position?.market
         );
+        const blockedBuys = params.signals.filter(
+          (signal) => signal.signal === "BUY" && signal.market !== params.state.position?.market
+        ).length;
+
+        if (blockedBuys > 0) {
+          incrementReason(reasonCounts, "entry_blocked_by_open_position", blockedBuys);
+        }
 
         if (!heldSignal || heldSignal.signal !== "SELL") {
           return {
@@ -112,7 +128,8 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
             diagnostics: {
               cooldownSkips: 0,
               consideredBuys: 0,
-              eligibleBuys: 0
+              eligibleBuys: 0,
+              reasonCounts
             }
           };
         }
@@ -130,7 +147,8 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
           diagnostics: {
             cooldownSkips: 0,
             consideredBuys: 0,
-            eligibleBuys: 0
+            eligibleBuys: 0,
+            reasonCounts
           }
         };
       }
@@ -139,12 +157,17 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
         resolvedConfig.maxTradesPerDay !== undefined &&
         params.state.tradesToday >= resolvedConfig.maxTradesPerDay
       ) {
+        const blockedEntries = params.signals.filter((signal) => signal.signal === "BUY").length;
+        if (blockedEntries > 0) {
+          incrementReason(reasonCounts, "max_trades_per_day", blockedEntries);
+        }
         return {
           intent: null,
           diagnostics: {
             cooldownSkips: 0,
             consideredBuys: 0,
-            eligibleBuys: 0
+            eligibleBuys: 0,
+            reasonCounts
           }
         };
       }
@@ -153,10 +176,12 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
       let cooldownSkips = 0;
       const eligible = candidates.filter((signal) => {
         if (signal.conviction < resolvedConfig.minBuyConviction) {
+          incrementReason(reasonCounts, "below_min_conviction");
           return false;
         }
 
         if (resolvedConfig.ignoreSyntheticBarsForEntry && signal.metadata?.isSyntheticBar) {
+          incrementReason(reasonCounts, "synthetic_bar_blocked");
           return false;
         }
 
@@ -164,6 +189,7 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
 
         if (params.barIndex < cooldownUntil) {
           cooldownSkips += 1;
+          incrementReason(reasonCounts, "cooldown_active");
           return false;
         }
 
@@ -173,6 +199,7 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
           lastExitBar !== undefined &&
           params.barIndex - lastExitBar < resolvedConfig.minBarsBetweenReentry
         ) {
+          incrementReason(reasonCounts, "min_reentry_gap");
           return false;
         }
 
@@ -185,7 +212,8 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
           diagnostics: {
             cooldownSkips,
             consideredBuys: candidates.length,
-            eligibleBuys: 0
+            eligibleBuys: 0,
+            reasonCounts
           }
         };
       }
@@ -203,6 +231,10 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
         });
       const best = ranked[0];
 
+      if (ranked.length > 1) {
+        incrementReason(reasonCounts, "ranked_out_by_single_position", ranked.length - 1);
+      }
+
       return {
         intent: {
           side: "BUY",
@@ -219,7 +251,8 @@ export function createPortfolioCoordinator(config?: Partial<CoordinatorConfig>) 
         diagnostics: {
           cooldownSkips,
           consideredBuys: candidates.length,
-          eligibleBuys: eligible.length
+          eligibleBuys: eligible.length,
+          reasonCounts
         }
       };
     },

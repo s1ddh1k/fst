@@ -8,6 +8,7 @@ import type {
   SignalResult,
   StrategyContext
 } from "./types.js";
+import { buy, hold, sell } from "./scored-signal.js";
 
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) {
@@ -161,7 +162,7 @@ export function createLeaderPullbackStateMachineStrategy(params?: {
         !relativeStrength ||
         !composite
       ) {
-        return { signal: "HOLD", conviction: 0 };
+        return hold("insufficient_context");
       }
 
       const riskOff = composite.trendScore < -0.1 || breadth.riskOnScore < -0.05;
@@ -182,30 +183,32 @@ export function createLeaderPullbackStateMachineStrategy(params?: {
           close <= highestClose - trailAtrMult * atr14;
 
         if (riskOff) {
-          return { signal: "SELL", conviction: 0.95 };
+          return sell(0.95, "market_regime_deteriorated", "risk_off_exit");
         }
 
         if (failedReclaim) {
-          return { signal: "SELL", conviction: 0.9 };
+          return sell(0.9, "failed_reclaim", "signal_exit");
         }
 
         if (noFollowThrough) {
-          return { signal: "SELL", conviction: 0.82 };
+          return sell(0.82, "follow_through_missing", "signal_exit");
         }
 
         if (rankDecay) {
-          return { signal: "SELL", conviction: 0.8 };
+          return sell(0.8, "leadership_rank_decay", "signal_exit");
         }
 
         if (trailStop) {
-          return { signal: "SELL", conviction: 0.88 };
+          return sell(0.88, "atr_trailing_stop_hit", "trail_exit");
         }
 
-        return { signal: "HOLD", conviction: 0 };
+        return hold("setup_still_valid");
       }
 
       if (composite.regime === "trend_down" || composite.regime === "volatile") {
-        return { signal: "HOLD", conviction: 0 };
+        return hold("market_regime_blocked", {
+          tags: [`regime:${composite.regime}`]
+        });
       }
 
       const ema20Slope = ema20 > ema20Prev;
@@ -229,8 +232,33 @@ export function createLeaderPullbackStateMachineStrategy(params?: {
         closePositionInBar(candle) >= 0.6 &&
         close - ema20 <= 0.8 * atr14;
 
-      if (!regimeGood || !leader || !armed || !trigger) {
-        return { signal: "HOLD", conviction: 0 };
+      const rejectTags: string[] = [];
+
+      if (!regimeGood) {
+        rejectTags.push("trend_regime_not_aligned");
+      }
+      if (!leader) {
+        rejectTags.push("leader_strength_below_floor");
+      }
+      if (!armed) {
+        rejectTags.push("pullback_state_not_armed");
+      }
+      if (!trigger) {
+        rejectTags.push("reclaim_trigger_missing");
+      }
+
+      if (rejectTags.length > 0) {
+        return hold(rejectTags[0], {
+          tags: rejectTags,
+          metrics: {
+            momentumPercentile: relativeStrength.momentumPercentile ?? null,
+            returnPercentile: relativeStrength.returnPercentile ?? null,
+            riskOnScore: breadth.riskOnScore,
+            trendScore: composite.trendScore,
+            minDistanceToEma20Atr: setupWindow.minDistanceToEma20Atr,
+            minCloseVsEma50: setupWindow.minCloseVsEma50
+          }
+        });
       }
 
       const conviction = clamp01(
@@ -245,13 +273,19 @@ export function createLeaderPullbackStateMachineStrategy(params?: {
       );
 
       if (conviction <= 0) {
-        return { signal: "HOLD", conviction: 0 };
+        return hold("conviction_collapsed_to_zero");
       }
 
-      return {
-        signal: "BUY",
-        conviction: Math.max(0.55, conviction)
-      };
+      return buy(Math.max(0.55, conviction), "leader_pullback_reclaim", {
+        tags: ["leader", "armed_pullback", "reacceleration"],
+        metrics: {
+          momentumPercentile: relativeStrength.momentumPercentile ?? null,
+          returnPercentile: relativeStrength.returnPercentile ?? null,
+          riskOnScore: breadth.riskOnScore,
+          trendScore: composite.trendScore,
+          minDistanceToEma20Atr: setupWindow.minDistanceToEma20Atr
+        }
+      });
     }
   };
 }

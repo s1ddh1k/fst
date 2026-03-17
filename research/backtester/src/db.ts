@@ -610,41 +610,79 @@ export async function createBacktestRun(params: {
   trainRange: PeriodRange;
   testRange: PeriodRange;
 }): Promise<number> {
-  const result = await pool.query(
-    `
-      INSERT INTO backtest_runs (
-        strategy_name,
-        strategy_version,
-        parameters_json,
-        market_code,
-        universe_name,
-        market_count,
-        timeframe,
-        train_start_at,
-        train_end_at,
-        test_start_at,
-        test_end_at,
-        status
-      )
-      VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, 'running')
-      RETURNING id
-    `,
-    [
-      params.strategyName,
-      params.strategyVersion,
-      JSON.stringify(params.parameters),
-      params.marketCode,
-      params.universeName ?? null,
-      params.marketCount ?? null,
-      params.timeframe,
-      params.trainRange.start.toISOString(),
-      params.trainRange.end.toISOString(),
-      params.testRange.start.toISOString(),
-      params.testRange.end.toISOString()
-    ]
-  );
+  try {
+    const result = await pool.query(
+      `
+        INSERT INTO backtest_runs (
+          strategy_name,
+          strategy_version,
+          parameters_json,
+          market_code,
+          universe_name,
+          market_count,
+          timeframe,
+          train_start_at,
+          train_end_at,
+          test_start_at,
+          test_end_at,
+          status
+        )
+        VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, 'running')
+        RETURNING id
+      `,
+      [
+        params.strategyName,
+        params.strategyVersion,
+        JSON.stringify(params.parameters),
+        params.marketCode,
+        params.universeName ?? null,
+        params.marketCount ?? null,
+        params.timeframe,
+        params.trainRange.start.toISOString(),
+        params.trainRange.end.toISOString(),
+        params.testRange.start.toISOString(),
+        params.testRange.end.toISOString()
+      ]
+    );
 
-  return (result.rows[0] as { id: number }).id;
+    return (result.rows[0] as { id: number }).id;
+  } catch (error) {
+    if (!(error instanceof Error) || !/universe_name|market_count/.test(error.message)) {
+      throw error;
+    }
+
+    const fallback = await pool.query(
+      `
+        INSERT INTO backtest_runs (
+          strategy_name,
+          strategy_version,
+          parameters_json,
+          market_code,
+          timeframe,
+          train_start_at,
+          train_end_at,
+          test_start_at,
+          test_end_at,
+          status
+        )
+        VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, 'running')
+        RETURNING id
+      `,
+      [
+        params.strategyName,
+        params.strategyVersion,
+        JSON.stringify(params.parameters),
+        params.marketCode,
+        params.timeframe,
+        params.trainRange.start.toISOString(),
+        params.trainRange.end.toISOString(),
+        params.testRange.start.toISOString(),
+        params.testRange.end.toISOString()
+      ]
+    );
+
+    return (fallback.rows[0] as { id: number }).id;
+  }
 }
 
 export async function completeBacktestRun(
@@ -678,43 +716,75 @@ export async function insertBacktestMetrics(params: {
   rejectedOrdersCount?: number;
   cooldownSkipsCount?: number;
 }): Promise<void> {
-  await pool.query(
-    `
-      INSERT INTO backtest_metrics (
-        backtest_run_id,
-        segment_type,
-        total_return,
-        gross_return,
-        net_return,
-        max_drawdown,
-        win_rate,
-        trade_count,
-        turnover,
-        avg_hold_bars,
-        fee_paid,
-        slippage_paid,
-        rejected_orders_count,
-        cooldown_skips_count
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-    `,
-    [
-      params.backtestRunId,
-      params.segmentType,
-      params.totalReturn,
-      params.grossReturn ?? params.totalReturn,
-      params.netReturn ?? params.totalReturn,
-      params.maxDrawdown,
-      params.winRate,
-      params.tradeCount,
-      params.turnover ?? 0,
-      params.avgHoldBars ?? 0,
-      params.feePaid ?? 0,
-      params.slippagePaid ?? 0,
-      params.rejectedOrdersCount ?? 0,
-      params.cooldownSkipsCount ?? 0
-    ]
-  );
+  try {
+    await pool.query(
+      `
+        INSERT INTO backtest_metrics (
+          backtest_run_id,
+          segment_type,
+          total_return,
+          gross_return,
+          net_return,
+          max_drawdown,
+          win_rate,
+          trade_count,
+          turnover,
+          avg_hold_bars,
+          fee_paid,
+          slippage_paid,
+          rejected_orders_count,
+          cooldown_skips_count
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      `,
+      [
+        params.backtestRunId,
+        params.segmentType,
+        params.totalReturn,
+        params.grossReturn ?? params.totalReturn,
+        params.netReturn ?? params.totalReturn,
+        params.maxDrawdown,
+        params.winRate,
+        params.tradeCount,
+        params.turnover ?? 0,
+        params.avgHoldBars ?? 0,
+        params.feePaid ?? 0,
+        params.slippagePaid ?? 0,
+        params.rejectedOrdersCount ?? 0,
+        params.cooldownSkipsCount ?? 0
+      ]
+    );
+  } catch (error) {
+    if (!(error instanceof Error) || !/gross_return|net_return|turnover|avg_hold_bars|fee_paid|slippage_paid|rejected_orders_count|cooldown_skips_count/.test(error.message)) {
+      throw error;
+    }
+
+    await pool.query(
+      `
+        INSERT INTO backtest_metrics (
+          backtest_run_id,
+          segment_type,
+          total_return,
+          annualized_return,
+          max_drawdown,
+          sharpe_ratio,
+          sortino_ratio,
+          win_rate,
+          profit_factor,
+          trade_count
+        )
+        VALUES ($1, $2, $3, NULL, $4, NULL, NULL, $5, NULL, $6)
+      `,
+      [
+        params.backtestRunId,
+        params.segmentType,
+        params.totalReturn,
+        params.maxDrawdown,
+        params.winRate,
+        params.tradeCount
+      ]
+    );
+  }
 }
 
 export async function getSelectedUniverseMarkets(params: {

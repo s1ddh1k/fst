@@ -53,6 +53,7 @@ test("PortfolioCoordinator selects exactly one highest-conviction BUY and enforc
 
   assert.equal(second.intent, null);
   assert.equal(second.diagnostics.cooldownSkips, 1);
+  assert.equal(second.diagnostics.reasonCounts.cooldown_active, 1);
 });
 
 test("ExecutionSimulator rejects same-bar fills, rounds to ticks, and enforces min notional", () => {
@@ -65,9 +66,19 @@ test("ExecutionSimulator rejects same-bar fills, rounds to ticks, and enforces m
       maxSlippageBps: 0
     }
   });
+  const sameTimestampBar = createHourlyCandles({
+    marketCode: "KRW-A",
+    closes: [100.09],
+    startTime: "2024-01-01T00:00:00.000Z"
+  })[0];
+  sameTimestampBar.openPrice = 100.01;
+  sameTimestampBar.highPrice = 100.09;
+  sameTimestampBar.lowPrice = 99.95;
+
   const nextBar = createHourlyCandles({
     marketCode: "KRW-A",
-    closes: [100.09]
+    closes: [100.09],
+    startTime: "2024-01-01T01:00:00.000Z"
   })[0];
   nextBar.openPrice = 100.01;
   nextBar.highPrice = 100.09;
@@ -85,7 +96,7 @@ test("ExecutionSimulator rejects same-bar fills, rounds to ticks, and enforces m
     },
     decisionBarIndex: 1,
     executionBarIndex: 1,
-    nextBar,
+    nextBar: sameTimestampBar,
     cashAvailable: 10_000,
     positionQuantity: 0
   });
@@ -152,4 +163,41 @@ test("ExecutionSimulator rejects same-bar fills, rounds to ticks, and enforces m
 
   assert.equal(rejected.status, "REJECTED");
   assert.equal(rejected.reason, "below_min_order_notional");
+});
+
+test("ExecutionSimulator allows cross-timeframe fills when the execution bar is later in time", () => {
+  const simulator = createExecutionSimulator({
+    exchangeAdapter: createUpbitKrwExchangeAdapter({
+      minOrderNotional: 5_000,
+      takerFeeRate: 0.001
+    }),
+    policy: {
+      maxSlippageBps: 0
+    }
+  });
+  const nextBar = createHourlyCandles({
+    marketCode: "KRW-A",
+    closes: [101],
+    startTime: "2024-01-01T01:00:00.000Z"
+  })[0];
+
+  const fill = simulator.simulate({
+    orderIntent: {
+      side: "BUY",
+      market: "KRW-A",
+      timestamp: new Date("2024-01-01T00:00:00.000Z"),
+      orderStyle: "best_ioc",
+      reason: "entry",
+      conviction: 0.8,
+      targetNotional: 10_000
+    },
+    decisionBarIndex: 10,
+    executionBarIndex: 3,
+    nextBar,
+    cashAvailable: 10_000,
+    positionQuantity: 0
+  });
+
+  assert.equal(fill.status, "FILLED");
+  assert.equal(fill.fillTimestamp?.toISOString(), "2024-01-01T01:00:00.000Z");
 });

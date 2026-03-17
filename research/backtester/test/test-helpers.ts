@@ -1,7 +1,23 @@
 import type { Candle } from "../src/types.js";
 
-export function createHourlyCandles(params: {
+function timeframeToMs(timeframe: string): number {
+  switch (timeframe) {
+    case "1m":
+      return 60_000;
+    case "5m":
+      return 5 * 60_000;
+    case "15m":
+      return 15 * 60_000;
+    case "1h":
+      return 60 * 60_000;
+    default:
+      throw new Error(`Unsupported timeframe: ${timeframe}`);
+  }
+}
+
+export function createCandles(params: {
   marketCode: string;
+  timeframe: "1m" | "5m" | "15m" | "1h";
   closes: number[];
   volumes?: number[];
   startTime?: string;
@@ -14,8 +30,8 @@ export function createHourlyCandles(params: {
 
     return {
       marketCode: params.marketCode,
-      timeframe: "1h",
-      candleTimeUtc: new Date(start.getTime() + index * 60 * 60 * 1000),
+      timeframe: params.timeframe,
+      candleTimeUtc: new Date(start.getTime() + index * timeframeToMs(params.timeframe)),
       openPrice: previousClose,
       highPrice: Math.max(previousClose, closePrice),
       lowPrice: Math.min(previousClose, closePrice),
@@ -24,5 +40,17 @@ export function createHourlyCandles(params: {
       quoteVolume: closePrice * volume,
       isSynthetic: false
     };
+  });
+}
+
+export function createHourlyCandles(params: {
+  marketCode: string;
+  closes: number[];
+  volumes?: number[];
+  startTime?: string;
+}): Candle[] {
+  return createCandles({
+    ...params,
+    timeframe: "1h"
   });
 }

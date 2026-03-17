@@ -18,6 +18,10 @@ import { createResidualReversionStrategy } from "../../strategies/src/residual-r
 import { createLeaderPullbackStateMachineStrategy } from "../../strategies/src/leader-pullback-state-machine.js";
 import { createRelativeBreakoutRotationStrategy } from "../../strategies/src/relative-breakout-rotation.js";
 import { createRelativeMomentumPullbackStrategy } from "../../strategies/src/relative-momentum-pullback.js";
+import { createMomentumReaccelerationStrategy } from "../../strategies/src/momentum-reacceleration.js";
+import { createLeaderBreakoutRetestStrategy } from "../../strategies/src/leader-breakout-retest.js";
+import { createCompressionBreakoutTrendStrategy } from "../../strategies/src/compression-breakout-trend.js";
+import { createLeaderTrendContinuationStrategy } from "../../strategies/src/leader-trend-continuation.js";
 
 export function createStrategyByName(
   name: string,
@@ -81,6 +85,14 @@ export function createScoredStrategyByName(
       return createLeaderPullbackStateMachineStrategy(parameters);
     case "relative-breakout-rotation":
       return createRelativeBreakoutRotationStrategy(parameters);
+    case "momentum-reacceleration":
+      return createMomentumReaccelerationStrategy(parameters);
+    case "leader-breakout-retest":
+      return createLeaderBreakoutRetestStrategy(parameters);
+    case "compression-breakout-trend":
+      return createCompressionBreakoutTrendStrategy(parameters);
+    case "leader-trend-continuation":
+      return createLeaderTrendContinuationStrategy(parameters);
     case "residual-reversion":
       return createResidualReversionStrategy(parameters);
     default:
@@ -92,6 +104,10 @@ export function listScoredStrategyNames(): string[] {
   return [
     "relative-momentum-pullback",
     "leader-pullback-state-machine",
-    "relative-breakout-rotation"
+    "relative-breakout-rotation",
+    "momentum-reacceleration",
+    "leader-breakout-retest",
+    "compression-breakout-trend",
+    "leader-trend-continuation"
   ];
 }

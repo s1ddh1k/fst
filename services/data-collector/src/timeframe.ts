@@ -6,6 +6,8 @@ export function getTimeframeMinutes(timeframe: Timeframe): number {
       return 1;
     case "5m":
       return 5;
+    case "15m":
+      return 15;
     case "1h":
       return 60;
     case "1d":

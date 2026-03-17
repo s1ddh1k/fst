@@ -23,6 +23,21 @@ import { generateStrategyFollowupReport } from "./strategy-followup-report.js";
 import { createStrategyByName, listStrategyNames, createScoredStrategyByName, listScoredStrategyNames } from "./strategy-registry.js";
 import { loadCandles } from "./db.js";
 import { splitTrainTestByDays } from "./validation.js";
+import {
+  type MultiStrategyPreset,
+  buildMultiStrategyPresets,
+  createBreakoutRotationStrategy,
+  createMicroBreakoutStrategy,
+  createRelativeStrengthRotationStrategy,
+  formatMultiStrategyComparisonTable,
+  formatMultiStrategyReport,
+  runMultiStrategyBacktest
+} from "./multi-strategy/index.js";
+import {
+  UcmResearchLlmClient,
+  createAutoResearchOrchestrator
+} from "./auto-research/index.js";
+import type { Candle } from "./types.js";
 
 function getOption(args: string[], key: string): string | undefined {
   const index = args.indexOf(key);
@@ -174,6 +189,56 @@ function chooseReferenceMarketCode(
     })[0]?.[0];
 }
 
+function floorTo15m(time: Date): Date {
+  const ms = 15 * 60_000;
+  return new Date(Math.floor(time.getTime() / ms) * ms);
+}
+
+function aggregate5mCandlesTo15m(candlesByMarket: Record<string, Candle[]>): Record<string, Candle[]> {
+  return Object.fromEntries(
+    Object.entries(candlesByMarket).map(([marketCode, candles]) => {
+      const buckets = new Map<number, Candle[]>();
+
+      for (const candle of candles) {
+        const bucket = floorTo15m(candle.candleTimeUtc).getTime();
+        const existing = buckets.get(bucket) ?? [];
+        existing.push(candle);
+        buckets.set(bucket, existing);
+      }
+
+      const aggregated = Array.from(buckets.entries())
+        .sort((left, right) => left[0] - right[0])
+        .map(([, bucketCandles]) => {
+          const sorted = bucketCandles
+            .slice()
+            .sort((left, right) => left.candleTimeUtc.getTime() - right.candleTimeUtc.getTime());
+          const first = sorted[0];
+          const last = sorted[sorted.length - 1];
+          const volume = sorted.reduce((sum, candle) => sum + candle.volume, 0);
+          const quoteVolume = sorted.reduce(
+            (sum, candle) => sum + (candle.quoteVolume ?? candle.closePrice * candle.volume),
+            0
+          );
+
+          return {
+            marketCode,
+            timeframe: "15m",
+            candleTimeUtc: floorTo15m(first.candleTimeUtc),
+            openPrice: first.openPrice,
+            highPrice: Math.max(...sorted.map((candle) => candle.highPrice)),
+            lowPrice: Math.min(...sorted.map((candle) => candle.lowPrice)),
+            closePrice: last.closePrice,
+            volume,
+            quoteVolume,
+            isSynthetic: sorted.every((candle) => candle.isSynthetic ?? false)
+          } satisfies Candle;
+        });
+
+      return [marketCode, aggregated];
+    })
+  );
+}
+
 async function main(): Promise<void> {
   const marketCode = getOption(process.argv, "--market") ?? "KRW-BTC";
   const timeframe = getOption(process.argv, "--timeframe") ?? "1d";
@@ -199,6 +264,47 @@ async function main(): Promise<void> {
   const scoredSweep = process.argv.includes("--scored-sweep");
   const scoredWalkForward = process.argv.includes("--scored-walk-forward");
   const strategyFollowupReport = process.argv.includes("--strategy-followup-report");
+  const multiStrategyReport = process.argv.includes("--multi-strategy-report");
+  const multiStrategySweep = process.argv.includes("--multi-strategy-sweep");
+  const autoResearch = process.argv.includes("--auto-research");
+  const multiStrategyPreset = getOption(process.argv, "--multi-strategy-preset");
+  const autoResearchFamilies = process.argv
+    .flatMap((value, index, args) => (value === "--auto-research-family" ? [args[index + 1]] : []))
+    .filter((value): value is string => Boolean(value));
+  const autoResearchMode = getOption(process.argv, "--auto-research-mode") === "walk-forward"
+    ? "walk-forward"
+    : "holdout";
+  const autoResearchIterations = Number.parseInt(getOption(process.argv, "--auto-research-iterations") ?? "3", 10);
+  const autoResearchCandidates = Number.parseInt(getOption(process.argv, "--auto-research-candidates") ?? "3", 10);
+  const autoResearchParallelism = Number.parseInt(
+    getOption(process.argv, "--auto-research-parallelism") ?? String(Math.max(1, autoResearchCandidates)),
+    10
+  );
+  const llmProvider = getOption(process.argv, "--llm-provider") ?? "codex";
+  const llmModel = getOption(process.argv, "--llm-model");
+  const autoResearchLlmTimeoutMs = Number.parseInt(
+    getOption(process.argv, "--auto-research-llm-timeout-ms") ?? "300000",
+    10
+  );
+  const autoResearchOutput =
+    getOption(process.argv, "--auto-research-output") ??
+    `research/backtester/artifacts/auto-research/${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const autoResearchResume = getOption(process.argv, "--auto-research-resume");
+  const autoResearchAllowDataCollection = process.argv.includes("--auto-research-allow-data-collection");
+  const autoResearchAllowFeatureCache = process.argv.includes("--auto-research-allow-feature-cache");
+  const autoResearchAllowCodeMutation = process.argv.includes("--auto-research-allow-code-mutation");
+  const autoResearchMinTradesOption = getOption(process.argv, "--auto-research-min-trades");
+  const autoResearchMinTrades = autoResearchMinTradesOption
+    ? Number.parseInt(autoResearchMinTradesOption, 10)
+    : undefined;
+  const autoResearchMinNetReturnOption = getOption(process.argv, "--auto-research-min-net-return");
+  const autoResearchMinNetReturn = autoResearchMinNetReturnOption
+    ? Number.parseFloat(autoResearchMinNetReturnOption)
+    : undefined;
+  const autoResearchMaxNoTradeIterationsOption = getOption(process.argv, "--auto-research-max-no-trade-iterations");
+  const autoResearchMaxNoTradeIterations = autoResearchMaxNoTradeIterationsOption
+    ? Number.parseInt(autoResearchMaxNoTradeIterationsOption, 10)
+    : undefined;
   const parametersJson = getOption(process.argv, "--parameters-json");
   const benchmarkMarketCode = getOption(process.argv, "--benchmark-market");
   const maxPositions = Number.parseInt(getOption(process.argv, "--max-positions") ?? "5", 10);
@@ -227,6 +333,169 @@ async function main(): Promise<void> {
   );
 
   try {
+    if (autoResearch) {
+      const llmClient = new UcmResearchLlmClient({
+        provider: llmProvider,
+        model: llmModel,
+        cwd: process.cwd()
+      });
+      const orchestrator = createAutoResearchOrchestrator({ llmClient });
+      const report = await orchestrator.run({
+        strategyFamilyIds: autoResearchFamilies,
+        universeName,
+        timeframe: "1h",
+        marketLimit,
+        limit,
+        holdoutDays,
+        trainingDays,
+        stepDays,
+        iterations: Math.max(1, autoResearchIterations),
+        candidatesPerIteration: Math.max(1, autoResearchCandidates),
+        parallelism: Math.max(1, autoResearchParallelism),
+        mode: autoResearchMode,
+        llmProvider,
+        llmModel,
+        llmTimeoutMs: Math.max(0, autoResearchLlmTimeoutMs),
+        outputDir: autoResearchOutput,
+        resumeFrom: autoResearchResume,
+        allowDataCollection: autoResearchAllowDataCollection,
+        allowFeatureCacheBuild: autoResearchAllowFeatureCache,
+        allowCodeMutation: autoResearchAllowCodeMutation,
+        minTradesForPromotion:
+          typeof autoResearchMinTrades === "number" ? Math.max(0, autoResearchMinTrades) : undefined,
+        minNetReturnForPromotion: autoResearchMinNetReturn,
+        maxNoTradeIterations:
+          typeof autoResearchMaxNoTradeIterations === "number"
+            ? Math.max(0, autoResearchMaxNoTradeIterations)
+            : undefined
+      });
+
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    if (multiStrategyReport || multiStrategySweep) {
+      const decisionMinCandles = Math.max(minCandles, 120);
+      const selectedMarkets =
+        await getSelectedUniverseMarketsWithMinimumCandles({
+          universeName,
+          timeframe: "5m",
+          minCandles: decisionMinCandles,
+          limit: marketLimit
+        });
+      const marketCodes = selectedMarkets.map((item) => item.marketCode);
+
+      if (marketCodes.length === 0) {
+        throw new Error(`No markets available for ${universeName} multi-strategy report`);
+      }
+
+      const availablePresets: MultiStrategyPreset[] = multiStrategySweep
+        ? buildMultiStrategyPresets()
+        : [
+            {
+              label: "balanced",
+              sleeves: [
+                { sleeveId: "trend", capitalBudgetPct: 0.4, maxOpenPositions: 2, maxSinglePositionPct: 0.5, priority: 9 },
+                { sleeveId: "breakout", capitalBudgetPct: 0.35, maxOpenPositions: 2, maxSinglePositionPct: 0.5, priority: 7 },
+                { sleeveId: "micro", capitalBudgetPct: 0.2, maxOpenPositions: 1, maxSinglePositionPct: 1, priority: 5 }
+              ],
+              strategies: [
+                createRelativeStrengthRotationStrategy(),
+                createBreakoutRotationStrategy(),
+                createMicroBreakoutStrategy()
+              ]
+            }
+          ];
+      const presets = multiStrategyPreset
+        ? availablePresets.filter((preset) => preset.label === multiStrategyPreset)
+        : availablePresets;
+
+      if (presets.length === 0) {
+        throw new Error(`Unknown multi-strategy preset: ${multiStrategyPreset}`);
+      }
+
+      const needsDecision1h = presets.some((preset) =>
+        preset.strategies.some((strategy) => strategy.decisionTimeframe === "1h")
+      );
+      const needsDecision15m = presets.some((preset) =>
+        preset.strategies.some((strategy) => strategy.decisionTimeframe === "15m")
+      );
+      const needs5m = presets.some((preset) =>
+        preset.strategies.some(
+          (strategy) => strategy.decisionTimeframe === "5m" || strategy.executionTimeframe === "5m"
+        )
+      ) || needsDecision15m;
+      const needs1m = presets.some((preset) =>
+        preset.strategies.some(
+          (strategy) => strategy.decisionTimeframe === "1m" || strategy.executionTimeframe === "1m"
+        )
+      );
+
+      const [candles1h, candles5m, candles1m] = await Promise.all([
+        needsDecision1h ? loadCandlesForMarkets({ marketCodes, timeframe: "1h", limit }) : Promise.resolve({}),
+        needs5m ? loadCandlesForMarkets({ marketCodes, timeframe: "5m", limit }) : Promise.resolve({}),
+        needs1m ? loadCandlesForMarkets({ marketCodes, timeframe: "1m", limit }) : Promise.resolve({})
+      ]);
+      const candles15m = needsDecision15m ? aggregate5mCandlesTo15m(candles5m) : {};
+
+      const results = presets.map((preset) => ({
+        label: preset.label,
+        result: runMultiStrategyBacktest({
+          universeName,
+          initialCapital: 1_000_000,
+          sleeves: preset.sleeves,
+          strategies: preset.strategies,
+          decisionCandles: {
+            "1h": candles1h,
+            "15m": candles15m,
+            "5m": candles5m,
+            "1m": candles1m
+          },
+          executionCandles: {
+            "5m": candles5m,
+            "1m": candles1m
+          },
+          universeConfig: {
+            topN: Math.min(12, marketCodes.length),
+            lookbackBars: 30,
+            refreshEveryBars: 4
+          }
+        })
+      }));
+
+      console.log(
+        JSON.stringify(
+          {
+            universeName,
+            marketCodes,
+            presets: results.map(({ label, result }) => ({
+              label,
+              metrics: result.metrics,
+              strategyMetrics: result.strategyMetrics,
+              sleeveMetrics: result.sleeveMetrics,
+              funnel: result.funnel,
+              ghostSummary: result.ghostSummary,
+              report: formatMultiStrategyReport(result)
+            })),
+            comparison: formatMultiStrategyComparisonTable(
+              results.map(({ label, result }) => ({
+                label,
+                netReturn: result.metrics.netReturn,
+                maxDrawdown: result.metrics.maxDrawdown,
+                turnover: result.metrics.turnover,
+                winRate: result.metrics.winRate,
+                blockedSignals: result.metrics.blockedSignalCount
+              }))
+            )
+          },
+          null,
+          2
+        )
+      );
+
+      return;
+    }
+
     if (strategyFollowupReport) {
       const requestedSingleStrategy = listScoredStrategyNames().includes(strategyName)
         ? [strategyName as import("./strategy-followup-report.js").FollowupStrategyName]

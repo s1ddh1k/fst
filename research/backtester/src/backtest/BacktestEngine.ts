@@ -182,6 +182,44 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
+function incrementReasonCount(
+  counts: Record<string, number>,
+  reason: string | undefined,
+  amount = 1
+): void {
+  if (!reason) {
+    return;
+  }
+
+  counts[reason] = (counts[reason] ?? 0) + amount;
+}
+
+function mergeReasonCounts(
+  target: Record<string, number>,
+  source: Record<string, number> | undefined
+): void {
+  if (!source) {
+    return;
+  }
+
+  for (const [reason, count] of Object.entries(source)) {
+    incrementReasonCount(target, reason, count);
+  }
+}
+
+function toOrderIntentReason(reason: string | undefined): OrderIntent["reason"] | undefined {
+  switch (reason) {
+    case "signal_exit":
+    case "stop_exit":
+    case "trail_exit":
+    case "risk_off_exit":
+    case "rebalance_exit":
+      return reason;
+    default:
+      return undefined;
+  }
+}
+
 function buildPositionContext(params: {
   entryPrice: number;
   quantity: number;
@@ -257,10 +295,14 @@ function buildCandidateSignals(params: {
       conviction: signalResult.conviction,
       lastPrice: candle.closePrice,
       metadata: {
+        signalReason: signalResult.metadata?.reason,
+        signalTags: signalResult.metadata?.tags,
+        signalMetrics: signalResult.metadata?.metrics,
         estimatedSpreadBps: estimateSpreadBps(candle),
         liquidityScore,
         avgDailyNotional,
-        isSyntheticBar: candle.isSynthetic
+        isSyntheticBar: candle.isSynthetic,
+        exitReason: toOrderIntentReason(signalResult.metadata?.orderReason)
       }
     });
   }
@@ -340,6 +382,28 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
       circuitBreakerTriggered: 0,
       signalCount: 0,
       ghostSignalCount: 0,
+      decisionCounts: {
+        rawBuySignals: 0,
+        rawSellSignals: 0,
+        rawHoldSignals: 0
+      },
+      reasonCounts: {
+        strategy: {},
+        strategyTags: {},
+        coordinator: {},
+        execution: {},
+        risk: {}
+      },
+      coverageSummary: {
+        rawBuySignals: 0,
+        rawSellSignals: 0,
+        rawHoldSignals: 0,
+        avgUniverseSize: 0,
+        minUniverseSize: 0,
+        maxUniverseSize: 0,
+        avgConsideredBuys: 0,
+        avgEligibleBuys: 0
+      },
       ghostStudy: createEmptyGhostTradeStudySummary(),
       universeName: params.universeName,
       marketCount: marketCodes.length
@@ -370,7 +434,21 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
   let maxWeight = 0;
   let circuitBreakerTriggered = 0;
   let signalCount = 0;
+  let rawBuySignals = 0;
+  let rawSellSignals = 0;
+  let rawHoldSignals = 0;
+  let universeSizeTotal = 0;
+  let universeObservationCount = 0;
+  let minUniverseSize = Number.POSITIVE_INFINITY;
+  let maxUniverseSize = 0;
+  let consideredBuysTotal = 0;
+  let eligibleBuysTotal = 0;
   let peakEquity = initialCapital;
+  const strategyReasonCounts: Record<string, number> = {};
+  const strategyTagCounts: Record<string, number> = {};
+  const coordinatorReasonCounts: Record<string, number> = {};
+  const executionReasonCounts: Record<string, number> = {};
+  const riskReasonCounts: Record<string, number> = {};
   const ghostStudyCollector = createGhostTradeStudyCollector({
     exchangeAdapter,
     policy: executionSimulator.policy,
@@ -406,6 +484,11 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
       activeMarkets.add(portfolioState.position.market);
     }
 
+    universeObservationCount += 1;
+    universeSizeTotal += activeMarkets.size;
+    minUniverseSize = Math.min(minUniverseSize, activeMarkets.size);
+    maxUniverseSize = Math.max(maxUniverseSize, activeMarkets.size);
+
     const signals = buildCandidateSignals({
       decisionIndex,
       decisionTime,
@@ -415,6 +498,20 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
       universeName: params.universeName,
       position: portfolioState.position
     });
+    for (const signal of signals) {
+      if (signal.signal === "BUY") {
+        rawBuySignals += 1;
+      } else if (signal.signal === "SELL") {
+        rawSellSignals += 1;
+      } else {
+        rawHoldSignals += 1;
+      }
+
+      incrementReasonCount(strategyReasonCounts, signal.metadata?.signalReason);
+      for (const tag of signal.metadata?.signalTags ?? []) {
+        incrementReasonCount(strategyTagCounts, tag);
+      }
+    }
     for (const signal of signals) {
       const candles = normalized.candlesByMarket[signal.market];
 
@@ -436,6 +533,9 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
       barIndex: decisionIndex
     });
     cooldownSkipsCount += coordination.diagnostics.cooldownSkips;
+    consideredBuysTotal += coordination.diagnostics.consideredBuys;
+    eligibleBuysTotal += coordination.diagnostics.eligibleBuys;
+    mergeReasonCounts(coordinatorReasonCounts, coordination.diagnostics.reasonCounts);
     let intent: OrderIntent | null = coordination.intent;
 
     if (intent?.side === "BUY") {
@@ -443,6 +543,7 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
     }
 
     if (riskCheck.mustLiquidateAll && portfolioState.position) {
+      incrementReasonCount(riskReasonCounts, riskCheck.reason || "must_liquidate_all");
       intent = {
         side: "SELL",
         market: portfolioState.position.market,
@@ -456,6 +557,7 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
     }
 
     if (intent?.side === "BUY" && !riskCheck.canOpenNew) {
+      incrementReasonCount(riskReasonCounts, riskCheck.reason || "cannot_open_new");
       intent = null;
     }
 
@@ -473,6 +575,7 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
       const targetWeight = Math.min(sizeResult.targetWeight, riskCheck.maxExposure);
 
       if (targetWeight <= 0) {
+        incrementReasonCount(riskReasonCounts, sizeResult.reason || "target_weight_zero");
         intent = null;
       } else {
         intent = {
@@ -551,6 +654,7 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
         });
       } else if (fill.status !== "UNFILLED") {
         rejectedOrdersCount += 1;
+        incrementReasonCount(executionReasonCounts, fill.reason ?? fill.status.toLowerCase());
       }
     }
 
@@ -600,6 +704,30 @@ export function runUniverseScoredBacktest(params: UniverseScoredBacktestParams):
     circuitBreakerTriggered,
     signalCount,
     ghostSignalCount: ghostStudyCollector.getGhostSignalCount(),
+    decisionCounts: {
+      rawBuySignals,
+      rawSellSignals,
+      rawHoldSignals
+    },
+    reasonCounts: {
+      strategy: strategyReasonCounts,
+      strategyTags: strategyTagCounts,
+      coordinator: coordinatorReasonCounts,
+      execution: executionReasonCounts,
+      risk: riskReasonCounts
+    },
+    coverageSummary: {
+      rawBuySignals,
+      rawSellSignals,
+      rawHoldSignals,
+      avgUniverseSize: universeObservationCount === 0 ? 0 : universeSizeTotal / universeObservationCount,
+      minUniverseSize: Number.isFinite(minUniverseSize) ? minUniverseSize : 0,
+      maxUniverseSize,
+      avgConsideredBuys:
+        universeObservationCount === 0 ? 0 : consideredBuysTotal / universeObservationCount,
+      avgEligibleBuys:
+        universeObservationCount === 0 ? 0 : eligibleBuysTotal / universeObservationCount
+    },
     ghostStudy: ghostStudyCollector.summarize(),
     universeName: params.universeName,
     marketCount: marketCodes.length

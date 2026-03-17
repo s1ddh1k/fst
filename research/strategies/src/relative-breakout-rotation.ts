@@ -8,6 +8,7 @@ import type {
   SignalResult,
   StrategyContext
 } from "./types.js";
+import { buy, hold, sell } from "./scored-signal.js";
 
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) {
@@ -128,7 +129,7 @@ export function createRelativeBreakoutRotationStrategy(params?: {
         !relativeStrength ||
         !composite
       ) {
-        return { signal: "HOLD", conviction: 0 };
+        return hold("insufficient_context");
       }
 
       const riskOff =
@@ -147,22 +148,24 @@ export function createRelativeBreakoutRotationStrategy(params?: {
           (relativeStrength.momentumPercentile ?? 0) < 0.5;
 
         if (riskOff) {
-          return { signal: "SELL", conviction: 0.95 };
+          return sell(0.95, "market_regime_deteriorated", "risk_off_exit");
         }
 
         if (trendBreak) {
-          return { signal: "SELL", conviction: 0.82 };
+          return sell(0.82, "trend_break_after_breakout", "signal_exit");
         }
 
         if (close <= trailStop) {
-          return { signal: "SELL", conviction: 0.9 };
+          return sell(0.9, "atr_trailing_stop_hit", "trail_exit");
         }
 
-        return { signal: "HOLD", conviction: 0 };
+        return hold("breakout_position_still_valid");
       }
 
       if (composite.regime === "volatile" || composite.regime === "trend_down") {
-        return { signal: "HOLD", conviction: 0 };
+        return hold("market_regime_blocked", {
+          tags: [`regime:${composite.regime}`]
+        });
       }
 
       const regimeGood =
@@ -177,8 +180,36 @@ export function createRelativeBreakoutRotationStrategy(params?: {
       const extensionAtr = atr14 <= 0 ? Number.POSITIVE_INFINITY : (close - ema20) / atr14;
       const notTooExtended = extensionAtr <= maxExtensionAtr;
 
-      if (!regimeGood || !leader || !breakout || !trendAligned || !notTooExtended) {
-        return { signal: "HOLD", conviction: 0 };
+      const rejectTags: string[] = [];
+
+      if (!regimeGood) {
+        rejectTags.push("trend_regime_not_aligned");
+      }
+      if (!leader) {
+        rejectTags.push("leader_strength_below_floor");
+      }
+      if (!breakout) {
+        rejectTags.push("breakout_level_not_cleared");
+      }
+      if (!trendAligned) {
+        rejectTags.push("ema_trend_not_aligned");
+      }
+      if (!notTooExtended) {
+        rejectTags.push("extension_too_large");
+      }
+
+      if (rejectTags.length > 0) {
+        return hold(rejectTags[0], {
+          tags: rejectTags,
+          metrics: {
+            momentumPercentile: relativeStrength.momentumPercentile ?? null,
+            returnPercentile: relativeStrength.returnPercentile ?? null,
+            riskOnScore: breadth.riskOnScore,
+            trendScore: composite.trendScore,
+            breakoutLevel,
+            extensionAtr
+          }
+        });
       }
 
       const conviction = clamp01(
@@ -192,13 +223,20 @@ export function createRelativeBreakoutRotationStrategy(params?: {
       );
 
       if (conviction <= 0) {
-        return { signal: "HOLD", conviction: 0 };
+        return hold("conviction_collapsed_to_zero");
       }
 
-      return {
-        signal: "BUY",
-        conviction: Math.max(0.55, conviction)
-      };
+      return buy(Math.max(0.55, conviction), "leader_breakout_continuation", {
+        tags: ["leader", "breakout", "trend_aligned"],
+        metrics: {
+          momentumPercentile: relativeStrength.momentumPercentile ?? null,
+          returnPercentile: relativeStrength.returnPercentile ?? null,
+          riskOnScore: breadth.riskOnScore,
+          trendScore: composite.trendScore,
+          breakoutLevel,
+          extensionAtr
+        }
+      });
     }
   };
 }

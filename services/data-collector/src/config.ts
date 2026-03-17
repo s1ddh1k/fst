@@ -24,9 +24,10 @@ export const DEFAULT_MARKETS = parseCsvEnv(process.env.COLLECTOR_MARKETS, [
 export const DEFAULT_TIMEFRAMES = parseCsvEnv(process.env.COLLECTOR_TIMEFRAMES, [
   "1m",
   "5m",
+  "15m",
   "1h",
   "1d"
-]) as ("1m" | "5m" | "1h" | "1d")[];
+]) as ("1m" | "5m" | "15m" | "1h" | "1d")[];
 
 export const UPBIT_REST_BASE_URL = "https://api.upbit.com/v1";
 
