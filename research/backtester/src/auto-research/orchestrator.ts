@@ -171,6 +171,7 @@ type LiveLeaderboardEntry = {
   netReturn: number;
   maxDrawdown: number;
   tradeCount: number;
+  parameters: Record<string, number>;
 };
 
 function buildLeaderboard(
@@ -185,7 +186,8 @@ function buildLeaderboard(
         familyId: evaluation.candidate.familyId,
         netReturn: evaluation.summary.netReturn,
         maxDrawdown: evaluation.summary.maxDrawdown,
-        tradeCount: evaluation.summary.tradeCount
+        tradeCount: evaluation.summary.tradeCount,
+        parameters: evaluation.candidate.parameters
       }))
     ),
     ...liveEvaluations.map((evaluation) => ({
@@ -194,7 +196,8 @@ function buildLeaderboard(
       familyId: evaluation.candidate.familyId,
       netReturn: evaluation.summary.netReturn,
       maxDrawdown: evaluation.summary.maxDrawdown,
-      tradeCount: evaluation.summary.tradeCount
+      tradeCount: evaluation.summary.tradeCount,
+      parameters: evaluation.candidate.parameters
     }))
   ].sort((left, right) => {
     if (right.netReturn !== left.netReturn) {
@@ -206,6 +209,106 @@ function buildLeaderboard(
     }
 
     return right.tradeCount - left.tradeCount;
+  });
+}
+
+function buildUniqueLeaderboard(entries: LiveLeaderboardEntry[]): LiveLeaderboardEntry[] {
+  const bestByKey = new Map<string, LiveLeaderboardEntry>();
+
+  for (const entry of entries) {
+    const key = `${entry.familyId}:${JSON.stringify(entry.parameters)}`;
+    if (!bestByKey.has(key)) {
+      bestByKey.set(key, entry);
+    }
+  }
+
+  return [...bestByKey.values()];
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function quantize(value: number): number {
+  return Number(value.toFixed(4));
+}
+
+function buildFallbackNextCandidates(params: {
+  evaluations: CandidateBacktestEvaluation[];
+  families: StrategyFamilyDefinition[];
+  limit: number;
+  iteration: number;
+}): CandidateProposal[] {
+  const ranked = params.evaluations
+    .slice()
+    .sort((left, right) => {
+      const leftHasTrades = left.summary.tradeCount > 0 ? 1 : 0;
+      const rightHasTrades = right.summary.tradeCount > 0 ? 1 : 0;
+
+      if (rightHasTrades !== leftHasTrades) {
+        return rightHasTrades - leftHasTrades;
+      }
+
+      return compareEvaluations(left, right);
+    });
+  const byFamily = new Map<string, CandidateBacktestEvaluation[]>();
+
+  for (const evaluation of ranked) {
+    const bucket = byFamily.get(evaluation.candidate.familyId) ?? [];
+    bucket.push(evaluation);
+    byFamily.set(evaluation.candidate.familyId, bucket);
+  }
+
+  const selected: CandidateBacktestEvaluation[] = [];
+  for (const bucket of byFamily.values()) {
+    if (bucket[0]) {
+      selected.push(bucket[0]);
+    }
+  }
+
+  for (const evaluation of ranked) {
+    if (selected.length >= params.limit) {
+      break;
+    }
+
+    if (!selected.includes(evaluation)) {
+      selected.push(evaluation);
+    }
+  }
+
+  return selected.slice(0, params.limit).map((evaluation, candidateIndex) => {
+    const family = params.families.find((item) => item.familyId === evaluation.candidate.familyId);
+    const parameters = { ...evaluation.candidate.parameters };
+
+    if (family && family.parameterSpecs.length > 0) {
+      const spec = family.parameterSpecs[candidateIndex % family.parameterSpecs.length];
+      const width = spec.max - spec.min;
+      const current = parameters[spec.name];
+
+      if (typeof current === "number" && Number.isFinite(current) && width > 0) {
+        const step = Math.max(width * 0.05, width / 20);
+        const direction = candidateIndex % 2 === 0 ? 1 : -1;
+        let nextValue = clamp(current + step * direction, spec.min, spec.max);
+
+        if (Math.abs(nextValue - current) < 1e-9) {
+          nextValue = clamp(current - step * direction, spec.min, spec.max);
+        }
+
+        parameters[spec.name] = quantize(nextValue);
+      }
+    }
+
+    return {
+      candidateId: `${evaluation.candidate.familyId}-fallback-${String(params.iteration).padStart(2, "0")}-${String(candidateIndex + 1).padStart(2, "0")}`,
+      familyId: evaluation.candidate.familyId,
+      thesis: `Fallback diversified from ${evaluation.candidate.candidateId} after review failure.`,
+      parameters,
+      invalidationSignals: [
+        "repeat candidate without new edge",
+        "trade count collapses",
+        "net return falls below prior fallback source"
+      ]
+    };
   });
 }
 
@@ -235,17 +338,20 @@ async function persistRunArtifacts(params: {
     noTradeIterations: params.noTradeIterations
   };
   const report = toReport(state);
-  const leaderboard = buildLeaderboard(params.iterations, params.liveEvaluations);
+  const rawLeaderboard = buildLeaderboard(params.iterations, params.liveEvaluations);
+  const leaderboard = buildUniqueLeaderboard(rawLeaderboard);
 
   await saveRunState(params.outputDir, state);
   await saveLeaderboard(params.outputDir, leaderboard);
+  await saveLeaderboard(params.outputDir, rawLeaderboard, "leaderboard.raw.json");
   await saveJson(path.join(params.outputDir, "report.json"), report);
   await writeFile(path.join(params.outputDir, "report.md"), summarizeMarkdown(report));
   await writeFile(
     path.join(params.outputDir, "report.html"),
     renderAutoResearchHtmlWithOptions(report, {
       status: params.status,
-      leaderboard
+      leaderboard,
+      rawLeaderboard
     })
   );
 
@@ -691,15 +797,27 @@ export function createAutoResearchOrchestrator(deps: {
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             await log(`[auto-research] review-fallback ${message}`);
+            const fallbackCandidates = buildFallbackNextCandidates({
+              evaluations,
+              families: runtimeFamilies,
+              limit: config.candidatesPerIteration,
+              iteration
+            });
             review = {
               summary: `Fallback review after LLM failure: ${message}`,
               verdict: "keep_searching" as const,
               nextPreparation: [],
               proposedFamilies: proposal.proposedFamilies,
               codeTasks: [],
-              nextCandidates: proposal.candidates.slice(0, config.candidatesPerIteration),
+              nextCandidates:
+                fallbackCandidates.length > 0
+                  ? fallbackCandidates
+                  : proposal.candidates.slice(0, config.candidatesPerIteration),
               retireCandidateIds: [],
-              observations: [`LLM review unavailable; reused latest proposal candidates.`, message]
+              observations: [
+                "LLM review unavailable; built diversified fallback candidates from current evaluations.",
+                message
+              ]
             };
           }
         catalog = mergeProposedFamilies(catalog, review.proposedFamilies);

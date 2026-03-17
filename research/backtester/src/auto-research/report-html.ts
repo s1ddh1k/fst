@@ -8,6 +8,7 @@ type AutoResearchLeaderboardEntry = {
   netReturn: number;
   maxDrawdown: number;
   tradeCount: number;
+  parameters?: Record<string, number>;
 };
 
 function pct(value: number | undefined): string {
@@ -47,6 +48,7 @@ export function renderAutoResearchHtmlWithOptions(
   options: {
     status?: AutoResearchStatus;
     leaderboard?: AutoResearchLeaderboardEntry[];
+    rawLeaderboard?: AutoResearchLeaderboardEntry[];
   }
 ): string {
   const best = report.bestCandidate;
@@ -60,6 +62,21 @@ export function renderAutoResearchHtmlWithOptions(
               <td>${entry.iteration}</td>
               <td>${esc(entry.candidateId)}</td>
               <td>${esc(entry.familyId)}</td>
+              <td>${pct(entry.netReturn)}</td>
+              <td>${pct(entry.maxDrawdown)}</td>
+              <td>${entry.tradeCount}</td>
+            </tr>`
+    )
+    .join("");
+  const rawLeaderboardRows = (options.rawLeaderboard ?? [])
+    .slice(0, 12)
+    .map(
+      (entry) => `
+            <tr>
+              <td>${entry.iteration}</td>
+              <td>${esc(entry.candidateId)}</td>
+              <td>${esc(entry.familyId)}</td>
+              <td><code>${esc(JSON.stringify(entry.parameters ?? {}))}</code></td>
               <td>${pct(entry.netReturn)}</td>
               <td>${pct(entry.maxDrawdown)}</td>
               <td>${entry.tradeCount}</td>
@@ -160,7 +177,7 @@ export function renderAutoResearchHtmlWithOptions(
     ${
       leaderboardRows
         ? `<section class="iteration">
-          <h2>Leaderboard</h2>
+          <h2>Unique Leaderboard</h2>
           <table>
             <thead>
               <tr>
@@ -173,6 +190,27 @@ export function renderAutoResearchHtmlWithOptions(
               </tr>
             </thead>
             <tbody>${leaderboardRows}</tbody>
+          </table>
+        </section>`
+        : ""
+    }
+    ${
+      rawLeaderboardRows
+        ? `<section class="iteration">
+          <h2>Raw Leaderboard</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Iteration</th>
+                <th>Candidate</th>
+                <th>Family</th>
+                <th>Parameters</th>
+                <th>Net</th>
+                <th>Drawdown</th>
+                <th>Trades</th>
+              </tr>
+            </thead>
+            <tbody>${rawLeaderboardRows}</tbody>
           </table>
         </section>`
         : ""

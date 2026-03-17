@@ -272,6 +272,184 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
   assert.match(savedHtml, /Leaderboard/);
 });
 
+test("auto research fallback review diversifies next candidates instead of cloning the same proposal", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-fallback-review-"));
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "proposal before review failure",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "rmp-base",
+            familyId: "relative-momentum-pullback",
+            thesis: "first",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.9,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          },
+          {
+            candidateId: "lpsm-base",
+            familyId: "leader-pullback-state-machine",
+            thesis: "second",
+            parameters: {
+              strengthFloor: 0.7,
+              pullbackAtr: 0.9,
+              setupExpiryBars: 4,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      throw new Error("synthetic review outage");
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, candidate.familyId === "leader-pullback-state-machine" ? 0.07 : 0.03);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  const report = await orchestrator.run({
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 5,
+    limit: 2000,
+    holdoutDays: 180,
+    iterations: 1,
+    candidatesPerIteration: 2,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false
+  });
+
+  const review = report.iterations[0]?.review;
+  assert.equal(review?.verdict, "keep_searching");
+  assert.equal(review?.nextCandidates.length, 2);
+  assert.match(review?.observations[0] ?? "", /diversified fallback candidates/);
+  assert.ok(review?.nextCandidates.every((candidate) => /fallback-01-0[12]/.test(candidate.candidateId ?? "")));
+  assert.ok(review?.nextCandidates.some((candidate) => candidate.familyId === "leader-pullback-state-machine"));
+});
+
+test("auto research saves unique leaderboard separately from raw repeated rows", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-unique-board-"));
+  let reviewCalls = 0;
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "repeat one candidate across iterations",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "repeat-rmp",
+            familyId: "relative-momentum-pullback",
+            thesis: "repeat candidate",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.9,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      reviewCalls += 1;
+      return {
+        summary: "repeat same candidate again",
+        verdict: "keep_searching",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [
+          {
+            candidateId: "repeat-rmp",
+            familyId: "relative-momentum-pullback",
+            thesis: "repeat candidate",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.9,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          }
+        ],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, 0.04);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  await orchestrator.run({
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 5,
+    limit: 2000,
+    holdoutDays: 180,
+    iterations: 2,
+    candidatesPerIteration: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false
+  });
+
+  assert.equal(reviewCalls, 2);
+
+  const uniqueLeaderboard = JSON.parse(await readFile(path.join(outputDir, "leaderboard.json"), "utf8"));
+  const rawLeaderboard = JSON.parse(await readFile(path.join(outputDir, "leaderboard.raw.json"), "utf8"));
+  const savedHtml = await readFile(path.join(outputDir, "report.html"), "utf8");
+
+  assert.equal(uniqueLeaderboard.length, 1);
+  assert.equal(rawLeaderboard.length, 2);
+  assert.match(savedHtml, /Unique Leaderboard/);
+  assert.match(savedHtml, /Raw Leaderboard/);
+});
+
 test("auto research run lock prevents concurrent writes to the same output dir", async () => {
   const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-lock-"));
 

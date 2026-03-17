@@ -179,10 +179,11 @@ export async function saveLeaderboard(
     netReturn: number;
     maxDrawdown: number;
     tradeCount: number;
-  }>
+  }>,
+  fileName = "leaderboard.json"
 ): Promise<void> {
   await mkdir(outputDir, { recursive: true });
-  await writeFile(path.join(outputDir, "leaderboard.json"), `${JSON.stringify(leaderboard, null, 2)}\n`);
+  await writeFile(path.join(outputDir, fileName), `${JSON.stringify(leaderboard, null, 2)}\n`);
 }
 
 export function toReport(state: AutoResearchRunState): AutoResearchRunReport {
