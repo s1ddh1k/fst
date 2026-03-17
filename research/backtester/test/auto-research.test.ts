@@ -68,6 +68,18 @@ function buildEvaluation(candidate: NormalizedCandidateProposal, netReturn: numb
         bootstrapSignificant: true,
         randomPercentile: 0.93
       },
+      crossChecks: [
+        {
+          mode: "walk-forward",
+          status: "completed",
+          netReturn: netReturn - 0.01,
+          maxDrawdown: 0.06,
+          tradeCount: 3,
+          bootstrapSignificant: true,
+          randomPercentile: 0.88,
+          windowCount: 4
+        }
+      ],
       windows: {
         mode: "holdout",
         holdoutDays: 365,
@@ -255,6 +267,7 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
 
   const savedReport = JSON.parse(await readFile(path.join(outputDir, "report.json"), "utf8"));
   const savedCatalog = JSON.parse(await readFile(path.join(outputDir, "catalog.json"), "utf8"));
+  const savedCatalogSummary = JSON.parse(await readFile(path.join(outputDir, "catalog-summary.json"), "utf8"));
   const savedIteration = JSON.parse(
     await readFile(path.join(outputDir, "iteration-01.json"), "utf8")
   );
@@ -264,12 +277,14 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
   const savedHtml = await readFile(path.join(outputDir, "report.html"), "utf8");
 
   assert.ok(savedCatalog.some((entry: { familyId: string }) => entry.familyId === "momentum-reacceleration-v1"));
+  assert.ok(savedCatalogSummary.totals.families >= 1);
   assert.equal(savedReport.bestCandidate.candidate.familyId, "momentum-reacceleration-v1");
   assert.match(savedIteration.review.summary, /promote winner/);
   assert.equal(savedStatus.phase, "completed");
   assert.equal(savedLeaderboard[0].candidateId, "momentum-reacceleration-v1-01");
   assert.match(savedRunLog, /auto-research/);
   assert.match(savedHtml, /Leaderboard/);
+  assert.match(savedHtml, /Cross-Checks/);
 });
 
 test("auto research fallback review diversifies next candidates instead of cloning the same proposal", async () => {

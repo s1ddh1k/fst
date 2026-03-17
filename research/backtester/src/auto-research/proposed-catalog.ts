@@ -142,7 +142,40 @@ export function markCatalogFamilyState(
   );
 }
 
+function buildCatalogSummary(catalog: CatalogEntryRecord[]) {
+  const byState = catalog.reduce<Record<string, number>>((result, entry) => {
+    result[entry.state] = (result[entry.state] ?? 0) + 1;
+    return result;
+  }, {});
+  const bySource = catalog.reduce<Record<string, number>>((result, entry) => {
+    result[entry.source] = (result[entry.source] ?? 0) + 1;
+    return result;
+  }, {});
+
+  return {
+    totals: {
+      families: catalog.length,
+      implemented: catalog.filter((entry) => entry.state === "implemented" || entry.state === "validated").length,
+      validated: catalog.filter((entry) => entry.state === "validated").length
+    },
+    byState,
+    bySource,
+    families: catalog.map((entry) => ({
+      familyId: entry.familyId,
+      state: entry.state,
+      source: entry.source,
+      strategyName: entry.strategyName,
+      basedOnFamilies: entry.basedOnFamilies,
+      updatedAt: entry.updatedAt
+    }))
+  };
+}
+
 export async function saveCatalogArtifact(outputDir: string, catalog: CatalogEntryRecord[]): Promise<void> {
   await mkdir(outputDir, { recursive: true });
   await writeFile(path.join(outputDir, "catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
+  await writeFile(
+    path.join(outputDir, "catalog-summary.json"),
+    `${JSON.stringify(buildCatalogSummary(catalog), null, 2)}\n`
+  );
 }

@@ -67,6 +67,28 @@ function topReasons(reasons: Record<string, number>, limit = 4): string {
   return entries.map(([reason, count]) => `${reason} (${count})`).join(", ");
 }
 
+function summarizeCrossChecks(
+  crossChecks: Array<{
+    mode: "holdout" | "walk-forward";
+    status: "completed" | "failed";
+    failureMessage?: string;
+    netReturn: number;
+    tradeCount: number;
+  }> | undefined
+): string {
+  if (!crossChecks || crossChecks.length === 0) {
+    return "-";
+  }
+
+  return crossChecks
+    .map((item) =>
+      item.status === "completed"
+        ? `${item.mode}: ${pct(item.netReturn)}, trades=${item.tradeCount}`
+        : `${item.mode}: failed (${esc(item.failureMessage ?? "unknown")})`
+    )
+    .join(" | ");
+}
+
 export function renderAutoResearchHtml(report: AutoResearchRunReport): string {
   return renderAutoResearchHtmlWithOptions(report, {});
 }
@@ -157,6 +179,7 @@ export function renderAutoResearchHtmlWithOptions(
               <td>${pct(evaluation.summary.netReturn)}</td>
               <td>${pct(evaluation.summary.maxDrawdown)}</td>
               <td>${evaluation.summary.tradeCount}</td>
+              <td>${summarizeCrossChecks(evaluation.diagnostics.crossChecks)}</td>
               <td>${topReasons(evaluation.diagnostics.reasons.strategy)}</td>
               <td>${topReasons(evaluation.diagnostics.reasons.coordinator)}</td>
               <td>${topReasons(evaluation.diagnostics.reasons.execution)}</td>
@@ -178,6 +201,7 @@ export function renderAutoResearchHtmlWithOptions(
                 <th>Net</th>
                 <th>Drawdown</th>
                 <th>Trades</th>
+                <th>Cross-Checks</th>
                 <th>Strategy Reasons</th>
                 <th>Coordinator Reasons</th>
                 <th>Execution Reasons</th>

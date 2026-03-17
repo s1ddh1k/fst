@@ -91,6 +91,7 @@ function buildEmptyEvaluation(params: {
         totalCostsPaid: 0
       },
       robustness: {},
+      crossChecks: [],
       windows: {
         mode: params.config.mode,
         holdoutDays: params.config.holdoutDays,
@@ -153,6 +154,41 @@ async function main(): Promise<void> {
         runRandomBenchmark: true,
         preloaded
       });
+      let holdoutCrossCheck: CandidateBacktestEvaluation["diagnostics"]["crossChecks"][number] | undefined;
+      try {
+        const holdout = await executeScoredHoldoutBacktest({
+          timeframe: payload.config.timeframe,
+          limit: payload.config.limit,
+          holdoutDays: payload.config.holdoutDays,
+          strategy,
+          universeName: payload.config.universeName,
+          universeMarketCodes: payload.marketCodes,
+          universeConfig: { topN: payload.config.marketLimit },
+          runBootstrap: true,
+          runRandomBenchmark: true,
+          preloaded
+        });
+        holdoutCrossCheck = {
+          mode: "holdout",
+          status: "completed",
+          netReturn: holdout.test.netReturn,
+          maxDrawdown: holdout.test.maxDrawdown,
+          tradeCount: holdout.test.tradeCount,
+          bootstrapSignificant: holdout.scoredTest.bootstrap?.isSignificant,
+          randomPercentile: holdout.scoredTest.randomBenchmark?.percentileVsRandom,
+          testStartAt: holdout.testRange.start.toISOString(),
+          testEndAt: holdout.testRange.end.toISOString()
+        };
+      } catch (error) {
+        holdoutCrossCheck = {
+          mode: "holdout",
+          status: "failed",
+          failureMessage: error instanceof Error ? error.message : String(error),
+          netReturn: 0,
+          maxDrawdown: 0,
+          tradeCount: 0
+        };
+      }
 
       const aggregateSignals = summary.scoredWindows.reduce(
         (accumulator, window) => ({
@@ -269,6 +305,7 @@ async function main(): Promise<void> {
             randomPercentile:
               randomPercentiles.reduce((sum, value) => sum + value, 0) / Math.max(randomPercentiles.length, 1)
           },
+          crossChecks: holdoutCrossCheck ? [holdoutCrossCheck] : [],
           windows: {
             mode: payload.config.mode,
             holdoutDays: payload.config.holdoutDays,
@@ -343,6 +380,7 @@ async function main(): Promise<void> {
             bootstrapSignificant: summary.scoredTest.bootstrap?.isSignificant,
             randomPercentile: summary.scoredTest.randomBenchmark?.percentileVsRandom
           },
+          crossChecks: [],
           windows: {
             mode: payload.config.mode,
             holdoutDays: payload.config.holdoutDays,

@@ -135,6 +135,19 @@ export type CandidateEvaluationDiagnostics = {
     bootstrapSignificant?: boolean;
     randomPercentile?: number;
   };
+  crossChecks: Array<{
+    mode: AutoResearchMode;
+    status: "completed" | "failed";
+    failureMessage?: string;
+    netReturn: number;
+    maxDrawdown: number;
+    tradeCount: number;
+    bootstrapSignificant?: boolean;
+    randomPercentile?: number;
+    testStartAt?: string;
+    testEndAt?: string;
+    windowCount?: number;
+  }>;
   windows: {
     mode: AutoResearchMode;
     holdoutDays: number;

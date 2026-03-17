@@ -1029,6 +1029,7 @@ export function createAutoResearchOrchestrator(deps: {
                   totalCostsPaid: 0
                 },
                 robustness: {},
+                crossChecks: [],
                 windows: {
                   mode: config.mode,
                   holdoutDays: config.holdoutDays,
