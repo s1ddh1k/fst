@@ -8,6 +8,7 @@ import {
 import { getStrategyFamilies, normalizeCandidateProposal } from "./catalog.js";
 import { UcmCodeMutationAgent, type CodeAgent } from "./code-agent.js";
 import {
+  applyCodeMutationResultsToCatalog,
   buildRuntimeFamilies,
   createInitialCatalog,
   markCatalogFamilyState,
@@ -34,6 +35,7 @@ import { executePreparationActions } from "./preparation.js";
 import { acquireRunLock, appendRunLog, loadRunState, releaseRunLock, saveLeaderboard, saveRunState, saveRunStatus, toReport, type AutoResearchStatus } from "./run-manager.js";
 import { renderAutoResearchHtmlWithOptions } from "./report-html.js";
 import { runPostMutationValidation } from "./validation.js";
+import { discoverRuntimeScoredStrategyNames } from "./runtime-discovery.js";
 
 function summarizeMarkdown(report: AutoResearchRunReport): string {
   const lines = [
@@ -694,6 +696,7 @@ export function createAutoResearchOrchestrator(deps: {
     allowFeatureCacheBuild: boolean;
   }) => Promise<PreparationExecutionResult[]>;
   codeAgent?: CodeAgent;
+  discoverRuntimeScoredStrategies?: (cwd: string) => Promise<string[]>;
 }) {
   const evaluateCandidate = deps.evaluateCandidate ?? (async ({ config, candidate, marketCodes, outputDir }) => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-worker-"));
@@ -745,6 +748,7 @@ export function createAutoResearchOrchestrator(deps: {
   });
   const prepareActions = deps.prepareActions ?? executePreparationActions;
   const codeAgent = deps.codeAgent ?? new UcmCodeMutationAgent();
+  const discoverRuntimeStrategies = deps.discoverRuntimeScoredStrategies ?? discoverRuntimeScoredStrategyNames;
 
   return {
     async run(inputConfig: AutoResearchRunConfig): Promise<AutoResearchRunReport> {
@@ -928,6 +932,8 @@ export function createAutoResearchOrchestrator(deps: {
         });
         const normalizedCodeMutationResults: CodeMutationExecutionResult[] = codeMutationResults.map((item) => ({
           taskId: item.task.taskId ?? item.task.title,
+          familyId: item.task.familyId,
+          strategyName: item.task.strategyName,
           title: item.task.title,
           status: item.status,
           detail: item.detail
@@ -941,7 +947,16 @@ export function createAutoResearchOrchestrator(deps: {
           cwd: process.cwd(),
           enabled: config.allowCodeMutation && codeMutationResults.some((item) => item.status === "executed")
         });
-        catalog = refreshCatalogImplementations(catalog);
+        const discoveredStrategyNames =
+          config.allowCodeMutation && codeMutationResults.some((item) => item.status === "executed")
+            ? await discoverRuntimeStrategies(process.cwd())
+            : undefined;
+        catalog = applyCodeMutationResultsToCatalog({
+          catalog,
+          codeMutationResults: normalizedCodeMutationResults,
+          validationResults,
+          discoveredStrategyNames
+        });
         runtimeFamilies = buildRuntimeFamilies(catalog);
         await saveCatalogArtifact(config.outputDir, catalog);
 

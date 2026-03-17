@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   createAutoResearchOrchestrator,
+  createComposedScoredStrategy,
   type AutoResearchRunConfig,
   type ResearchLlmClient,
   type CandidateBacktestEvaluation,
@@ -661,6 +662,307 @@ test("auto research prefers family diversity when selecting candidates for evalu
   });
 
   assert.deepEqual(seenFamilies.sort(), ["leader-pullback-state-machine", "momentum-reacceleration"].sort());
+});
+
+test("composed scored strategy combines component votes and parameter bindings", () => {
+  const seenParameters: Record<string, number>[] = [];
+  const strategy = createComposedScoredStrategy({
+    name: "composed:test",
+    parameters: {
+      sharedStrength: 0.78,
+      sharedTrail: 2.4
+    },
+    composition: {
+      mode: "weighted_vote",
+      buyThreshold: 0.5,
+      sellThreshold: 0.5,
+      components: [
+        {
+          familyId: "leader-pullback-state-machine",
+          strategyName: "leader-pullback-state-machine",
+          weight: 1,
+          parameterBindings: {
+            strengthFloor: "sharedStrength",
+            trailAtrMult: "sharedTrail"
+          }
+        },
+        {
+          familyId: "momentum-reacceleration",
+          strategyName: "momentum-reacceleration",
+          weight: 0.8,
+          parameterBindings: {
+            strengthFloor: "sharedStrength"
+          }
+        }
+      ]
+    },
+    createComponent(strategyName, parameters) {
+      seenParameters.push(parameters ?? {});
+      return {
+        name: strategyName,
+        parameters: parameters ?? {},
+        parameterCount: Object.keys(parameters ?? {}).length,
+        generateSignal() {
+          return {
+            signal: "BUY",
+            conviction: strategyName === "leader-pullback-state-machine" ? 0.9 : 0.7
+          };
+        }
+      };
+    }
+  });
+
+  const result = strategy.generateSignal({
+    candles: [],
+    index: 0,
+    hasPosition: false
+  });
+
+  assert.equal(result.signal, "BUY");
+  assert.ok(result.conviction > 0.5);
+  assert.equal(seenParameters[0]?.strengthFloor, 0.78);
+  assert.equal(seenParameters[0]?.trailAtrMult, 2.4);
+  assert.equal(seenParameters[1]?.strengthFloor, 0.78);
+});
+
+test("auto research proposed composed family becomes executable in the same iteration", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-composed-family-"));
+  const seenCandidates: NormalizedCandidateProposal[] = [];
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "propose a composed family",
+        preparation: [],
+        proposedFamilies: [
+          {
+            familyId: "leader-confirmed-reacceleration",
+            title: "Leader Confirmed Reacceleration",
+            thesis: "Require leader pullback plus reset confirmation.",
+            timeframe: "1h",
+            basedOnFamilies: ["leader-pullback-state-machine", "momentum-reacceleration"],
+            parameterSpecs: [
+              {
+                name: "sharedStrength",
+                description: "shared leader strength floor",
+                min: 0.6,
+                max: 0.9
+              },
+              {
+                name: "sharedTrail",
+                description: "shared trail ATR multiplier",
+                min: 1.5,
+                max: 3
+              }
+            ],
+            requiredData: ["1h"],
+            implementationNotes: ["compose existing executable families"],
+            composition: {
+              mode: "weighted_vote",
+              buyThreshold: 0.55,
+              sellThreshold: 0.55,
+              components: [
+                {
+                  familyId: "leader-pullback-state-machine",
+                  weight: 1,
+                  parameterBindings: {
+                    strengthFloor: "sharedStrength",
+                    trailAtrMult: "sharedTrail"
+                  }
+                },
+                {
+                  familyId: "momentum-reacceleration",
+                  weight: 0.8,
+                  parameterBindings: {
+                    strengthFloor: "sharedStrength",
+                    trailAtrMult: "sharedTrail"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        codeTasks: [],
+        candidates: [
+          {
+            familyId: "leader-confirmed-reacceleration",
+            thesis: "composed family candidate",
+            parameters: {
+              sharedStrength: 0.78,
+              sharedTrail: 2.2
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      return {
+        summary: "stop",
+        verdict: "stop_no_edge",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      seenCandidates.push(candidate);
+      return buildEvaluation(candidate, 0.02);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  await orchestrator.run({
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 5,
+    limit: 2000,
+    holdoutDays: 180,
+    iterations: 1,
+    candidatesPerIteration: 1,
+    mode: "walk-forward",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false
+  });
+
+  assert.equal(seenCandidates[0]?.familyId, "leader-confirmed-reacceleration");
+  assert.equal(seenCandidates[0]?.strategyName, "composed:leader-confirmed-reacceleration");
+  assert.equal(seenCandidates[0]?.composition?.components.length, 2);
+});
+
+test("auto research reflects executed code mutations into catalog using runtime discovery", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-runtime-discovery-"));
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "code mutation should add a new family",
+        preparation: [],
+        proposedFamilies: [
+          {
+            familyId: "new-llm-family",
+            title: "New LLM Family",
+            thesis: "created by code task",
+            timeframe: "1h",
+            basedOnFamilies: [],
+            parameterSpecs: [
+              {
+                name: "minStrengthPct",
+                description: "strength floor",
+                min: 0.6,
+                max: 0.9
+              }
+            ],
+            requiredData: ["1h"],
+            implementationNotes: ["implemented by code task"]
+          }
+        ],
+        codeTasks: [
+          {
+            taskId: "impl-new-family",
+            familyId: "new-llm-family",
+            strategyName: "new-llm-family",
+            title: "implement new llm family",
+            intent: "implement_strategy",
+            rationale: "needed for runtime discovery test",
+            acceptanceCriteria: ["family is visible in runtime registry"],
+            targetFiles: ["research/strategies/src/new-llm-family.ts"],
+            prompt: "add strategy"
+          }
+        ],
+        candidates: [
+          {
+            familyId: "relative-momentum-pullback",
+            thesis: "baseline",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.9,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      return {
+        summary: "stop",
+        verdict: "stop_no_edge",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, 0.01);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute({ tasks }) {
+        return tasks.map((task) => ({
+          task,
+          status: "executed" as const,
+          detail: "implemented"
+        }));
+      }
+    },
+    async discoverRuntimeScoredStrategies() {
+      return [
+        "relative-momentum-pullback",
+        "leader-pullback-state-machine",
+        "momentum-reacceleration",
+        "new-llm-family"
+      ];
+    }
+  });
+
+  const report = await orchestrator.run({
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 5,
+    limit: 2000,
+    holdoutDays: 180,
+    iterations: 1,
+    candidatesPerIteration: 1,
+    mode: "walk-forward",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: true
+  });
+
+  const discoveredFamily = report.catalog.find((entry) => entry.familyId === "new-llm-family");
+  const catalogSummary = JSON.parse(await readFile(path.join(outputDir, "catalog-summary.json"), "utf8"));
+
+  assert.equal(discoveredFamily?.state, "implemented");
+  assert.equal(discoveredFamily?.strategyName, "new-llm-family");
+  assert.ok(catalogSummary.families.some((entry: { familyId: string }) => entry.familyId === "new-llm-family"));
 });
 
 test("auto research run lock prevents concurrent writes to the same output dir", async () => {

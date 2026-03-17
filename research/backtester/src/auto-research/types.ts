@@ -36,6 +36,7 @@ export type ProposedStrategyFamily = {
   parameterSpecs: ResearchParameterSpec[];
   requiredData: string[];
   implementationNotes: string[];
+  composition?: StrategyFamilyCompositionProposal;
 };
 
 export type CatalogEntryState = "proposed" | "implemented" | "validated" | "discarded";
@@ -52,6 +53,8 @@ export type CatalogEntryRecord = {
   requiredData: string[];
   implementationNotes: string[];
   basedOnFamilies: string[];
+  compositionDraft?: StrategyFamilyCompositionProposal;
+  composition?: ResolvedStrategyFamilyComposition;
   createdAt: string;
   updatedAt: string;
   notes: string[];
@@ -59,6 +62,8 @@ export type CatalogEntryRecord = {
 
 export type CodeMutationTask = {
   taskId?: string;
+  familyId?: string;
+  strategyName?: string;
   title: string;
   intent: "fix_bug" | "implement_strategy" | "refactor_research_loop" | "extend_catalog";
   rationale: string;
@@ -82,6 +87,7 @@ export type StrategyFamilyDefinition = {
   timeframe: "1h";
   parameterSpecs: ResearchParameterSpec[];
   guardrails: string[];
+  composition?: ResolvedStrategyFamilyComposition;
 };
 
 export type CandidateProposal = {
@@ -95,6 +101,36 @@ export type CandidateProposal = {
 export type NormalizedCandidateProposal = CandidateProposal & {
   candidateId: string;
   strategyName: string;
+  composition?: ResolvedStrategyFamilyComposition;
+};
+
+export type StrategyCompositionMode = "weighted_vote" | "confirmatory";
+
+export type StrategyCompositionComponentProposal = {
+  familyId: string;
+  weight?: number;
+  parameterBindings?: Record<string, string>;
+};
+
+export type StrategyFamilyCompositionProposal = {
+  mode: StrategyCompositionMode;
+  buyThreshold?: number;
+  sellThreshold?: number;
+  components: StrategyCompositionComponentProposal[];
+};
+
+export type ResolvedStrategyCompositionComponent = {
+  familyId: string;
+  strategyName: string;
+  weight: number;
+  parameterBindings: Record<string, string>;
+};
+
+export type ResolvedStrategyFamilyComposition = {
+  mode: StrategyCompositionMode;
+  buyThreshold: number;
+  sellThreshold: number;
+  components: ResolvedStrategyCompositionComponent[];
 };
 
 export type CandidateEvaluationFailure = {
@@ -217,6 +253,8 @@ export type PreparationExecutionResult = {
 
 export type CodeMutationExecutionResult = {
   taskId: string;
+  familyId?: string;
+  strategyName?: string;
   title: string;
   status: "planned" | "executed" | "failed" | "skipped";
   detail: string;

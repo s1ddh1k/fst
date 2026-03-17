@@ -3,8 +3,11 @@ import type { ScoredStrategy } from "../../../strategies/src/types.js";
 import type {
   CandidateProposal,
   NormalizedCandidateProposal,
+  ResolvedStrategyFamilyComposition,
+  StrategyFamilyCompositionProposal,
   StrategyFamilyDefinition
 } from "./types.js";
+import { createComposedScoredStrategy } from "./composed-strategy.js";
 
 const FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   {
@@ -137,6 +140,45 @@ function quantize(value: number): number {
   return Number(value.toFixed(4));
 }
 
+function resolveComposition(
+  composition: StrategyFamilyCompositionProposal | ResolvedStrategyFamilyComposition | undefined,
+  familyDefinitions: StrategyFamilyDefinition[]
+): ResolvedStrategyFamilyComposition | undefined {
+  if (!composition) {
+    return undefined;
+  }
+
+  const components = composition.components.flatMap((component) => {
+    const family = familyDefinitions.find((item) => item.familyId === component.familyId);
+
+    if (!family?.strategyName) {
+      return [];
+    }
+
+    return [{
+      familyId: component.familyId,
+      strategyName: family.strategyName,
+      weight: Number.isFinite(component.weight) ? Math.max(0.1, Number(component.weight)) : 1,
+      parameterBindings: { ...(component.parameterBindings ?? {}) }
+    }];
+  });
+
+  if (components.length === 0) {
+    return undefined;
+  }
+
+  return {
+    mode: composition.mode,
+    buyThreshold: Number.isFinite(composition.buyThreshold)
+      ? Math.max(0.05, Number(composition.buyThreshold))
+      : 0.5,
+    sellThreshold: Number.isFinite(composition.sellThreshold)
+      ? Math.max(0.05, Number(composition.sellThreshold))
+      : 0.5,
+    components
+  };
+}
+
 export function listStrategyFamilies(): StrategyFamilyDefinition[] {
   return FAMILY_CATALOG.slice();
 }
@@ -177,6 +219,7 @@ export function normalizeCandidateProposal(
     candidateId: proposal.candidateId ?? `${family.familyId}-${String(candidateIndex + 1).padStart(2, "0")}`,
     familyId: family.familyId,
     strategyName: family.strategyName,
+    composition: family.composition,
     thesis: proposal.thesis.trim(),
     parameters: normalizedParameters,
     invalidationSignals: proposal.invalidationSignals
@@ -187,5 +230,21 @@ export function normalizeCandidateProposal(
 }
 
 export function instantiateCandidateStrategy(candidate: NormalizedCandidateProposal): ScoredStrategy {
+  if (candidate.composition) {
+    return createComposedScoredStrategy({
+      name: candidate.strategyName,
+      parameters: candidate.parameters,
+      composition: candidate.composition,
+      createComponent: (strategyName, parameters) => createScoredStrategyByName(strategyName, parameters)
+    });
+  }
+
   return createScoredStrategyByName(candidate.strategyName, candidate.parameters);
+}
+
+export function resolveStrategyFamilyComposition(
+  composition: StrategyFamilyCompositionProposal | ResolvedStrategyFamilyComposition | undefined,
+  familyDefinitions: StrategyFamilyDefinition[]
+): ResolvedStrategyFamilyComposition | undefined {
+  return resolveComposition(composition, familyDefinitions);
 }

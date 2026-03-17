@@ -1,9 +1,12 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { listScoredStrategyNames } from "../strategy-registry.js";
+import { resolveStrategyFamilyComposition } from "./catalog.js";
 import type {
   CatalogEntryRecord,
+  CodeMutationExecutionResult,
   ProposedStrategyFamily,
+  ValidationCommandResult,
   StrategyFamilyDefinition
 } from "./types.js";
 
@@ -41,16 +44,34 @@ export function mergeProposedFamilies(
   for (const family of proposed) {
     const existing = byId.get(family.familyId);
     const timestamp = nowIso();
+    const currentCatalog = Array.from(byId.values());
     const executableBase =
       (family.baseFamilyId ? byId.get(family.baseFamilyId) : undefined) ??
       byId.get(family.basedOnFamilies[0] ?? "");
-    const strategyName = executableBase?.strategyName;
+    const composition = resolveStrategyFamilyComposition(
+      family.composition,
+      currentCatalog
+        .filter((entry): entry is CatalogEntryRecord & { strategyName?: string } => entry.state !== "discarded")
+        .map((entry) => ({
+          familyId: entry.familyId,
+          strategyName: entry.strategyName ?? "",
+          title: entry.title,
+          thesis: entry.thesis,
+          timeframe: entry.timeframe,
+          parameterSpecs: entry.parameterSpecs,
+          guardrails: entry.implementationNotes,
+          composition: entry.composition
+        }))
+    );
+    const strategyName = composition ? `composed:${family.familyId}` : executableBase?.strategyName;
     const inferredState: CatalogEntryRecord["state"] = strategyName ? "implemented" : "proposed";
 
     if (existing) {
       byId.set(family.familyId, {
         ...existing,
         strategyName,
+        compositionDraft: family.composition,
+        composition,
         state: strategyName ? (existing.state === "validated" ? "validated" : "implemented") : existing.state,
         title: family.title,
         thesis: family.thesis,
@@ -74,6 +95,8 @@ export function mergeProposedFamilies(
       thesis: family.thesis,
       timeframe: family.timeframe,
       parameterSpecs: family.parameterSpecs,
+      compositionDraft: family.composition,
+      composition,
       requiredData: family.requiredData,
       implementationNotes: family.implementationNotes,
       basedOnFamilies: family.basedOnFamilies,
@@ -88,10 +111,51 @@ export function mergeProposedFamilies(
   );
 }
 
-export function refreshCatalogImplementations(catalog: CatalogEntryRecord[]): CatalogEntryRecord[] {
-  const scoredStrategies = new Set(listScoredStrategyNames());
+export function refreshCatalogImplementations(
+  catalog: CatalogEntryRecord[],
+  discoveredStrategyNames?: string[]
+): CatalogEntryRecord[] {
+  const scoredStrategies = new Set(discoveredStrategyNames ?? listScoredStrategyNames());
 
   return catalog.map((entry) => {
+    const resolvedComposition = resolveStrategyFamilyComposition(
+      entry.compositionDraft ?? entry.composition,
+      catalog
+        .filter((item): item is CatalogEntryRecord & { strategyName?: string } => item.state !== "discarded")
+        .map((item) => ({
+          familyId: item.familyId,
+          strategyName:
+            item.composition && item.composition.components.length > 0
+              ? `composed:${item.familyId}`
+              : item.strategyName ?? "",
+          title: item.title,
+          thesis: item.thesis,
+          timeframe: item.timeframe,
+          parameterSpecs: item.parameterSpecs,
+          guardrails: item.implementationNotes,
+          composition: item.composition
+        }))
+    );
+
+    if (resolvedComposition && resolvedComposition.components.length > 0) {
+      return {
+        ...entry,
+        composition: resolvedComposition,
+        strategyName: `composed:${entry.familyId}`,
+        state: entry.state === "validated" ? "validated" : "implemented",
+        updatedAt: nowIso()
+      };
+    }
+
+    if (entry.composition && entry.composition.components.length > 0) {
+      return {
+        ...entry,
+        strategyName: `composed:${entry.familyId}`,
+        state: entry.state === "validated" ? "validated" : "implemented",
+        updatedAt: nowIso()
+      };
+    }
+
     if (!scoredStrategies.has(entry.familyId)) {
       return entry;
     }
@@ -108,6 +172,84 @@ export function refreshCatalogImplementations(catalog: CatalogEntryRecord[]): Ca
   });
 }
 
+export function applyCodeMutationResultsToCatalog(params: {
+  catalog: CatalogEntryRecord[];
+  codeMutationResults: CodeMutationExecutionResult[];
+  validationResults: ValidationCommandResult[];
+  discoveredStrategyNames?: string[];
+}): CatalogEntryRecord[] {
+  const refreshed = refreshCatalogImplementations(params.catalog, params.discoveredStrategyNames);
+  const allValidationPassed = params.validationResults.every((item) => item.status !== "failed");
+  const byId = new Map(refreshed.map((entry) => [entry.familyId, entry]));
+
+  for (const result of params.codeMutationResults) {
+    if (result.status !== "executed") {
+      continue;
+    }
+
+    const familyId = result.familyId ?? result.strategyName;
+    const strategyName = result.strategyName ?? result.familyId;
+    const discovered =
+      (strategyName && params.discoveredStrategyNames?.includes(strategyName)) ||
+      (familyId && params.discoveredStrategyNames?.includes(familyId));
+
+    if (!familyId) {
+      continue;
+    }
+
+    const existing = byId.get(familyId);
+    if (existing) {
+      byId.set(familyId, {
+        ...existing,
+        strategyName:
+          discovered && strategyName
+            ? strategyName
+            : existing.strategyName,
+        state:
+      discovered
+            ? existing.state === "validated" ? "validated" : "implemented"
+            : existing.state,
+        updatedAt: nowIso(),
+        notes: [
+          ...existing.notes,
+          discovered
+            ? allValidationPassed
+              ? `Code mutation executed and runtime discovery found strategy ${strategyName ?? familyId}; validation passed.`
+              : `Code mutation executed and runtime discovery found strategy ${strategyName ?? familyId}.`
+            : `Code mutation executed for ${familyId} but runtime discovery did not find a new strategy yet.`
+        ]
+      });
+      continue;
+    }
+
+    byId.set(familyId, {
+      familyId,
+      state: discovered ? "implemented" : "proposed",
+      source: "llm",
+      strategyName: discovered ? strategyName : undefined,
+      title: result.title,
+      thesis: result.detail || result.title,
+      timeframe: "1h",
+      parameterSpecs: [],
+      requiredData: ["1h"],
+      implementationNotes: [],
+      basedOnFamilies: [],
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      notes: [
+        discovered
+          ? `Added from code mutation result and runtime discovery (${strategyName ?? familyId}).`
+          : "Added from code mutation result before runtime discovery resolved a strategy."
+      ]
+    });
+  }
+
+  return refreshCatalogImplementations(
+    Array.from(byId.values()).sort((left, right) => left.familyId.localeCompare(right.familyId)),
+    params.discoveredStrategyNames
+  );
+}
+
 export function buildRuntimeFamilies(catalog: CatalogEntryRecord[]): StrategyFamilyDefinition[] {
   return refreshCatalogImplementations(catalog)
     .filter((entry): entry is CatalogEntryRecord & { strategyName: string } =>
@@ -120,7 +262,8 @@ export function buildRuntimeFamilies(catalog: CatalogEntryRecord[]): StrategyFam
       thesis: entry.thesis,
       timeframe: entry.timeframe,
       parameterSpecs: entry.parameterSpecs,
-      guardrails: entry.implementationNotes
+      guardrails: entry.implementationNotes,
+      composition: entry.composition
     }));
 }
 
@@ -166,6 +309,7 @@ function buildCatalogSummary(catalog: CatalogEntryRecord[]) {
       source: entry.source,
       strategyName: entry.strategyName,
       basedOnFamilies: entry.basedOnFamilies,
+      compositionDraft: entry.compositionDraft,
       updatedAt: entry.updatedAt
     }))
   };

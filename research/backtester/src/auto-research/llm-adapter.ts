@@ -33,6 +33,8 @@ export interface ResearchLlmClient {
     preparationResults: PreparationExecutionResult[];
     codeMutationResults: Array<{
       taskId: string;
+      familyId?: string;
+      strategyName?: string;
       title: string;
       status: "planned" | "executed" | "failed" | "skipped";
       detail: string;
@@ -232,8 +234,59 @@ function parseProposedFamilies(raw: unknown): ProposedStrategyFamily[] {
     const title = String(record.title ?? "").trim();
     const thesis = String(record.thesis ?? "").trim();
     const parameterSpecs = parseParameterSpecs(record.parameterSpecs);
+    const composition: ProposedStrategyFamily["composition"] = (() => {
+      if (!record.composition || typeof record.composition !== "object" || Array.isArray(record.composition)) {
+        return undefined;
+      }
 
-    if (!familyId || parameterSpecs.length === 0) {
+      const value = asRecord(record.composition);
+      const mode = value.mode === "weighted_vote" || value.mode === "confirmatory" ? value.mode : undefined;
+      if (!mode) {
+        return undefined;
+      }
+
+      const components = Array.isArray(value.components)
+        ? value.components.flatMap((component) => {
+            if (!component || typeof component !== "object" || Array.isArray(component)) {
+              return [];
+            }
+
+            const item = asRecord(component);
+            const familyId = String(item.familyId ?? "").trim();
+            if (!familyId) {
+              return [];
+            }
+
+            const parameterBindings =
+              item.parameterBindings && typeof item.parameterBindings === "object" && !Array.isArray(item.parameterBindings)
+                ? Object.fromEntries(
+                    Object.entries(asRecord(item.parameterBindings))
+                      .filter(([, value]) => typeof value === "string")
+                      .map(([key, value]) => [key, String(value)])
+                  )
+                : {};
+
+            return [{
+              familyId,
+              weight: Number.isFinite(Number(item.weight)) ? Number(item.weight) : undefined,
+              parameterBindings
+            }];
+          })
+        : [];
+
+      if (components.length === 0) {
+        return undefined;
+      }
+
+      return {
+        mode,
+        buyThreshold: Number.isFinite(Number(value.buyThreshold)) ? Number(value.buyThreshold) : undefined,
+        sellThreshold: Number.isFinite(Number(value.sellThreshold)) ? Number(value.sellThreshold) : undefined,
+        components
+      } satisfies NonNullable<ProposedStrategyFamily["composition"]>;
+    })();
+
+    if (!familyId || (parameterSpecs.length === 0 && !composition)) {
       return [];
     }
 
@@ -247,6 +300,7 @@ function parseProposedFamilies(raw: unknown): ProposedStrategyFamily[] {
         ? record.basedOnFamilies.filter((value): value is string => typeof value === "string")
         : [],
       parameterSpecs,
+      composition,
       requiredData: Array.isArray(record.requiredData)
         ? record.requiredData.filter((value): value is string => typeof value === "string")
         : [],
@@ -304,6 +358,8 @@ function parseCodeTasks(raw: unknown): CodeMutationTask[] {
 
     tasks.push({
       taskId: typeof record.taskId === "string" ? record.taskId : undefined,
+      familyId: typeof record.familyId === "string" ? record.familyId : undefined,
+      strategyName: typeof record.strategyName === "string" ? record.strategyName : undefined,
       title,
       intent,
       rationale,
@@ -360,6 +416,8 @@ export class UcmResearchLlmClient implements ResearchLlmClient {
     preparationResults: PreparationExecutionResult[];
     codeMutationResults: Array<{
       taskId: string;
+      familyId?: string;
+      strategyName?: string;
       title: string;
       status: "planned" | "executed" | "failed" | "skipped";
       detail: string;

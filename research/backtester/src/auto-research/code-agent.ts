@@ -81,6 +81,8 @@ export class UcmCodeMutationAgent implements CodeAgent {
         "",
         `Task: ${normalizedTask.title}`,
         `Intent: ${normalizedTask.intent}`,
+        `FamilyId: ${normalizedTask.familyId ?? "not specified"}`,
+        `StrategyName: ${normalizedTask.strategyName ?? "not specified"}`,
         `Rationale: ${normalizedTask.rationale}`,
         `Acceptance criteria: ${normalizedTask.acceptanceCriteria.join("; ") || "none provided"}`,
         `Target files: ${normalizedTask.targetFiles.join(", ") || "not specified"}`,

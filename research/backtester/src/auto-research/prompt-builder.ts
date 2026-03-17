@@ -20,7 +20,8 @@ function compactFamilies(families: StrategyFamilyDefinition[]) {
     thesis: family.thesis,
     timeframe: family.timeframe,
     parameterSpecs: family.parameterSpecs,
-    guardrails: family.guardrails
+    guardrails: family.guardrails,
+    composition: family.composition
   }));
 }
 
@@ -62,6 +63,8 @@ function compactPreparationResults(results: PreparationExecutionResult[]) {
 function compactCodeMutationResults(results: CodeMutationExecutionResult[]) {
   return results.map((result) => ({
     taskId: result.taskId,
+    familyId: result.familyId,
+    strategyName: result.strategyName,
     title: result.title,
     status: result.status,
     detail: result.detail
@@ -248,11 +251,37 @@ Return JSON only:
       ],
       "requiredData": ["1h", "feature_cache:breadth"],
       "implementationNotes": ["what code would need to change"]
+      "composition": {
+        "mode": "weighted_vote",
+        "buyThreshold": 0.55,
+        "sellThreshold": 0.55,
+        "components": [
+          {
+            "familyId": "leader-pullback-state-machine",
+            "weight": 1.0,
+            "parameterBindings": {
+              "strengthFloor": "leaderStrengthFloor",
+              "trailAtrMult": "sharedTrailAtrMult"
+            }
+          },
+          {
+            "familyId": "momentum-reacceleration",
+            "weight": 0.8,
+            "parameterBindings": {
+              "strengthFloor": "resetStrengthFloor",
+              "minRiskOn": "sharedMinRiskOn",
+              "trailAtrMult": "sharedTrailAtrMult"
+            }
+          }
+        ]
+      }
     }
   ],
   "codeTasks": [
     {
       "taskId": "optional-id",
+      "familyId": "momentum-reacceleration-v1",
+      "strategyName": "momentum-reacceleration-v1",
       "title": "implement new family",
       "intent": "implement_strategy",
       "rationale": "why code change is worth doing",
@@ -282,6 +311,7 @@ Requirements:
 - Use only parameter names that belong to the chosen family.
 - If you want a newly proposed family to become executable after a code task, make the familyId equal to the strategy registry name you expect the code task to add.
 - If you want a newly proposed family to be executable immediately, set 'baseFamilyId' to an existing executable family.
+- You may propose immediately executable composed families by adding a 'composition' block that references already executable familyIds.
 - Do not emit markdown.
 `.trim();
 }

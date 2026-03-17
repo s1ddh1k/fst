@@ -5,6 +5,8 @@ export * from "./llm-adapter.js";
 export * from "./preparation.js";
 export * from "./proposed-catalog.js";
 export * from "./code-agent.js";
+export * from "./composed-strategy.js";
+export * from "./runtime-discovery.js";
 export * from "./validation.js";
 export * from "./run-manager.js";
 export * from "./report-html.js";
