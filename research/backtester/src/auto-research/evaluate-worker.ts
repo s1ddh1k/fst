@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { executeScoredHoldoutBacktest, executeScoredWalkForwardBacktest, preloadMarketData } from "../scored-runner.js";
 import { instantiateCandidateStrategy } from "./catalog.js";
+import { evaluatePortfolioCandidate } from "./portfolio-evaluator.js";
+import { isPortfolioStrategyName } from "./portfolio-runtime.js";
+import { getResolvedWalkForwardConfig, summarizeReferenceCandleSpan, type ReferenceCandleSpan } from "./walk-forward-config.js";
 import type { AutoResearchRunConfig, CandidateBacktestEvaluation, NormalizedCandidateProposal } from "./types.js";
 
 function getOption(args: string[], key: string): string | undefined {
@@ -110,8 +113,40 @@ async function main(): Promise<void> {
   }
 
   const payload = JSON.parse(await readFile(payloadPath, "utf8")) as WorkerPayload;
+  if (isPortfolioStrategyName(payload.candidate.strategyName)) {
+    try {
+      const evaluation = await evaluatePortfolioCandidate({
+        config: payload.config,
+        candidate: payload.candidate,
+        marketCodes: payload.marketCodes
+      });
+      console.log(JSON.stringify(evaluation, null, 2));
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(
+        JSON.stringify(
+          buildEmptyEvaluation({
+            config: payload.config,
+            candidate: payload.candidate,
+            stage: /window|split/i.test(message) ? "split" : /candle|market|load/i.test(message) ? "preload" : "backtest",
+            message
+          }),
+          null,
+          2
+        )
+      );
+      return;
+    }
+  }
+
   const strategy = instantiateCandidateStrategy(payload.candidate);
   let preloaded: Awaited<ReturnType<typeof preloadMarketData>>;
+  let availableSpan: ReferenceCandleSpan = {
+    availableDays: 0,
+    startAt: undefined,
+    endAt: undefined
+  };
   try {
     preloaded = await preloadMarketData({
       timeframe: payload.config.timeframe,
@@ -135,6 +170,7 @@ async function main(): Promise<void> {
     );
     return;
   }
+  availableSpan = summarizeReferenceCandleSpan(preloaded.referenceCandles);
 
   let evaluation: CandidateBacktestEvaluation;
 
@@ -234,6 +270,11 @@ async function main(): Promise<void> {
 
       const feePaid = summary.scoredWindows.reduce((sum, window) => sum + window.metrics.feePaid, 0);
       const slippagePaid = summary.scoredWindows.reduce((sum, window) => sum + window.metrics.slippagePaid, 0);
+      const resolved = getResolvedWalkForwardConfig(payload.config);
+      const windowReturns = summary.windows.map((window) => window.test.netReturn);
+      const positiveWindowCount = windowReturns.filter((value) => value > 0).length;
+      const negativeWindowCount = windowReturns.filter((value) => value < 0).length;
+      const totalClosedTrades = summary.windows.reduce((sum, window) => sum + window.test.tradeCount, 0);
       evaluation = {
         candidate: payload.candidate,
         mode: "walk-forward",
@@ -309,9 +350,19 @@ async function main(): Promise<void> {
           windows: {
             mode: payload.config.mode,
             holdoutDays: payload.config.holdoutDays,
-            trainingDays: payload.config.trainingDays ?? payload.config.holdoutDays * 2,
-            stepDays: payload.config.stepDays,
-            windowCount: summary.scoredWindows.length
+            trainingDays: resolved.trainingDays,
+            stepDays: resolved.stepDays,
+            windowCount: summary.scoredWindows.length,
+            availableStartAt: availableSpan.startAt?.toISOString(),
+            availableEndAt: availableSpan.endAt?.toISOString(),
+            availableDays: availableSpan.availableDays,
+            requiredDays: resolved.requiredDays,
+            positiveWindowCount,
+            positiveWindowRatio: positiveWindowCount / Math.max(summary.scoredWindows.length, 1),
+            negativeWindowCount,
+            bestWindowNetReturn: windowReturns.length > 0 ? Math.max(...windowReturns) : undefined,
+            worstWindowNetReturn: windowReturns.length > 0 ? Math.min(...windowReturns) : undefined,
+            totalClosedTrades
           }
         },
         rawSummary: summary
@@ -384,6 +435,9 @@ async function main(): Promise<void> {
           windows: {
             mode: payload.config.mode,
             holdoutDays: payload.config.holdoutDays,
+            availableStartAt: availableSpan.startAt?.toISOString(),
+            availableEndAt: availableSpan.endAt?.toISOString(),
+            availableDays: availableSpan.availableDays,
             trainStartAt: summary.trainRange.start.toISOString(),
             trainEndAt: summary.trainRange.end.toISOString(),
             testStartAt: summary.testRange.start.toISOString(),
@@ -402,6 +456,16 @@ async function main(): Promise<void> {
       stage,
       message
     });
+    const resolved = getResolvedWalkForwardConfig(payload.config);
+    evaluation.diagnostics.windows.availableStartAt = availableSpan.startAt?.toISOString();
+    evaluation.diagnostics.windows.availableEndAt = availableSpan.endAt?.toISOString();
+    evaluation.diagnostics.windows.availableDays = availableSpan.availableDays;
+    evaluation.diagnostics.windows.requiredDays =
+      payload.config.mode === "walk-forward"
+        ? resolved.requiredDays
+        : payload.config.holdoutDays;
+    evaluation.diagnostics.windows.trainingDays = resolved.trainingDays;
+    evaluation.diagnostics.windows.stepDays = resolved.stepDays;
   }
 
   console.log(JSON.stringify(evaluation, null, 2));

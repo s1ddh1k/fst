@@ -108,6 +108,7 @@ export function listScoredStrategyNames(): string[] {
     "momentum-reacceleration",
     "leader-breakout-retest",
     "compression-breakout-trend",
-    "leader-trend-continuation"
+    "leader-trend-continuation",
+    "residual-reversion"
   ];
 }

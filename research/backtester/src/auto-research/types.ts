@@ -1,6 +1,7 @@
 import type { HoldoutBacktestSummary, WalkForwardBacktestSummary } from "../types.js";
 
 export type AutoResearchMode = "holdout" | "walk-forward";
+export type AutoResearchRunOutcome = "completed" | "partial" | "aborted" | "invalid_config";
 
 export type ResearchPreparationAction =
   | {
@@ -85,6 +86,7 @@ export type StrategyFamilyDefinition = {
   title: string;
   thesis: string;
   timeframe: "1h";
+  requiredData?: string[];
   parameterSpecs: ResearchParameterSpec[];
   guardrails: string[];
   composition?: ResolvedStrategyFamilyComposition;
@@ -96,6 +98,15 @@ export type CandidateProposal = {
   thesis: string;
   parameters: Record<string, number>;
   invalidationSignals: string[];
+  parentCandidateIds?: string[];
+  origin?:
+    | "llm"
+    | "proposal_fallback"
+    | "review_fallback"
+    | "novelized"
+    | "resume"
+    | "engine_mutation"
+    | "engine_seed";
 };
 
 export type NormalizedCandidateProposal = CandidateProposal & {
@@ -194,6 +205,16 @@ export type CandidateEvaluationDiagnostics = {
     testStartAt?: string;
     testEndAt?: string;
     windowCount?: number;
+    availableStartAt?: string;
+    availableEndAt?: string;
+    availableDays?: number;
+    requiredDays?: number;
+    positiveWindowCount?: number;
+    positiveWindowRatio?: number;
+    negativeWindowCount?: number;
+    bestWindowNetReturn?: number;
+    worstWindowNetReturn?: number;
+    totalClosedTrades?: number;
   };
 };
 
@@ -299,7 +320,34 @@ export type AutoResearchRunConfig = {
   allowCodeMutation: boolean;
   minTradesForPromotion?: number;
   minNetReturnForPromotion?: number;
+  maxDrawdownForPromotion?: number;
+  minPositiveWindowRatioForPromotion?: number;
+  minRandomPercentileForPromotion?: number;
+  requireBootstrapSignificanceForPromotion?: boolean;
   maxNoTradeIterations?: number;
+};
+
+export type AutoResearchConfigRepair = {
+  appliedAt: string;
+  reason: string;
+  previous: {
+    holdoutDays: number;
+    trainingDays: number;
+    stepDays: number;
+    requiredDays: number;
+  };
+  next: {
+    holdoutDays: number;
+    trainingDays: number;
+    stepDays: number;
+    requiredDays: number;
+    expectedWindowCount: number;
+  };
+  available: {
+    startAt?: string;
+    endAt?: string;
+    availableDays: number;
+  };
 };
 
 export type AutoResearchRunReport = {
@@ -309,6 +357,9 @@ export type AutoResearchRunReport = {
   catalog: CatalogEntryRecord[];
   marketCodes: string[];
   iterations: ResearchIterationRecord[];
+  outcome: AutoResearchRunOutcome;
+  outcomeReason?: string;
+  configRepairs: AutoResearchConfigRepair[];
   bestCandidate?: CandidateBacktestEvaluation;
   bestTradeCandidate?: CandidateBacktestEvaluation;
 };

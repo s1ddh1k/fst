@@ -22,14 +22,14 @@ export function createInitialCatalog(families: StrategyFamilyDefinition[]): Cata
     state: "implemented",
     source: "stable",
     strategyName: family.strategyName,
-    title: family.title,
-    thesis: family.thesis,
-    timeframe: family.timeframe,
-    parameterSpecs: family.parameterSpecs,
-    requiredData: [family.timeframe],
-    implementationNotes: family.guardrails.slice(),
-    basedOnFamilies: [],
-    createdAt: timestamp,
+      title: family.title,
+      thesis: family.thesis,
+      timeframe: family.timeframe,
+      parameterSpecs: family.parameterSpecs,
+      requiredData: family.requiredData ?? [family.timeframe],
+      implementationNotes: family.guardrails.slice(),
+      basedOnFamilies: [],
+      createdAt: timestamp,
     updatedAt: timestamp,
     notes: ["Imported from stable strategy catalog."]
   }));
@@ -58,6 +58,7 @@ export function mergeProposedFamilies(
           title: entry.title,
           thesis: entry.thesis,
           timeframe: entry.timeframe,
+          requiredData: entry.requiredData,
           parameterSpecs: entry.parameterSpecs,
           guardrails: entry.implementationNotes,
           composition: entry.composition
@@ -261,6 +262,7 @@ export function buildRuntimeFamilies(catalog: CatalogEntryRecord[]): StrategyFam
       title: entry.title,
       thesis: entry.thesis,
       timeframe: entry.timeframe,
+      requiredData: entry.requiredData,
       parameterSpecs: entry.parameterSpecs,
       guardrails: entry.implementationNotes,
       composition: entry.composition

@@ -1,5 +1,5 @@
-import { createRequire } from "node:module";
 import { buildProposalPrompt, buildReviewPrompt } from "./prompt-builder.js";
+import { llmJson } from "./cli-llm.js";
 import type {
   AutoResearchRunConfig,
   CandidateBacktestEvaluation,
@@ -11,12 +11,6 @@ import type {
   ReviewDecision,
   StrategyFamilyDefinition
 } from "./types.js";
-
-type JsonResponder = (prompt: string, opts: {
-  provider?: string;
-  model?: string;
-  cwd?: string;
-}) => Promise<{ data: unknown }>;
 
 export interface ResearchLlmClient {
   proposeCandidates(params: {
@@ -46,28 +40,6 @@ export interface ResearchLlmClient {
     }>;
     evaluations: CandidateBacktestEvaluation[];
   }): Promise<ReviewDecision>;
-}
-
-function resolveUcmLlmPath(): string {
-  const home = process.env.HOME;
-
-  if (!home) {
-    throw new Error("HOME is required to resolve ~/git/ucm");
-  }
-
-  return `${home}/git/ucm/legacy/lib/core/llm.js`;
-}
-
-function getJsonResponder(): JsonResponder {
-  const require = createRequire(import.meta.url);
-  const modulePath = resolveUcmLlmPath();
-  const imported = require(modulePath) as { llmJson?: JsonResponder };
-
-  if (typeof imported.llmJson !== "function") {
-    throw new Error(`llmJson not found in ${modulePath}`);
-  }
-
-  return imported.llmJson;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -170,7 +142,7 @@ function parsePreparation(raw: unknown): ProposalBatch["preparation"] {
   return actions;
 }
 
-function parseCandidates(raw: unknown) {
+function parseCandidates(raw: unknown): ProposalBatch["candidates"] {
   if (!Array.isArray(raw)) {
     throw new Error("LLM response missing candidates array");
   }
@@ -183,12 +155,26 @@ function parseCandidates(raw: unknown) {
         .filter(([, value]) => Number.isFinite(value))
         .map(([key, value]) => [key, Number(value)])
     );
+    const origin: ProposalBatch["candidates"][number]["origin"] =
+      record.origin === "llm" ||
+      record.origin === "proposal_fallback" ||
+      record.origin === "review_fallback" ||
+      record.origin === "novelized" ||
+      record.origin === "resume" ||
+      record.origin === "engine_mutation" ||
+      record.origin === "engine_seed"
+        ? record.origin
+        : undefined;
 
     return {
       candidateId: typeof record.candidateId === "string" ? record.candidateId : undefined,
       familyId: String(record.familyId ?? ""),
       thesis: String(record.thesis ?? ""),
       parameters: normalizedParameters,
+      parentCandidateIds: Array.isArray(record.parentCandidateIds)
+        ? record.parentCandidateIds.filter((value): value is string => typeof value === "string").slice(0, 8)
+        : undefined,
+      origin,
       invalidationSignals: Array.isArray(record.invalidationSignals)
         ? record.invalidationSignals.filter((value): value is string => typeof value === "string")
         : []
@@ -376,18 +362,14 @@ function parseCodeTasks(raw: unknown): CodeMutationTask[] {
   return tasks;
 }
 
-export class UcmResearchLlmClient implements ResearchLlmClient {
-  private readonly llmJson: JsonResponder;
-
+export class CliResearchLlmClient implements ResearchLlmClient {
   constructor(
     private readonly options: {
       provider?: string;
       model?: string;
       cwd?: string;
     }
-  ) {
-    this.llmJson = getJsonResponder();
-  }
+  ) {}
 
   async proposeCandidates(params: {
     config: AutoResearchRunConfig;
@@ -396,7 +378,7 @@ export class UcmResearchLlmClient implements ResearchLlmClient {
     history: ResearchIterationRecord[];
   }): Promise<ProposalBatch> {
     const prompt = buildProposalPrompt(params);
-    const { data } = await this.llmJson(prompt, this.options);
+    const { data } = await llmJson(prompt, this.options);
     const response = asRecord(data);
 
     return {
@@ -430,7 +412,7 @@ export class UcmResearchLlmClient implements ResearchLlmClient {
     evaluations: CandidateBacktestEvaluation[];
   }): Promise<ReviewDecision> {
     const prompt = buildReviewPrompt(params);
-    const { data } = await this.llmJson(prompt, this.options);
+    const { data } = await llmJson(prompt, this.options);
     const response = asRecord(data);
     const verdict = response.verdict;
 

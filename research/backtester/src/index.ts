@@ -34,10 +34,13 @@ import {
   runMultiStrategyBacktest
 } from "./multi-strategy/index.js";
 import {
-  UcmResearchLlmClient,
+  CliResearchLlmClient,
+  DEFAULT_MIN_NET_RETURN_FOR_PROMOTION,
+  calculateAutoResearchMinimumLimit,
   createAutoResearchOrchestrator
 } from "./auto-research/index.js";
 import type { Candle } from "./types.js";
+import { resolveWorkspaceRelativePath } from "./workspace-path.js";
 
 function getOption(args: string[], key: string): string | undefined {
   const index = args.indexOf(key);
@@ -289,6 +292,7 @@ async function main(): Promise<void> {
   const autoResearchOutput =
     getOption(process.argv, "--auto-research-output") ??
     `research/backtester/artifacts/auto-research/${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const resolvedAutoResearchOutput = resolveWorkspaceRelativePath(autoResearchOutput, process.cwd());
   const autoResearchResume = getOption(process.argv, "--auto-research-resume");
   const autoResearchAllowDataCollection = process.argv.includes("--auto-research-allow-data-collection");
   const autoResearchAllowFeatureCache = process.argv.includes("--auto-research-allow-feature-cache");
@@ -300,7 +304,28 @@ async function main(): Promise<void> {
   const autoResearchMinNetReturnOption = getOption(process.argv, "--auto-research-min-net-return");
   const autoResearchMinNetReturn = autoResearchMinNetReturnOption
     ? Number.parseFloat(autoResearchMinNetReturnOption)
+    : DEFAULT_MIN_NET_RETURN_FOR_PROMOTION;
+  const autoResearchMaxDrawdownOption = getOption(process.argv, "--auto-research-max-drawdown");
+  const autoResearchMaxDrawdown = autoResearchMaxDrawdownOption
+    ? Number.parseFloat(autoResearchMaxDrawdownOption)
+    : 0.35;
+  const autoResearchMinPositiveWindowRatioOption = getOption(
+    process.argv,
+    "--auto-research-min-positive-window-ratio"
+  );
+  const autoResearchMinPositiveWindowRatio = autoResearchMinPositiveWindowRatioOption
+    ? Number.parseFloat(autoResearchMinPositiveWindowRatioOption)
     : undefined;
+  const autoResearchMinRandomPercentileOption = getOption(
+    process.argv,
+    "--auto-research-min-random-percentile"
+  );
+  const autoResearchMinRandomPercentile = autoResearchMinRandomPercentileOption
+    ? Number.parseFloat(autoResearchMinRandomPercentileOption)
+    : 0.5;
+  const autoResearchRequireBootstrapSignificance = process.argv.includes(
+    "--auto-research-require-bootstrap-significance"
+  );
   const autoResearchMaxNoTradeIterationsOption = getOption(process.argv, "--auto-research-max-no-trade-iterations");
   const autoResearchMaxNoTradeIterations = autoResearchMaxNoTradeIterationsOption
     ? Number.parseInt(autoResearchMaxNoTradeIterationsOption, 10)
@@ -318,7 +343,7 @@ async function main(): Promise<void> {
   const minMarkets = Number.parseInt(getOption(process.argv, "--min-markets") ?? "2", 10);
   const minTrades = Number.parseFloat(getOption(process.argv, "--min-trades") ?? "1");
   const requestedMinCandles = getOption(process.argv, "--min-candles");
-  const limit = resolveRequiredLimit({
+  const defaultLimit = resolveRequiredLimit({
     timeframe,
     requestedLimit,
     holdoutDays,
@@ -327,6 +352,17 @@ async function main(): Promise<void> {
     walkForwardMode:
       walkForwardSweep || scoredWalkForward || candidateWalkForward || strategyFollowupReport
   });
+  const autoResearchLimit = Math.max(
+    requestedLimit,
+    calculateAutoResearchMinimumLimit({
+      timeframe: "1h",
+      holdoutDays,
+      trainingDays,
+      stepDays,
+      mode: autoResearchMode
+    })
+  );
+  const limit = autoResearch ? autoResearchLimit : defaultLimit;
   const minCandles = Number.parseInt(
     requestedMinCandles ?? String(Math.max(150, limit)),
     10
@@ -334,7 +370,7 @@ async function main(): Promise<void> {
 
   try {
     if (autoResearch) {
-      const llmClient = new UcmResearchLlmClient({
+      const llmClient = new CliResearchLlmClient({
         provider: llmProvider,
         model: llmModel,
         cwd: process.cwd()
@@ -356,7 +392,7 @@ async function main(): Promise<void> {
         llmProvider,
         llmModel,
         llmTimeoutMs: Math.max(0, autoResearchLlmTimeoutMs),
-        outputDir: autoResearchOutput,
+        outputDir: resolvedAutoResearchOutput,
         resumeFrom: autoResearchResume,
         allowDataCollection: autoResearchAllowDataCollection,
         allowFeatureCacheBuild: autoResearchAllowFeatureCache,
@@ -364,6 +400,17 @@ async function main(): Promise<void> {
         minTradesForPromotion:
           typeof autoResearchMinTrades === "number" ? Math.max(0, autoResearchMinTrades) : undefined,
         minNetReturnForPromotion: autoResearchMinNetReturn,
+        maxDrawdownForPromotion:
+          Number.isFinite(autoResearchMaxDrawdown) ? Math.max(0, autoResearchMaxDrawdown) : undefined,
+        minPositiveWindowRatioForPromotion:
+          typeof autoResearchMinPositiveWindowRatio === "number"
+            ? Math.max(0, Math.min(1, autoResearchMinPositiveWindowRatio))
+            : undefined,
+        minRandomPercentileForPromotion:
+          Number.isFinite(autoResearchMinRandomPercentile)
+            ? Math.max(0, Math.min(1, autoResearchMinRandomPercentile))
+            : undefined,
+        requireBootstrapSignificanceForPromotion: autoResearchRequireBootstrapSignificance,
         maxNoTradeIterations:
           typeof autoResearchMaxNoTradeIterations === "number"
             ? Math.max(0, autoResearchMaxNoTradeIterations)

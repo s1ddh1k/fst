@@ -8,6 +8,27 @@ import type {
   StrategyFamilyDefinition
 } from "./types.js";
 
+const AUTO_RESEARCH_SYSTEM_PROMPT = `
+You are the system prompt for an autonomous crypto strategy researcher.
+
+Operating principles:
+- Long only, Upbit KRW spot, point-in-time universe, portfolio-level risk caps.
+- Optimize for net return after costs, robustness across windows, and low fragility.
+- Prefer structured evidence over intuition.
+- Do not keep pushing a family that repeatedly yields zero trades, one-market dependency, or weak walk-forward robustness.
+- If a candidate is derived from a previous one, keep genealogy explicit.
+- If proposal or review quality is degraded, preserve exploration diversity and safety.
+`.trim();
+
+const AUTO_RESEARCH_GLOBAL_PROMPT = `
+Global research policy:
+- Use only the structured JSON facts provided in the prompt.
+- Favor diverse hypotheses over narrow parameter twitching.
+- Prefer walk-forward candidates with positive window breadth, tolerable worst-window outcomes, and non-trivial closed-trade counts.
+- Treat code mutation as a last-mile tool, not the default action.
+- When proposing a refinement of an earlier candidate, include parentCandidateIds.
+`.trim();
+
 function jsonBlock(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -19,6 +40,7 @@ function compactFamilies(families: StrategyFamilyDefinition[]) {
     title: family.title,
     thesis: family.thesis,
     timeframe: family.timeframe,
+    requiredData: family.requiredData,
     parameterSpecs: family.parameterSpecs,
     guardrails: family.guardrails,
     composition: family.composition
@@ -128,6 +150,22 @@ function compactCandidateLedger(history: ResearchIterationRecord[]) {
     .slice(0, 20);
 }
 
+function compactCandidateGenealogy(history: ResearchIterationRecord[]) {
+  return history
+    .flatMap((iteration) =>
+      iteration.evaluations.map((evaluation) => ({
+        iteration: iteration.iteration,
+        candidateId: evaluation.candidate.candidateId,
+        familyId: evaluation.candidate.familyId,
+        origin: evaluation.candidate.origin ?? "llm",
+        parentCandidateIds: evaluation.candidate.parentCandidateIds ?? [],
+        netReturn: evaluation.summary.netReturn,
+        tradeCount: evaluation.summary.tradeCount
+      }))
+    )
+    .slice(-30);
+}
+
 function compactFamilyPerformance(history: ResearchIterationRecord[]) {
   const byFamily = new Map<string, {
     evaluations: number;
@@ -183,12 +221,14 @@ export function buildProposalPrompt(params: {
   history: ResearchIterationRecord[];
 }): string {
   return `
-You are an autonomous crypto strategy researcher for Upbit KRW spot.
+${AUTO_RESEARCH_SYSTEM_PROMPT}
+
+${AUTO_RESEARCH_GLOBAL_PROMPT}
 
 Goal:
 - Long only
-- Single position portfolio
-- 1h decision timeframe
+- Prefer portfolio structures that can survive regime shifts without blowing up.
+- The primary anchor timeframe is 1h, but families may require 15m / 5m / 1m supporting data.
 - Point-in-time universe
 - Same-bar fill forbidden
 - Optimize for net return after fees/slippage, sane turnover, and robustness
@@ -206,6 +246,7 @@ ${jsonBlock({
   families: compactFamilies(params.families),
   familyPerformanceSummary: compactFamilyPerformance(params.history),
   candidateLedgerSummary: compactCandidateLedger(params.history),
+  candidateGenealogy: compactCandidateGenealogy(params.history),
   priorHistory: compactHistory(params.history)
 })}
 
@@ -301,6 +342,8 @@ Return JSON only:
         "pullbackZ": 0.9,
         "trailAtrMult": 2.2
       },
+      "parentCandidateIds": ["prior-candidate-id"],
+      "origin": "llm",
       "invalidationSignals": ["trade count collapses", "only one market drives pnl"]
     }
   ]
@@ -331,6 +374,10 @@ export function buildReviewPrompt(params: {
   evaluations: CandidateBacktestEvaluation[];
 }): string {
   return `
+${AUTO_RESEARCH_SYSTEM_PROMPT}
+
+${AUTO_RESEARCH_GLOBAL_PROMPT}
+
 You are reviewing an autonomous crypto strategy research iteration.
 
 Structured run facts:
@@ -351,6 +398,7 @@ ${jsonBlock({
   latestEvaluations: params.evaluations.map(compactEvaluation),
   familyPerformanceSummary: compactFamilyPerformance(params.history),
   candidateLedgerSummary: compactCandidateLedger(params.history),
+  candidateGenealogy: compactCandidateGenealogy(params.history),
   priorHistory: compactHistory(params.history)
 })}
 
@@ -361,7 +409,8 @@ Task:
 4. Favor robustness over one-off lucky net returns.
 5. Base your decision on the structured JSON facts, including failed evaluations, zero-signal runs, preparation outcomes, and validation results.
 6. Use diagnostics.coverage and diagnostics.reasons to explain whether no-trade outcomes came from strategy filters, portfolio coordination, risk blocks, or execution rejects.
-7. The orchestrator will not auto-promote or auto-stop by default. Your verdict is the primary control signal.
+7. The orchestrator may apply objective promotion gates and local candidate augmentation. Your verdict remains important, but it is not the only control signal.
+8. Optimize for risk-constrained growth. Do not promote candidates that rely on fragile drawdown-heavy performance.
 
 Return JSON only:
 {
@@ -377,6 +426,8 @@ Return JSON only:
       "familyId": "relative-momentum-pullback",
       "thesis": "one sentence",
       "parameters": {},
+      "parentCandidateIds": ["prior-candidate-id"],
+      "origin": "llm",
       "invalidationSignals": ["..."]
     }
   ],

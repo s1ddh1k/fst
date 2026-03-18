@@ -15,6 +15,8 @@ function highestHigh(candles: StrategyContext["featureView"]["candles"], endInde
 }
 
 export function createMicroBreakoutStrategy(params?: {
+  strategyId?: string;
+  sleeveId?: "micro";
   lookbackBars?: number;
   extensionThreshold?: number;
   holdingBarsMax?: number;
@@ -27,6 +29,8 @@ export function createMicroBreakoutStrategy(params?: {
   requireCloseNearHigh?: number;
   profitTarget?: number;
 }): Strategy {
+  const strategyId = params?.strategyId ?? "micro-breakout";
+  const sleeveId = params?.sleeveId ?? "micro";
   const lookbackBars = params?.lookbackBars ?? 8;
   const extensionThreshold = params?.extensionThreshold ?? 0.003;
   const holdingBarsMax = params?.holdingBarsMax ?? 10;
@@ -40,8 +44,8 @@ export function createMicroBreakoutStrategy(params?: {
   const profitTarget = params?.profitTarget ?? extensionThreshold * 1.2;
 
   return {
-    id: "micro-breakout",
-    sleeveId: "micro",
+    id: strategyId,
+    sleeveId,
     family: "micro",
     decisionTimeframe: "1m",
     executionTimeframe: "1m",

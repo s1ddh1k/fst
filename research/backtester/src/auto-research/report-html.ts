@@ -39,6 +39,20 @@ type AutoResearchFamilySummaryEntry = {
   lastIteration: number;
 };
 
+type AutoResearchWindowSummary = NonNullable<
+  NonNullable<AutoResearchRunReport["bestCandidate"]>["diagnostics"]["windows"]
+>;
+
+type AutoResearchCandidateGenealogyEntry = {
+  iteration: number;
+  candidateId: string;
+  familyId: string;
+  origin: string;
+  parentCandidateIds: string[];
+  netReturn: number;
+  tradeCount: number;
+};
+
 function pct(value: number | undefined): string {
   if (typeof value !== "number" || Number.isNaN(value)) {
     return "-";
@@ -89,6 +103,47 @@ function summarizeCrossChecks(
     .join(" | ");
 }
 
+function summarizeWindows(windows: AutoResearchWindowSummary | undefined): string {
+  if (!windows) {
+    return "-";
+  }
+
+  const parts = [
+    windows.mode,
+    `holdout=${windows.holdoutDays}`
+  ];
+
+  if (typeof windows.trainingDays === "number") {
+    parts.push(`train=${windows.trainingDays}`);
+  }
+
+  if (typeof windows.stepDays === "number") {
+    parts.push(`step=${windows.stepDays}`);
+  }
+
+  if (typeof windows.windowCount === "number") {
+    parts.push(`windows=${windows.windowCount}`);
+  }
+
+  if (typeof windows.positiveWindowRatio === "number") {
+    parts.push(`positive=${pct(windows.positiveWindowRatio)}`);
+  }
+
+  if (typeof windows.totalClosedTrades === "number") {
+    parts.push(`closed=${windows.totalClosedTrades}`);
+  }
+
+  if (typeof windows.availableDays === "number") {
+    parts.push(`available=${windows.availableDays.toFixed(1)}d`);
+  }
+
+  if (typeof windows.requiredDays === "number") {
+    parts.push(`required=${windows.requiredDays}d`);
+  }
+
+  return parts.join(" | ");
+}
+
 export function renderAutoResearchHtml(report: AutoResearchRunReport): string {
   return renderAutoResearchHtmlWithOptions(report, {});
 }
@@ -101,6 +156,7 @@ export function renderAutoResearchHtmlWithOptions(
     rawLeaderboard?: AutoResearchLeaderboardEntry[];
     candidateLedger?: AutoResearchCandidateLedgerEntry[];
     familySummary?: AutoResearchFamilySummaryEntry[];
+    candidateGenealogy?: AutoResearchCandidateGenealogyEntry[];
   }
 ): string {
   const best = report.bestCandidate;
@@ -167,6 +223,21 @@ export function renderAutoResearchHtmlWithOptions(
             </tr>`
     )
     .join("");
+  const candidateGenealogyRows = (options.candidateGenealogy ?? [])
+    .slice(0, 20)
+    .map(
+      (entry) => `
+            <tr>
+              <td>${entry.iteration}</td>
+              <td>${esc(entry.candidateId)}</td>
+              <td>${esc(entry.familyId)}</td>
+              <td>${esc(entry.origin)}</td>
+              <td>${entry.parentCandidateIds.length > 0 ? entry.parentCandidateIds.map((item) => esc(item)).join(", ") : "-"}</td>
+              <td>${pct(entry.netReturn)}</td>
+              <td>${entry.tradeCount}</td>
+            </tr>`
+    )
+    .join("");
   const iterationRows = report.iterations
     .map((iteration) => {
       const evalRows = iteration.evaluations
@@ -179,6 +250,7 @@ export function renderAutoResearchHtmlWithOptions(
               <td>${pct(evaluation.summary.netReturn)}</td>
               <td>${pct(evaluation.summary.maxDrawdown)}</td>
               <td>${evaluation.summary.tradeCount}</td>
+              <td>${summarizeWindows(evaluation.diagnostics.windows)}</td>
               <td>${summarizeCrossChecks(evaluation.diagnostics.crossChecks)}</td>
               <td>${topReasons(evaluation.diagnostics.reasons.strategy)}</td>
               <td>${topReasons(evaluation.diagnostics.reasons.coordinator)}</td>
@@ -201,6 +273,7 @@ export function renderAutoResearchHtmlWithOptions(
                 <th>Net</th>
                 <th>Drawdown</th>
                 <th>Trades</th>
+                <th>Window Stats</th>
                 <th>Cross-Checks</th>
                 <th>Strategy Reasons</th>
                 <th>Coordinator Reasons</th>
@@ -249,6 +322,7 @@ export function renderAutoResearchHtmlWithOptions(
           ? `<p class="status"><strong>Status:</strong> ${esc(status.phase)} | iteration ${status.iteration}/${status.totalIterations} | ${esc(status.message)}</p>`
           : ""
       }
+      <p class="status"><strong>Outcome:</strong> ${esc(report.outcome)}${report.outcomeReason ? ` | ${esc(report.outcomeReason)}` : ""}</p>
       <div class="grid">
         <div class="stat"><span class="label">Universe</span><span class="value">${esc(report.config.universeName)}</span></div>
         <div class="stat"><span class="label">Iterations</span><span class="value">${report.iterations.length}</span></div>
@@ -260,7 +334,16 @@ export function renderAutoResearchHtmlWithOptions(
         <div class="stat"><span class="label">Best Trade Net</span><span class="value">${pct(bestTrade?.summary.netReturn)}</span></div>
         <div class="stat"><span class="label">Unique Candidates</span><span class="value">${options.candidateLedger?.length ?? 0}</span></div>
         <div class="stat"><span class="label">Tracked Families</span><span class="value">${options.familySummary?.length ?? 0}</span></div>
+        <div class="stat"><span class="label">Config Repairs</span><span class="value">${report.configRepairs.length}</span></div>
       </div>
+      ${
+        report.configRepairs.length > 0
+          ? `<p><strong>Latest Repair:</strong> ${esc(report.configRepairs[report.configRepairs.length - 1]?.reason ?? "")}</p>
+             <p class="meta">previous holdout/train/step=${report.configRepairs[report.configRepairs.length - 1]?.previous.holdoutDays}/${report.configRepairs[report.configRepairs.length - 1]?.previous.trainingDays}/${report.configRepairs[report.configRepairs.length - 1]?.previous.stepDays}
+             -> next=${report.configRepairs[report.configRepairs.length - 1]?.next.holdoutDays}/${report.configRepairs[report.configRepairs.length - 1]?.next.trainingDays}/${report.configRepairs[report.configRepairs.length - 1]?.next.stepDays}
+             | expected windows=${report.configRepairs[report.configRepairs.length - 1]?.next.expectedWindowCount}</p>`
+          : ""
+      }
     </section>
     ${
       familySummaryRows
@@ -322,6 +405,27 @@ export function renderAutoResearchHtmlWithOptions(
               </tr>
             </thead>
             <tbody>${candidateLedgerRows}</tbody>
+          </table>
+        </section>`
+        : ""
+    }
+    ${
+      candidateGenealogyRows
+        ? `<section class="iteration">
+          <h2>Candidate Genealogy</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Iteration</th>
+                <th>Candidate</th>
+                <th>Family</th>
+                <th>Origin</th>
+                <th>Parents</th>
+                <th>Net</th>
+                <th>Trades</th>
+              </tr>
+            </thead>
+            <tbody>${candidateGenealogyRows}</tbody>
           </table>
         </section>`
         : ""

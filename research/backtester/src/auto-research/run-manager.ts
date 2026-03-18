@@ -1,7 +1,9 @@
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
+  AutoResearchConfigRepair,
   AutoResearchRunConfig,
+  AutoResearchRunOutcome,
   AutoResearchRunReport,
   CandidateBacktestEvaluation,
   CatalogEntryRecord,
@@ -9,6 +11,7 @@ import type {
   ResearchIterationRecord,
   StrategyFamilyDefinition
 } from "./types.js";
+import { compareCandidateEvaluations } from "./ranking.js";
 
 export type AutoResearchRunState = {
   generatedAt: string;
@@ -17,6 +20,9 @@ export type AutoResearchRunState = {
   catalog: CatalogEntryRecord[];
   marketCodes: string[];
   iterations: ResearchIterationRecord[];
+  outcome: AutoResearchRunOutcome;
+  outcomeReason?: string;
+  configRepairs: AutoResearchConfigRepair[];
   bestCandidate?: CandidateBacktestEvaluation;
   pendingProposal?: ProposalBatch;
   noTradeIterations: number;
@@ -37,7 +43,10 @@ export type AutoResearchStatus = {
     | "validation"
     | "evaluation"
     | "review"
-    | "completed";
+    | "completed"
+    | "partial"
+    | "aborted"
+    | "invalid_config";
   iteration: number;
   totalIterations: number;
   message: string;
@@ -84,33 +93,31 @@ function isProcessAlive(pid: number | undefined): boolean {
   }
 }
 
-function compareEvaluations(left: CandidateBacktestEvaluation, right: CandidateBacktestEvaluation): number {
-  if (left.status !== right.status) {
-    return left.status === "failed" ? 1 : -1;
-  }
-
-  if (right.summary.netReturn !== left.summary.netReturn) {
-    return right.summary.netReturn - left.summary.netReturn;
-  }
-
-  if (left.summary.maxDrawdown !== right.summary.maxDrawdown) {
-    return left.summary.maxDrawdown - right.summary.maxDrawdown;
-  }
-
-  return right.summary.tradeCount - left.summary.tradeCount;
-}
-
 function selectBestTradeCandidate(iterations: ResearchIterationRecord[]): CandidateBacktestEvaluation | undefined {
   return iterations
     .flatMap((iteration) => iteration.evaluations)
     .filter((evaluation) => evaluation.status === "completed" && evaluation.summary.tradeCount > 0)
-    .sort(compareEvaluations)[0];
+    .sort(compareCandidateEvaluations)[0];
 }
 
 export async function loadRunState(outputDir: string): Promise<AutoResearchRunState | undefined> {
   try {
     const raw = await readFile(path.join(outputDir, "run-state.json"), "utf8");
-    return reviveDates(JSON.parse(raw)) as AutoResearchRunState;
+    const parsed = reviveDates(JSON.parse(raw)) as Partial<AutoResearchRunState>;
+    return {
+      generatedAt: parsed.generatedAt ?? new Date().toISOString(),
+      config: parsed.config as AutoResearchRunConfig,
+      families: parsed.families ?? [],
+      catalog: parsed.catalog ?? [],
+      marketCodes: parsed.marketCodes ?? [],
+      iterations: parsed.iterations ?? [],
+      outcome: parsed.outcome ?? "completed",
+      outcomeReason: parsed.outcomeReason,
+      configRepairs: parsed.configRepairs ?? [],
+      bestCandidate: parsed.bestCandidate,
+      pendingProposal: parsed.pendingProposal,
+      noTradeIterations: parsed.noTradeIterations ?? 0
+    };
   } catch {
     return undefined;
   }
@@ -165,6 +172,30 @@ export async function saveRunStatus(outputDir: string, status: AutoResearchStatu
   await writeFile(path.join(outputDir, "status.json"), `${JSON.stringify(status, null, 2)}\n`);
 }
 
+export async function reconcilePartialRunStatus(outputDir: string): Promise<void> {
+  try {
+    const statusPath = path.join(outputDir, "status.json");
+    const raw = JSON.parse(await readFile(statusPath, "utf8")) as AutoResearchStatus;
+    if (
+      raw.phase === "completed" ||
+      raw.phase === "partial" ||
+      raw.phase === "aborted" ||
+      raw.phase === "invalid_config"
+    ) {
+      return;
+    }
+
+    await saveRunStatus(outputDir, {
+      ...raw,
+      updatedAt: new Date().toISOString(),
+      phase: "partial",
+      message: "Previous auto research run ended before reaching a terminal state."
+    });
+  } catch {
+    // ignore missing or malformed status
+  }
+}
+
 export async function appendRunLog(outputDir: string, message: string): Promise<void> {
   await mkdir(outputDir, { recursive: true });
   await appendFile(path.join(outputDir, "run.log"), `[${new Date().toISOString()}] ${message}\n`);
@@ -194,6 +225,9 @@ export function toReport(state: AutoResearchRunState): AutoResearchRunReport {
     catalog: state.catalog,
     marketCodes: state.marketCodes,
     iterations: state.iterations,
+    outcome: state.outcome,
+    outcomeReason: state.outcomeReason,
+    configRepairs: state.configRepairs,
     bestCandidate: state.bestCandidate,
     bestTradeCandidate: selectBestTradeCandidate(state.iterations)
   };
