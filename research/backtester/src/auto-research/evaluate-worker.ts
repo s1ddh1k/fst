@@ -1,10 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { executeScoredHoldoutBacktest, executeScoredWalkForwardBacktest, preloadMarketData } from "../scored-runner.js";
 import { instantiateCandidateStrategy } from "./catalog.js";
+import { loadValidatedBlockCatalogFromFile } from "./block-catalog.js";
+import { evaluateBlockCandidate } from "./block-evaluator.js";
 import { evaluatePortfolioCandidate } from "./portfolio-evaluator.js";
 import { isPortfolioStrategyName } from "./portfolio-runtime.js";
 import { getResolvedWalkForwardConfig, summarizeReferenceCandleSpan, type ReferenceCandleSpan } from "./walk-forward-config.js";
-import type { AutoResearchRunConfig, CandidateBacktestEvaluation, NormalizedCandidateProposal } from "./types.js";
+import type { AutoResearchRunConfig, CandidateBacktestEvaluation, NormalizedCandidateProposal, ValidatedBlockCatalog } from "./types.js";
 
 function getOption(args: string[], key: string): string | undefined {
   const index = args.indexOf(key);
@@ -113,12 +115,49 @@ async function main(): Promise<void> {
   }
 
   const payload = JSON.parse(await readFile(payloadPath, "utf8")) as WorkerPayload;
+
+  if (payload.config.researchStage === "block") {
+    try {
+      const evaluation = await evaluateBlockCandidate({
+        config: payload.config,
+        candidate: payload.candidate,
+        marketCodes: payload.marketCodes
+      });
+      console.log(JSON.stringify(evaluation, null, 2));
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(
+        JSON.stringify(
+          buildEmptyEvaluation({
+            config: payload.config,
+            candidate: payload.candidate,
+            stage: /window|split/i.test(message) ? "split" : /candle|market|load/i.test(message) ? "preload" : "backtest",
+            message
+          }),
+          null,
+          2
+        )
+      );
+      return;
+    }
+  }
+
   if (isPortfolioStrategyName(payload.candidate.strategyName)) {
+    let workerBlockCatalog: ValidatedBlockCatalog | undefined;
+    if (payload.config.blockCatalogPath) {
+      try {
+        workerBlockCatalog = await loadValidatedBlockCatalogFromFile(payload.config.blockCatalogPath);
+      } catch {
+        // best-effort: proceed without blockCatalog
+      }
+    }
     try {
       const evaluation = await evaluatePortfolioCandidate({
         config: payload.config,
         candidate: payload.candidate,
-        marketCodes: payload.marketCodes
+        marketCodes: payload.marketCodes,
+        blockCatalog: workerBlockCatalog
       });
       console.log(JSON.stringify(evaluation, null, 2));
       return;

@@ -33,6 +33,8 @@ import {
   formatMultiStrategyReport,
   runMultiStrategyBacktest
 } from "./multi-strategy/index.js";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import {
   CliResearchLlmClient,
   DEFAULT_MIN_NET_RETURN_FOR_PROMOTION,
@@ -293,6 +295,8 @@ async function main(): Promise<void> {
     getOption(process.argv, "--auto-research-output") ??
     `research/backtester/artifacts/auto-research/${new Date().toISOString().replace(/[:.]/g, "-")}`;
   const resolvedAutoResearchOutput = resolveWorkspaceRelativePath(autoResearchOutput, process.cwd());
+  const autoResearchStage = getOption(process.argv, "--stage") as "block" | "portfolio" | "auto" | undefined;
+  const autoResearchBlockCatalog = getOption(process.argv, "--block-catalog");
   const autoResearchResume = getOption(process.argv, "--auto-research-resume");
   const autoResearchAllowDataCollection = process.argv.includes("--auto-research-allow-data-collection");
   const autoResearchAllowFeatureCache = process.argv.includes("--auto-research-allow-feature-cache");
@@ -377,7 +381,7 @@ async function main(): Promise<void> {
       });
       const orchestrator = createAutoResearchOrchestrator({ llmClient });
       const report = await orchestrator.run({
-        strategyFamilyIds: autoResearchFamilies,
+        strategyFamilyIds: autoResearchFamilies.length > 0 ? autoResearchFamilies : undefined,
         universeName,
         timeframe: "1h",
         marketLimit,
@@ -414,8 +418,70 @@ async function main(): Promise<void> {
         maxNoTradeIterations:
           typeof autoResearchMaxNoTradeIterations === "number"
             ? Math.max(0, autoResearchMaxNoTradeIterations)
-            : undefined
+            : undefined,
+        researchStage: autoResearchStage,
+        blockCatalogPath: autoResearchBlockCatalog
       });
+
+      if (autoResearchStage === "auto") {
+        const blockCatalogPath = path.join(resolvedAutoResearchOutput, "validated-blocks.json");
+        if (existsSync(blockCatalogPath)) {
+          try {
+            const catalogContent = JSON.parse(
+              await (await import("node:fs/promises")).readFile(blockCatalogPath, "utf8")
+            ) as { blocks?: unknown[] };
+            if (Array.isArray(catalogContent.blocks) && catalogContent.blocks.length > 0) {
+              console.error(`[auto-research] auto chaining: ${catalogContent.blocks.length} validated blocks found, starting portfolio stage`);
+              const portfolioReport = await orchestrator.run({
+                strategyFamilyIds: autoResearchFamilies.length > 0 ? autoResearchFamilies : undefined,
+                universeName,
+                timeframe: "1h",
+                marketLimit,
+                limit,
+                holdoutDays,
+                trainingDays,
+                stepDays,
+                iterations: Math.max(1, autoResearchIterations),
+                candidatesPerIteration: Math.max(1, autoResearchCandidates),
+                parallelism: Math.max(1, autoResearchParallelism),
+                mode: autoResearchMode,
+                llmProvider,
+                llmModel,
+                llmTimeoutMs: Math.max(0, autoResearchLlmTimeoutMs),
+                outputDir: `${resolvedAutoResearchOutput}-portfolio`,
+                allowDataCollection: autoResearchAllowDataCollection,
+                allowFeatureCacheBuild: autoResearchAllowFeatureCache,
+                allowCodeMutation: autoResearchAllowCodeMutation,
+                minTradesForPromotion:
+                  typeof autoResearchMinTrades === "number" ? Math.max(0, autoResearchMinTrades) : undefined,
+                minNetReturnForPromotion: autoResearchMinNetReturn,
+                maxDrawdownForPromotion:
+                  Number.isFinite(autoResearchMaxDrawdown) ? Math.max(0, autoResearchMaxDrawdown) : undefined,
+                minPositiveWindowRatioForPromotion:
+                  typeof autoResearchMinPositiveWindowRatio === "number"
+                    ? Math.max(0, Math.min(1, autoResearchMinPositiveWindowRatio))
+                    : undefined,
+                minRandomPercentileForPromotion:
+                  Number.isFinite(autoResearchMinRandomPercentile)
+                    ? Math.max(0, Math.min(1, autoResearchMinRandomPercentile))
+                    : undefined,
+                requireBootstrapSignificanceForPromotion: autoResearchRequireBootstrapSignificance,
+                maxNoTradeIterations:
+                  typeof autoResearchMaxNoTradeIterations === "number"
+                    ? Math.max(0, autoResearchMaxNoTradeIterations)
+                    : undefined,
+                researchStage: "portfolio",
+                blockCatalogPath
+              });
+              console.log(JSON.stringify(portfolioReport, null, 2));
+              return;
+            }
+          } catch {
+            // If catalog parsing fails, fall through to output block report
+          }
+        }
+        console.error("[auto-research] auto chaining: no validated blocks found, skipping portfolio stage");
+      }
 
       console.log(JSON.stringify(report, null, 2));
       return;

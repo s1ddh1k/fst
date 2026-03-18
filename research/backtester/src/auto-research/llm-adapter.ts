@@ -1,4 +1,11 @@
-import { buildProposalPrompt, buildReviewPrompt } from "./prompt-builder.js";
+import {
+  buildProposalPrompt,
+  buildReviewPrompt,
+  buildBlockProposalPrompt,
+  buildBlockReviewPrompt,
+  buildPortfolioCompositionProposalPrompt,
+  buildPortfolioCompositionReviewPrompt
+} from "./prompt-builder.js";
 import { llmJson } from "./cli-llm.js";
 import type {
   AutoResearchRunConfig,
@@ -9,7 +16,8 @@ import type {
   PreparationExecutionResult,
   ResearchIterationRecord,
   ReviewDecision,
-  StrategyFamilyDefinition
+  StrategyFamilyDefinition,
+  ValidatedBlockCatalog
 } from "./types.js";
 
 export interface ResearchLlmClient {
@@ -18,6 +26,7 @@ export interface ResearchLlmClient {
     families: StrategyFamilyDefinition[];
     marketCodes: string[];
     history: ResearchIterationRecord[];
+    blockCatalog?: ValidatedBlockCatalog;
   }): Promise<ProposalBatch>;
   reviewIteration(params: {
     config: AutoResearchRunConfig;
@@ -39,6 +48,7 @@ export interface ResearchLlmClient {
       detail: string;
     }>;
     evaluations: CandidateBacktestEvaluation[];
+    blockCatalog?: ValidatedBlockCatalog;
   }): Promise<ReviewDecision>;
 }
 
@@ -376,8 +386,14 @@ export class CliResearchLlmClient implements ResearchLlmClient {
     families: StrategyFamilyDefinition[];
     marketCodes: string[];
     history: ResearchIterationRecord[];
+    blockCatalog?: ValidatedBlockCatalog;
   }): Promise<ProposalBatch> {
-    const prompt = buildProposalPrompt(params);
+    const prompt =
+      params.config.researchStage === "block"
+        ? buildBlockProposalPrompt(params)
+        : params.config.researchStage === "portfolio" && params.blockCatalog
+          ? buildPortfolioCompositionProposalPrompt({ ...params, blockCatalog: params.blockCatalog })
+          : buildProposalPrompt(params);
     const { data } = await llmJson(prompt, this.options);
     const response = asRecord(data);
 
@@ -410,8 +426,14 @@ export class CliResearchLlmClient implements ResearchLlmClient {
       detail: string;
     }>;
     evaluations: CandidateBacktestEvaluation[];
+    blockCatalog?: ValidatedBlockCatalog;
   }): Promise<ReviewDecision> {
-    const prompt = buildReviewPrompt(params);
+    const prompt =
+      params.config.researchStage === "block"
+        ? buildBlockReviewPrompt(params)
+        : params.config.researchStage === "portfolio" && params.blockCatalog
+          ? buildPortfolioCompositionReviewPrompt({ ...params, blockCatalog: params.blockCatalog })
+          : buildReviewPrompt(params);
     const { data } = await llmJson(prompt, this.options);
     const response = asRecord(data);
     const verdict = response.verdict;

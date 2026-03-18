@@ -1,7 +1,11 @@
+import type { StrategyTimeframe } from "../../../../packages/shared/src/index.js";
 import type { HoldoutBacktestSummary, WalkForwardBacktestSummary } from "../types.js";
 
 export type AutoResearchMode = "holdout" | "walk-forward";
 export type AutoResearchRunOutcome = "completed" | "partial" | "aborted" | "invalid_config";
+
+export type ResearchTimeframe = "1h" | "15m" | "5m" | "1m";
+export type ResearchStage = "block" | "portfolio" | "auto";
 
 export type ResearchPreparationAction =
   | {
@@ -31,7 +35,7 @@ export type ProposedStrategyFamily = {
   familyId: string;
   title: string;
   thesis: string;
-  timeframe: "1h";
+  timeframe: ResearchTimeframe;
   baseFamilyId?: string;
   basedOnFamilies: string[];
   parameterSpecs: ResearchParameterSpec[];
@@ -49,7 +53,7 @@ export type CatalogEntryRecord = {
   strategyName?: string;
   title: string;
   thesis: string;
-  timeframe: "1h";
+  timeframe: ResearchTimeframe;
   parameterSpecs: ResearchParameterSpec[];
   requiredData: string[];
   implementationNotes: string[];
@@ -85,7 +89,7 @@ export type StrategyFamilyDefinition = {
   strategyName: string;
   title: string;
   thesis: string;
-  timeframe: "1h";
+  timeframe: ResearchTimeframe;
   requiredData?: string[];
   parameterSpecs: ResearchParameterSpec[];
   guardrails: string[];
@@ -300,7 +304,7 @@ export type ResearchIterationRecord = {
 export type AutoResearchRunConfig = {
   strategyFamilyIds?: string[];
   universeName: string;
-  timeframe: "1h";
+  timeframe: ResearchTimeframe;
   marketLimit: number;
   limit: number;
   holdoutDays: number;
@@ -325,6 +329,8 @@ export type AutoResearchRunConfig = {
   minRandomPercentileForPromotion?: number;
   requireBootstrapSignificanceForPromotion?: boolean;
   maxNoTradeIterations?: number;
+  researchStage?: ResearchStage;
+  blockCatalogPath?: string;
 };
 
 export type AutoResearchConfigRepair = {
@@ -362,4 +368,31 @@ export type AutoResearchRunReport = {
   configRepairs: AutoResearchConfigRepair[];
   bestCandidate?: CandidateBacktestEvaluation;
   bestTradeCandidate?: CandidateBacktestEvaluation;
+};
+
+export type ValidatedBlock = {
+  blockId: string;
+  strategyType: string;
+  strategyName: string;
+  decisionTimeframe: StrategyTimeframe;
+  executionTimeframe: StrategyTimeframe;
+  family: "trend" | "breakout" | "micro" | "meanreversion";
+  sleeveId: string;
+  regimeGate: { allowedRegimes: string[]; [key: string]: unknown };
+  parameters: Record<string, number>;
+  performance: {
+    netReturn: number;
+    maxDrawdown: number;
+    tradeCount: number;
+    positiveWindowRatio: number;
+    riskAdjustedScore: number;
+  };
+  validatedAt: string;
+  sourceFamilyId: string;
+};
+
+export type ValidatedBlockCatalog = {
+  version: number;
+  blocks: ValidatedBlock[];
+  updatedAt: string;
 };

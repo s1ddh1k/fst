@@ -9,7 +9,7 @@ import type { Candle } from "../types.js";
 import { buildWalkForwardRanges, splitTrainTestByDays } from "../validation.js";
 import { calculateAutoResearchMinimumLimit } from "./limit-resolution.js";
 import { buildPortfolioCandidateRuntime } from "./portfolio-runtime.js";
-import type { AutoResearchRunConfig, CandidateBacktestEvaluation, NormalizedCandidateProposal } from "./types.js";
+import type { AutoResearchRunConfig, CandidateBacktestEvaluation, NormalizedCandidateProposal, ValidatedBlockCatalog } from "./types.js";
 import { repairWalkForwardConfig, summarizeReferenceCandleSpan } from "./walk-forward-config.js";
 
 type CandleMap = Record<string, Candle[]>;
@@ -225,8 +225,9 @@ function runPortfolioRangeBacktest(params: {
   candleData: PortfolioCandleData;
   range: { start: Date; end: Date };
   candidate: NormalizedCandidateProposal;
+  blockCatalog?: ValidatedBlockCatalog;
 }): MultiStrategyBacktestResult {
-  const runtime = buildPortfolioCandidateRuntime(params.candidate);
+  const runtime = buildPortfolioCandidateRuntime(params.candidate, params.blockCatalog);
 
   return runMultiStrategyBacktest({
     universeName: params.config.universeName,
@@ -442,6 +443,7 @@ function buildPortfolioWalkForwardEvaluation(params: {
   candidate: NormalizedCandidateProposal;
   candleData: PortfolioCandleData;
   availableSpan: ReturnType<typeof summarizeReferenceCandleSpan>;
+  blockCatalog?: ValidatedBlockCatalog;
 }): CandidateBacktestEvaluation {
   const trainingDays = params.config.trainingDays ?? params.config.holdoutDays * 2;
   const stepDays = params.config.stepDays ?? params.config.holdoutDays;
@@ -463,13 +465,15 @@ function buildPortfolioWalkForwardEvaluation(params: {
       config: params.config,
       candleData: params.candleData,
       range: window.trainRange,
-      candidate: params.candidate
+      candidate: params.candidate,
+      blockCatalog: params.blockCatalog
     }),
     test: runPortfolioRangeBacktest({
       config: params.config,
       candleData: params.candleData,
       range: window.testRange,
-      candidate: params.candidate
+      candidate: params.candidate,
+      blockCatalog: params.blockCatalog
     })
   }));
 
@@ -599,8 +603,9 @@ export async function evaluatePortfolioCandidate(params: {
   candidate: NormalizedCandidateProposal;
   marketCodes: string[];
   loadCandles?: PortfolioCandleLoader;
+  blockCatalog?: ValidatedBlockCatalog;
 }): Promise<CandidateBacktestEvaluation> {
-  const runtime = buildPortfolioCandidateRuntime(params.candidate);
+  const runtime = buildPortfolioCandidateRuntime(params.candidate, params.blockCatalog);
   const evaluationMarketCodes = selectPortfolioEvaluationMarkets({
     marketCodes: params.marketCodes,
     requiredTimeframes: runtime.requiredTimeframes,
@@ -623,13 +628,15 @@ export async function evaluatePortfolioCandidate(params: {
       config: params.config,
       candleData,
       range: trainRange,
-      candidate: params.candidate
+      candidate: params.candidate,
+      blockCatalog: params.blockCatalog
     });
     const testResult = runPortfolioRangeBacktest({
       config: params.config,
       candleData,
       range: testRange,
-      candidate: params.candidate
+      candidate: params.candidate,
+      blockCatalog: params.blockCatalog
     });
     let crossChecks: CandidateBacktestEvaluation["diagnostics"]["crossChecks"];
     let crossCheckWindows: Partial<CandidateBacktestEvaluation["diagnostics"]["windows"]>;
@@ -667,7 +674,8 @@ export async function evaluatePortfolioCandidate(params: {
             config: walkForwardResolution.config,
             candidate: params.candidate,
             candleData,
-            availableSpan
+            availableSpan,
+            blockCatalog: params.blockCatalog
           });
           crossChecks = [buildWalkForwardCrossCheck(walkForwardCrossCheck)];
           crossCheckWindows = completedCrossCheckWindowStats(walkForwardCrossCheck);
@@ -726,6 +734,7 @@ export async function evaluatePortfolioCandidate(params: {
     config: params.config,
     candidate: params.candidate,
     candleData,
-    availableSpan
+    availableSpan,
+    blockCatalog: params.blockCatalog
   });
 }

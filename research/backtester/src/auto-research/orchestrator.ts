@@ -3,9 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
-  getCandidateMarketsWithMinimumCandles
+  getCandidateMarketsWithMinimumCandles,
+  loadCandlesForMarkets
 } from "../db.js";
+import { evaluateBlockCandidate } from "./block-evaluator.js";
 import { preloadMarketData } from "../scored-runner.js";
+import type { StrategyTimeframe } from "../../../../packages/shared/src/index.js";
 import type { Candle } from "../types.js";
 import { getStrategyFamilies, normalizeCandidateProposal } from "./catalog.js";
 import { CliCodeMutationAgent, type CodeAgent } from "./code-agent.js";
@@ -18,6 +21,16 @@ import {
   refreshCatalogImplementations,
   saveCatalogArtifact
 } from "./proposed-catalog.js";
+import { getBlockFamilyDefinitions } from "./block-families.js";
+import {
+  appendValidatedBlock,
+  createEmptyBlockCatalog,
+  loadValidatedBlockCatalogFromFile,
+  promoteToValidatedBlock,
+  saveValidatedBlockCatalog
+} from "./block-catalog.js";
+import { getBlockFamilyById } from "./block-families.js";
+import { getPortfolioCompositionFamilies } from "./portfolio-composition-families.js";
 import type {
   AutoResearchConfigRepair,
   AutoResearchRunConfig,
@@ -33,6 +46,7 @@ import type {
   ResearchIterationRecord,
   ReviewDecision,
   StrategyFamilyDefinition,
+  ValidatedBlockCatalog,
   ValidationCommandResult
 } from "./types.js";
 import type { ResearchLlmClient } from "./llm-adapter.js";
@@ -42,7 +56,7 @@ import { renderAutoResearchHtmlWithOptions } from "./report-html.js";
 import { runPostMutationValidation } from "./validation.js";
 import { discoverRuntimeScoredStrategyNames } from "./runtime-discovery.js";
 import { repairWalkForwardConfig } from "./walk-forward-config.js";
-import { repairAutoResearchLimit } from "./limit-resolution.js";
+import { calculateAutoResearchMinimumLimit, repairAutoResearchLimit } from "./limit-resolution.js";
 import {
   calculateCandidateRiskAdjustedScore,
   compareCandidateEvaluations,
@@ -254,8 +268,15 @@ function expandResearchFamilies(families: StrategyFamilyDefinition[]): {
 function resolveCandidateMarketTarget(params: {
   families: StrategyFamilyDefinition[];
   marketLimit: number;
+  researchStage?: string;
 }): number {
   const safeMarketLimit = Math.max(1, params.marketLimit);
+
+  // Block stage: single-strategy evaluation needs fewer markets
+  if (params.researchStage === "block") {
+    return Math.max(safeMarketLimit, safeMarketLimit + 2);
+  }
+
   const includesMicroExecution = params.families.some((family) => (family.requiredData ?? []).includes("1m"));
   const portfolioOnly = params.families.every((family) => family.strategyName.startsWith("portfolio:"));
 
@@ -1709,6 +1730,172 @@ export function createAutoResearchOrchestrator(deps: {
     await saveJson(path.join(outputDir, `${candidate.candidateId}.json`), evaluation);
     return evaluation;
   });
+  // Block stage: in-process evaluation with lazy candle loading per timeframe group.
+  // Candidates are grouped by required timeframes so each group loads only the data
+  // it needs, then releases it before the next group runs.
+  type CandleMap = Record<string, Candle[]>;
+
+  function getBlockCandidateRequiredTimeframes(familyId: string): StrategyTimeframe[] {
+    try {
+      const def = getBlockFamilyById(familyId);
+      return (def.requiredData ?? [def.timeframe]) as StrategyTimeframe[];
+    } catch {
+      return ["1h", "5m"];
+    }
+  }
+
+  function blockCandidateNeeds1m(familyId: string): boolean {
+    return getBlockCandidateRequiredTimeframes(familyId).includes("1m");
+  }
+
+  function groupCandidatesByTimeframes(
+    candidates: NormalizedCandidateProposal[]
+  ): Map<string, NormalizedCandidateProposal[]> {
+    const groups = new Map<string, NormalizedCandidateProposal[]>();
+    for (const c of candidates) {
+      const tfs = getBlockCandidateRequiredTimeframes(c.familyId).slice().sort().join("+");
+      const bucket = groups.get(tfs) ?? [];
+      bucket.push(c);
+      groups.set(tfs, bucket);
+    }
+    return groups;
+  }
+
+  async function loadCandlesForTimeframes(params: {
+    timeframes: StrategyTimeframe[];
+    marketCodes: string[];
+    config: AutoResearchRunConfig;
+  }): Promise<Partial<Record<StrategyTimeframe, CandleMap>>> {
+    const loadLimit = (tf: StrategyTimeframe) =>
+      calculateAutoResearchMinimumLimit({
+        timeframe: tf,
+        holdoutDays: params.config.holdoutDays,
+        trainingDays: params.config.trainingDays,
+        stepDays: params.config.stepDays,
+        mode: params.config.mode
+      });
+    const needs1h = params.timeframes.includes("1h");
+    const needs5m = params.timeframes.includes("5m") || params.timeframes.includes("15m");
+    const needs1m = params.timeframes.includes("1m");
+    // 1m candles are extremely large — cap market count to reduce memory
+    const marketCodes1m = needs1m
+      ? params.marketCodes.slice(0, Math.min(params.marketCodes.length, Math.max(params.config.marketLimit, 6)))
+      : [];
+    const [candles1h, candles5m, candles1m] = await Promise.all([
+      needs1h ? loadCandlesForMarkets({ marketCodes: params.marketCodes, timeframe: "1h", limit: Math.max(params.config.limit, loadLimit("1h")) }) : Promise.resolve({}),
+      needs5m ? loadCandlesForMarkets({ marketCodes: params.marketCodes, timeframe: "5m", limit: loadLimit("5m") }) : Promise.resolve({}),
+      needs1m ? loadCandlesForMarkets({ marketCodes: marketCodes1m, timeframe: "1m", limit: loadLimit("1m") }) : Promise.resolve({})
+    ]);
+    const result: Partial<Record<StrategyTimeframe, CandleMap>> = {};
+    if (needs1h) result["1h"] = candles1h as CandleMap;
+    if (needs5m) result["5m"] = candles5m as CandleMap;
+    if (needs1m) result["1m"] = candles1m as CandleMap;
+    return result;
+  }
+
+  function createCandleLoaderFromCache(cache: Partial<Record<StrategyTimeframe, CandleMap>>): typeof loadCandlesForMarkets {
+    return async (params) => {
+      const cached = cache[params.timeframe as StrategyTimeframe];
+      if (cached) {
+        const result: CandleMap = {};
+        for (const code of params.marketCodes) {
+          if (cached[code]) result[code] = cached[code];
+        }
+        return result;
+      }
+      return loadCandlesForMarkets(params);
+    };
+  }
+
+  async function evaluateBlockCandidatesInProcess(params: {
+    config: AutoResearchRunConfig;
+    candidates: NormalizedCandidateProposal[];
+    marketCodes: string[];
+    outputDir: string;
+    log: (msg: string) => Promise<void>;
+    iteration: number;
+    onEvaluated: (evaluation: CandidateBacktestEvaluation, index: number) => Promise<void>;
+  }): Promise<CandidateBacktestEvaluation[]> {
+    const groups = groupCandidatesByTimeframes(params.candidates);
+    const resultMap = new Map<string, CandidateBacktestEvaluation>();
+    let globalIndex = 0;
+
+    for (const [tfKey, groupCandidates] of groups) {
+      const timeframes = tfKey.split("+") as StrategyTimeframe[];
+      await params.log(`[auto-research] loading candles for timeframes=[${tfKey}] (${groupCandidates.length} candidates)`);
+      const cache = await loadCandlesForTimeframes({
+        timeframes,
+        marketCodes: params.marketCodes,
+        config: params.config
+      });
+      const loader = createCandleLoaderFromCache(cache);
+
+      for (const candidate of groupCandidates) {
+        const idx = globalIndex;
+        globalIndex += 1;
+        await params.log(
+          `[auto-research] iteration ${params.iteration}/${params.config.iterations} evaluate ${idx + 1}/${params.candidates.length} ${candidate.candidateId}`
+        );
+        let evaluation: CandidateBacktestEvaluation;
+        try {
+          evaluation = await evaluateBlockCandidate({
+            config: params.config,
+            candidate,
+            marketCodes: params.marketCodes,
+            loadCandles: loader
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          evaluation = buildBlockFailedEvaluation(params.config, candidate, message);
+        }
+        await saveJson(path.join(params.outputDir, `${candidate.candidateId}.json`), evaluation);
+        resultMap.set(candidate.candidateId, evaluation);
+        await params.onEvaluated(evaluation, idx);
+      }
+      // Release candle data for this group before loading next
+      for (const tf of Object.keys(cache) as StrategyTimeframe[]) {
+        delete cache[tf];
+      }
+      if (global.gc) global.gc();
+    }
+
+    // Return in original candidate order
+    return params.candidates.map((c) => resultMap.get(c.candidateId)!);
+  }
+
+  function buildBlockFailedEvaluation(
+    config: AutoResearchRunConfig,
+    candidate: NormalizedCandidateProposal,
+    message: string
+  ): CandidateBacktestEvaluation {
+    return {
+      candidate,
+      mode: config.mode,
+      status: "failed",
+      failure: {
+        stage: /window|split/i.test(message) ? "split" : /candle|market|load/i.test(message) ? "preload" : "backtest",
+        message
+      },
+      summary: {
+        totalReturn: 0, grossReturn: 0, netReturn: 0, maxDrawdown: 0, turnover: 0, winRate: 0,
+        avgHoldBars: 0, tradeCount: 0, feePaid: 0, slippagePaid: 0, rejectedOrdersCount: 0,
+        cooldownSkipsCount: 0, signalCount: 0, ghostSignalCount: 0
+      },
+      diagnostics: {
+        coverage: {
+          tradeCount: 0, signalCount: 0, ghostSignalCount: 0, rejectedOrdersCount: 0,
+          cooldownSkipsCount: 0, rawBuySignals: 0, rawSellSignals: 0, rawHoldSignals: 0,
+          avgUniverseSize: 0, minUniverseSize: 0, maxUniverseSize: 0, avgConsideredBuys: 0, avgEligibleBuys: 0
+        },
+        reasons: { strategy: {}, strategyTags: {}, coordinator: {}, execution: {}, risk: {} },
+        costs: { feePaid: 0, slippagePaid: 0, totalCostsPaid: 0 },
+        robustness: {},
+        crossChecks: [],
+        windows: { mode: config.mode, holdoutDays: config.holdoutDays, trainingDays: config.trainingDays, stepDays: config.stepDays }
+      }
+    };
+  }
+
   const prepareActions = deps.prepareActions ?? executePreparationActions;
   const codeAgent = deps.codeAgent ?? new CliCodeMutationAgent();
   const discoverRuntimeStrategies = deps.discoverRuntimeScoredStrategies ?? discoverRuntimeScoredStrategyNames;
@@ -1769,9 +1956,28 @@ export function createAutoResearchOrchestrator(deps: {
             maxNoTradeIterations: inputConfig.maxNoTradeIterations ?? restored.config.maxNoTradeIterations
           }
         : inputConfig;
-      const selectedFamilies = config.strategyFamilyIds
-        ? getStrategyFamilies(config.strategyFamilyIds)
-        : (restored?.families ?? getStrategyFamilies());
+      const originalStage = config.researchStage;
+      if (config.researchStage === "auto") {
+        config = { ...config, researchStage: "block" };
+      }
+
+      let blockCatalog: ValidatedBlockCatalog | undefined;
+      let selectedFamilies: StrategyFamilyDefinition[];
+
+      if (config.researchStage === "block") {
+        selectedFamilies = config.strategyFamilyIds
+          ? getBlockFamilyDefinitions().filter((f) => config.strategyFamilyIds!.includes(f.familyId))
+          : getBlockFamilyDefinitions();
+        blockCatalog = createEmptyBlockCatalog();
+      } else if (config.researchStage === "portfolio" && config.blockCatalogPath) {
+        blockCatalog = await loadValidatedBlockCatalogFromFile(config.blockCatalogPath);
+        selectedFamilies = getPortfolioCompositionFamilies(blockCatalog);
+      } else {
+        selectedFamilies = config.strategyFamilyIds
+          ? getStrategyFamilies(config.strategyFamilyIds)
+          : (restored?.families ?? getStrategyFamilies());
+      }
+
       const expandedFamilySelection = expandResearchFamilies(selectedFamilies);
       const hiddenFamilyIds = expandedFamilySelection.hiddenFamilyIds;
       const configuredFamilies = expandedFamilySelection.runtimeFamilies;
@@ -1800,7 +2006,8 @@ export function createAutoResearchOrchestrator(deps: {
         const minCandles = Math.max(250, config.limit);
         const candidateMarketTarget = resolveCandidateMarketTarget({
           families: runtimeFamilies,
-          marketLimit: config.marketLimit
+          marketLimit: config.marketLimit,
+          researchStage: config.researchStage
         });
         const marketCodes = (await resolveCandidateMarkets({
           timeframe: config.timeframe,
@@ -1915,6 +2122,11 @@ export function createAutoResearchOrchestrator(deps: {
           status: startingStatus
         });
 
+        const blockFamilyBestMap = new Map<string, CandidateBacktestEvaluation>();
+        const blockFamilyIds = new Set(
+          config.researchStage === "block" ? selectedFamilies.map((f) => f.familyId) : []
+        );
+
         const startIteration = iterations.length + 1;
         for (let iteration = startIteration; iteration <= config.iterations; iteration += 1) {
           if (abortRequested) {
@@ -1942,7 +2154,8 @@ export function createAutoResearchOrchestrator(deps: {
                   config,
                   families: proposalFamiliesForLlm,
                   marketCodes,
-                  history: iterations
+                  history: iterations,
+                  blockCatalog
                 }),
                 config.llmTimeoutMs,
                 "auto-research proposal"
@@ -2075,97 +2288,12 @@ export function createAutoResearchOrchestrator(deps: {
           bestNetReturn: bestCandidate?.summary.netReturn
         };
         await saveRunStatus(config.outputDir, evaluationStatusBase);
+
         const liveEvaluations: CandidateBacktestEvaluation[] = [];
-        const evaluations = await runWithConcurrency(diversifiedCandidates, parallelism, async (candidate, index) => {
-          await log(
-            `[auto-research] iteration ${iteration}/${config.iterations} evaluate ${index + 1}/${diversifiedCandidates.length} ${candidate.candidateId}`
-          );
-          let evaluation: CandidateBacktestEvaluation;
-          try {
-            evaluation = await evaluateCandidate({
-              config,
-              candidate,
-              marketCodes,
-              outputDir: path.join(
-                config.outputDir,
-                `iteration-${String(iteration).padStart(2, "0")}`,
-                "evaluations"
-              )
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            evaluation = {
-              candidate,
-              mode: config.mode,
-              status: "failed",
-              failure: {
-                stage: "worker",
-                message
-              },
-              summary: {
-                totalReturn: 0,
-                grossReturn: 0,
-                netReturn: 0,
-                maxDrawdown: 0,
-                turnover: 0,
-                winRate: 0,
-                avgHoldBars: 0,
-                tradeCount: 0,
-                feePaid: 0,
-                slippagePaid: 0,
-                rejectedOrdersCount: 0,
-                cooldownSkipsCount: 0,
-                signalCount: 0,
-                ghostSignalCount: 0
-              },
-              diagnostics: {
-                coverage: {
-                  tradeCount: 0,
-                  signalCount: 0,
-                  ghostSignalCount: 0,
-                  rejectedOrdersCount: 0,
-                  cooldownSkipsCount: 0,
-                  rawBuySignals: 0,
-                  rawSellSignals: 0,
-                  rawHoldSignals: 0,
-                  avgUniverseSize: 0,
-                  minUniverseSize: 0,
-                  maxUniverseSize: 0,
-                  avgConsideredBuys: 0,
-                  avgEligibleBuys: 0
-                },
-                reasons: {
-                  strategy: {},
-                  strategyTags: {},
-                  coordinator: {},
-                  execution: {},
-                  risk: {}
-                },
-                costs: {
-                  feePaid: 0,
-                  slippagePaid: 0,
-                  totalCostsPaid: 0
-                },
-                robustness: {},
-                crossChecks: [],
-                windows: {
-                  mode: config.mode,
-                  holdoutDays: config.holdoutDays,
-                  trainingDays: config.trainingDays,
-                  stepDays: config.stepDays
-                }
-              }
-            };
-            await saveJson(
-              path.join(
-                config.outputDir,
-                `iteration-${String(iteration).padStart(2, "0")}`,
-                "evaluations",
-                `${candidate.candidateId}.json`
-              ),
-              evaluation
-            );
-          }
+        const useInProcessBlock = config.researchStage === "block" && !deps.evaluateCandidate;
+        const evalOutputDir = path.join(config.outputDir, `iteration-${String(iteration).padStart(2, "0")}`, "evaluations");
+
+        const onCandidateEvaluated = async (evaluation: CandidateBacktestEvaluation) => {
           liveEvaluations.push(evaluation);
           liveEvaluations.sort(compareEvaluations);
           if (!bestCandidate || compareEvaluations(bestCandidate, liveEvaluations[0]) > 0) {
@@ -2200,14 +2328,92 @@ export function createAutoResearchOrchestrator(deps: {
             liveEvaluations
           });
           await log(
-            `[auto-research] iteration ${iteration}/${config.iterations} done ${candidate.candidateId} net=${evaluation.summary.netReturn} trades=${evaluation.summary.tradeCount}`
+            `[auto-research] iteration ${iteration}/${config.iterations} done ${evaluation.candidate.candidateId} net=${evaluation.summary.netReturn} trades=${evaluation.summary.tradeCount}`
           );
-          return evaluation;
-        });
+        };
+
+        let evaluations: CandidateBacktestEvaluation[];
+
+        if (useInProcessBlock) {
+          // Split: non-1m blocks in-process (memory safe), 1m blocks via isolated worker
+          const inProcessCandidates = diversifiedCandidates.filter((c) => !blockCandidateNeeds1m(c.familyId));
+          const workerCandidates = diversifiedCandidates.filter((c) => blockCandidateNeeds1m(c.familyId));
+
+          const inProcessResults = inProcessCandidates.length > 0
+            ? await evaluateBlockCandidatesInProcess({
+                config,
+                candidates: inProcessCandidates,
+                marketCodes,
+                outputDir: evalOutputDir,
+                log,
+                iteration,
+                onEvaluated: async (evaluation) => { await onCandidateEvaluated(evaluation); }
+              })
+            : [];
+
+          const workerResults = await runWithConcurrency(workerCandidates, 1, async (candidate) => {
+            await log(
+              `[auto-research] iteration ${iteration}/${config.iterations} evaluate (worker) ${candidate.candidateId}`
+            );
+            let evaluation: CandidateBacktestEvaluation;
+            try {
+              evaluation = await evaluateCandidate({
+                config,
+                candidate,
+                marketCodes,
+                outputDir: evalOutputDir
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              evaluation = buildBlockFailedEvaluation(config, candidate, message);
+              await saveJson(path.join(evalOutputDir, `${candidate.candidateId}.json`), evaluation);
+            }
+            await onCandidateEvaluated(evaluation);
+            return evaluation;
+          });
+
+          // Reassemble in original order
+          const resultMap = new Map<string, CandidateBacktestEvaluation>();
+          for (const e of [...inProcessResults, ...workerResults]) resultMap.set(e.candidate.candidateId, e);
+          evaluations = diversifiedCandidates.map((c) => resultMap.get(c.candidateId)!);
+        } else {
+          evaluations = await runWithConcurrency(diversifiedCandidates, parallelism, async (candidate, index) => {
+            await log(
+              `[auto-research] iteration ${iteration}/${config.iterations} evaluate ${index + 1}/${diversifiedCandidates.length} ${candidate.candidateId}`
+            );
+            let evaluation: CandidateBacktestEvaluation;
+            try {
+              evaluation = await evaluateCandidate({
+                config,
+                candidate,
+                marketCodes,
+                outputDir: evalOutputDir
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              evaluation = buildBlockFailedEvaluation(config, candidate, message);
+              await saveJson(path.join(evalOutputDir, `${candidate.candidateId}.json`), evaluation);
+            }
+            await onCandidateEvaluated(evaluation);
+            return evaluation;
+          });
+        }
         evaluations.sort(compareEvaluations);
         if (!bestCandidate || (evaluations[0] && compareEvaluations(bestCandidate, evaluations[0]) > 0)) {
           bestCandidate = evaluations[0];
         }
+
+        if (config.researchStage === "block") {
+          for (const evaluation of evaluations) {
+            const fid = evaluation.candidate.familyId;
+            if (!blockFamilyIds.has(fid)) continue;
+            const current = blockFamilyBestMap.get(fid);
+            if (!current || compareEvaluations(current, evaluation) > 0) {
+              blockFamilyBestMap.set(fid, evaluation);
+            }
+          }
+        }
+
         if (evaluations.every((evaluation) => evaluation.summary.tradeCount === 0)) {
           noTradeIterations += 1;
         } else {
@@ -2235,7 +2441,8 @@ export function createAutoResearchOrchestrator(deps: {
               preparationResults,
               codeMutationResults: normalizedCodeMutationResults,
               validationResults,
-              evaluations
+              evaluations,
+              blockCatalog
             }),
             config.llmTimeoutMs,
             "auto-research review"
@@ -2380,14 +2587,52 @@ export function createAutoResearchOrchestrator(deps: {
         });
 
         if (review.verdict === "promote_candidate" || review.verdict === "stop_no_edge") {
-          outcome = "completed";
-          outcomeReason = `Run stopped with verdict ${review.verdict}.`;
           if (review.promotedCandidateId) {
             bestCandidate = evaluations.find(
               (evaluation) => evaluation.candidate.candidateId === review.promotedCandidateId
             ) ?? bestCandidate;
           }
-          break;
+
+          if (config.researchStage === "block" && blockCatalog) {
+            // Per-family block promotion: promote all families that pass the gate
+            const gateConfig = promotionGateConfig(config);
+            const promotedFamilyIds = new Set(blockCatalog.blocks.map((b) => b.sourceFamilyId));
+            for (const [fid, best] of blockFamilyBestMap) {
+              if (promotedFamilyIds.has(fid)) continue;
+              if (!passesPromotionGate(best, gateConfig)) continue;
+              try {
+                const familyDef = getBlockFamilyById(fid);
+                const validated = promoteToValidatedBlock({
+                  evaluation: best,
+                  familyDef,
+                  blockFamilyId: fid
+                });
+                blockCatalog = appendValidatedBlock(blockCatalog, validated);
+                promotedFamilyIds.add(fid);
+                await log(`[auto-research] block promoted: ${validated.blockId} family=${validated.sourceFamilyId} net=${validated.performance.netReturn}`);
+              } catch {
+                // best-effort
+              }
+            }
+            const catalogPath = path.join(config.outputDir, "validated-blocks.json");
+            await saveValidatedBlockCatalog(catalogPath, blockCatalog);
+
+            // Check if all families are covered
+            const uncoveredFamilies = [...blockFamilyIds].filter((fid) => !promotedFamilyIds.has(fid));
+            if (uncoveredFamilies.length > 0) {
+              // Still have uncovered families — keep searching
+              await log(`[auto-research] block families uncovered: ${uncoveredFamilies.join(",")} — continuing`);
+            } else {
+              outcome = "completed";
+              outcomeReason = `All ${blockFamilyIds.size} block families validated.`;
+              break;
+            }
+          } else {
+            // Non-block stage: original behavior
+            outcome = "completed";
+            outcomeReason = `Run stopped with verdict ${review.verdict}.`;
+            break;
+          }
         }
 
         nextProposal = {
@@ -2417,6 +2662,29 @@ export function createAutoResearchOrchestrator(deps: {
         ) {
           outcome = "partial";
           outcomeReason = "Run ended before consuming all configured iterations.";
+        }
+
+        if (config.researchStage === "block" && blockCatalog) {
+          // Best-effort: promote remaining families from blockFamilyBestMap
+          const promotedFamilyIds = new Set(blockCatalog.blocks.map((b) => b.sourceFamilyId));
+          const gateConfig = promotionGateConfig(config);
+          for (const [fid, best] of blockFamilyBestMap) {
+            if (promotedFamilyIds.has(fid)) continue;
+            if (!passesPromotionGate(best, gateConfig)) continue;
+            try {
+              const familyDef = getBlockFamilyById(fid);
+              const validated = promoteToValidatedBlock({
+                evaluation: best,
+                familyDef,
+                blockFamilyId: fid
+              });
+              blockCatalog = appendValidatedBlock(blockCatalog, validated);
+            } catch {
+              // best-effort
+            }
+          }
+          const catalogPath = path.join(config.outputDir, "validated-blocks.json");
+          await saveValidatedBlockCatalog(catalogPath, blockCatalog);
         }
 
         const report = toReport({
