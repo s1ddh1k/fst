@@ -63,25 +63,6 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
     ]
   },
   {
-    familyId: "block:breakout-5m-upvol",
-    strategyName: "block:breakout-5m-upvol",
-    title: "5m Breakout Block (trend_up + volatile)",
-    thesis: "Breakout rotation on 5m decision, 1m execution, gated to trend-up and volatile regimes.",
-    timeframe: "5m",
-    requiredData: ["5m", "1m"],
-    parameterSpecs: [
-      { name: "breakoutLookback", description: "Breakout lookback bars.", min: 12, max: 36 },
-      { name: "strengthFloor", description: "Strength floor.", min: 0.55, max: 0.95 },
-      { name: "maxExtensionAtr", description: "Max extension in ATR.", min: 0.8, max: 2.8 },
-      { name: "trailAtrMult", description: "Trailing ATR multiple.", min: 1.2, max: 3.4 },
-      ...REGIME_GATE_VOLATILE_SPECS
-    ],
-    guardrails: [
-      "Keep breakout chasing bounded with extension controls.",
-      "Gate to trend_up and volatile regimes."
-    ]
-  },
-  {
     familyId: "block:reversion-1h-rangedown",
     strategyName: "block:reversion-1h-rangedown",
     title: "1h Residual Reversion Block (range + trend_down)",
@@ -98,31 +79,6 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
     guardrails: [
       "Only trade large reversions to overcome costs.",
       "Gate to range and trend_down regimes."
-    ]
-  },
-  {
-    familyId: "block:micro-1m-upvol",
-    strategyName: "block:micro-1m-upvol",
-    title: "1m Micro Breakout Block (trend_up + volatile)",
-    thesis: "Micro breakout scalp on 1m decision/execution, gated to trend-up and volatile regimes.",
-    timeframe: "1m",
-    requiredData: ["1m"],
-    parameterSpecs: [
-      { name: "lookbackBars", description: "Scalp breakout lookback.", min: 5, max: 18 },
-      { name: "extensionThreshold", description: "Breakout distance floor.", min: 0.0015, max: 0.009 },
-      { name: "holdingBarsMax", description: "Max holding bars.", min: 4, max: 20 },
-      { name: "stopAtrMult", description: "Stop ATR multiple.", min: 0.8, max: 1.8 },
-      { name: "minVolumeSpike", description: "Volume spike floor.", min: 0.8, max: 1.5 },
-      { name: "minRiskOnScore", description: "Internal risk-on floor.", min: -0.02, max: 0.2 },
-      { name: "minLiquidityScore", description: "Internal liquidity floor.", min: 0.02, max: 0.12 },
-      { name: "profitTarget", description: "Profit target.", min: 0.0015, max: 0.012 },
-      { name: "gateMinRiskOnScore", description: "Regime gate risk-on floor.", min: -0.15, max: 0.18 },
-      { name: "gateMinLiquidityScore", description: "Regime gate liquidity floor.", min: 0.005, max: 0.15 },
-      { name: "gateMinVolatility", description: "Regime gate volatility floor.", min: 0.001, max: 0.03 }
-    ],
-    guardrails: [
-      "Treat as opportunistic, not main risk budget.",
-      "Gate to trend_up and volatile regimes."
     ]
   },
   {
