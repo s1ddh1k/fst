@@ -1,20 +1,16 @@
-import { Pool } from "pg";
-import { DATABASE_URL } from "./config.js";
+import { getDb } from "./sqlite.js";
 import type { ScoredBacktestResult } from "./types.js";
-
-const pool = new Pool({
-  connectionString: DATABASE_URL
-});
 
 export async function insertScoredBacktestMetrics(params: {
   backtestRunId: number;
   segmentType: string;
   result: ScoredBacktestResult;
 }): Promise<void> {
+  const db = getDb();
   const { result } = params;
 
   try {
-    await pool.query(
+    db.prepare(
       `
         INSERT INTO backtest_metrics (
           backtest_run_id,
@@ -40,39 +36,38 @@ export async function insertScoredBacktestMetrics(params: {
           max_position_weight,
           circuit_breaker_count
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-      `,
-      [
-        params.backtestRunId,
-        params.segmentType,
-        result.metrics.totalReturn,
-        result.metrics.grossReturn,
-        result.metrics.netReturn,
-        result.metrics.maxDrawdown,
-        result.metrics.winRate,
-        result.metrics.tradeCount,
-        result.metrics.turnover,
-        result.metrics.avgHoldBars,
-        result.metrics.feePaid,
-        result.metrics.slippagePaid,
-        result.metrics.rejectedOrdersCount,
-        result.metrics.cooldownSkipsCount,
-        result.bootstrap?.pValue ?? null,
-        result.bootstrap?.confidence95Lower ?? null,
-        result.bootstrap?.confidence95Upper ?? null,
-        result.randomBenchmark?.percentileVsRandom ?? null,
-        result.bootstrap?.tradeToParameterRatio ?? null,
-        result.averagePositionWeight,
-        result.maxPositionWeight,
-        result.circuitBreakerTriggered
-      ]
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `
+    ).run(
+      params.backtestRunId,
+      params.segmentType,
+      result.metrics.totalReturn,
+      result.metrics.grossReturn,
+      result.metrics.netReturn,
+      result.metrics.maxDrawdown,
+      result.metrics.winRate,
+      result.metrics.tradeCount,
+      result.metrics.turnover,
+      result.metrics.avgHoldBars,
+      result.metrics.feePaid,
+      result.metrics.slippagePaid,
+      result.metrics.rejectedOrdersCount,
+      result.metrics.cooldownSkipsCount,
+      result.bootstrap?.pValue ?? null,
+      result.bootstrap?.confidence95Lower ?? null,
+      result.bootstrap?.confidence95Upper ?? null,
+      result.randomBenchmark?.percentileVsRandom ?? null,
+      result.bootstrap?.tradeToParameterRatio ?? null,
+      result.averagePositionWeight,
+      result.maxPositionWeight,
+      result.circuitBreakerTriggered
     );
   } catch (error) {
     if (!(error instanceof Error) || !/gross_return|net_return|turnover|avg_hold_bars|fee_paid|slippage_paid|bootstrap_p_value|random_benchmark_percentile|avg_position_weight/.test(error.message)) {
       throw error;
     }
 
-    await pool.query(
+    db.prepare(
       `
         INSERT INTO backtest_metrics (
           backtest_run_id,
@@ -86,16 +81,15 @@ export async function insertScoredBacktestMetrics(params: {
           profit_factor,
           trade_count
         )
-        VALUES ($1, $2, $3, NULL, $4, NULL, NULL, $5, NULL, $6)
-      `,
-      [
-        params.backtestRunId,
-        params.segmentType,
-        result.metrics.totalReturn,
-        result.metrics.maxDrawdown,
-        result.metrics.winRate,
-        result.metrics.tradeCount
-      ]
+        VALUES (?, ?, ?, NULL, ?, NULL, NULL, ?, NULL, ?)
+      `
+    ).run(
+      params.backtestRunId,
+      params.segmentType,
+      result.metrics.totalReturn,
+      result.metrics.maxDrawdown,
+      result.metrics.winRate,
+      result.metrics.tradeCount
     );
   }
 }

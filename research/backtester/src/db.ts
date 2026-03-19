@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { getDb, closeDb as sharedCloseDb } from "./sqlite.js";
 
 import {
   getMarketStateConfigKey,
@@ -11,12 +11,7 @@ import type {
   MarketStateContext,
   RelativeStrengthContext
 } from "../../strategies/src/index.js";
-import { DATABASE_URL } from "./config.js";
 import type { Candle, PeriodRange } from "./types.js";
-
-const pool = new Pool({
-  connectionString: DATABASE_URL
-});
 
 const FEATURE_INSERT_BATCH_SIZE = 250;
 
@@ -49,10 +44,10 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 function buildValuesClause(rowCount: number, columnCount: number): string {
-  return Array.from({ length: rowCount }, (_, rowIndex) => {
+  return Array.from({ length: rowCount }, () => {
     const placeholders = Array.from(
       { length: columnCount },
-      (_, columnIndex) => `$${rowIndex * columnCount + columnIndex + 1}`
+      () => `?`
     );
 
     return `(${placeholders.join(", ")})`;
@@ -83,7 +78,7 @@ function toOptionalBenchmarkRegime(
 }
 
 export async function closeDb(): Promise<void> {
-  await pool.end();
+  sharedCloseDb();
 }
 
 export async function loadCandles(params: {
@@ -92,8 +87,9 @@ export async function loadCandles(params: {
   limit?: number;
   range?: PeriodRange;
 }): Promise<Candle[]> {
+  const db = getDb();
   const hasRange = Boolean(params.range);
-  const result = await pool.query(
+  const rows = db.prepare(
     `
       SELECT
         market_code,
@@ -106,26 +102,27 @@ export async function loadCandles(params: {
         volume,
         notional
       FROM candles
-      WHERE market_code = $1
-        AND timeframe = $2
-        AND ($3::timestamptz IS NULL OR candle_time_utc >= $3)
-        AND ($4::timestamptz IS NULL OR candle_time_utc <= $4)
+      WHERE market_code = ?
+        AND timeframe = ?
+        AND (? IS NULL OR candle_time_utc >= ?)
+        AND (? IS NULL OR candle_time_utc <= ?)
       ORDER BY candle_time_utc ASC
-      LIMIT $5
-    `,
-    [
-      params.marketCode,
-      params.timeframe,
-      hasRange ? params.range?.start.toISOString() : null,
-      hasRange ? params.range?.end.toISOString() : null,
-      params.limit ?? 5000
-    ]
-  );
+      LIMIT ?
+    `
+  ).all(
+    params.marketCode,
+    params.timeframe,
+    hasRange ? params.range?.start.toISOString() : null,
+    hasRange ? params.range?.start.toISOString() : null,
+    hasRange ? params.range?.end.toISOString() : null,
+    hasRange ? params.range?.end.toISOString() : null,
+    params.limit ?? 5000
+  ) as Array<Record<string, string | number | null>>;
 
-  return (result.rows as Array<Record<string, string | Date>>).map((row) => ({
+  return rows.map((row) => ({
     marketCode: String(row.market_code),
     timeframe: String(row.timeframe),
-    candleTimeUtc: new Date(row.candle_time_utc as string | Date),
+    candleTimeUtc: new Date(row.candle_time_utc as string),
     openPrice: Number(row.open_price),
     highPrice: Number(row.high_price),
     lowPrice: Number(row.low_price),
@@ -145,8 +142,12 @@ export async function loadCandlesForMarkets(params: {
     return {};
   }
 
+  const db = getDb();
   const hasRange = Boolean(params.range);
-  const result = await pool.query(
+  const codePlaceholders = params.marketCodes.map(() => '?').join(',');
+  const limitValue = params.limit ?? null;
+
+  const rows = db.prepare(
     `
       WITH ranked AS (
         SELECT
@@ -164,10 +165,10 @@ export async function loadCandlesForMarkets(params: {
             ORDER BY candle_time_utc DESC
           ) AS row_number
         FROM candles
-        WHERE market_code = ANY($1::text[])
-          AND timeframe = $2
-          AND ($3::timestamptz IS NULL OR candle_time_utc >= $3)
-          AND ($4::timestamptz IS NULL OR candle_time_utc <= $4)
+        WHERE market_code IN (${codePlaceholders})
+          AND timeframe = ?
+          AND (? IS NULL OR candle_time_utc >= ?)
+          AND (? IS NULL OR candle_time_utc <= ?)
       )
       SELECT
         market_code,
@@ -180,26 +181,28 @@ export async function loadCandlesForMarkets(params: {
         volume,
         notional
       FROM ranked
-      WHERE ($5::int IS NULL OR row_number <= $5)
+      WHERE (? IS NULL OR row_number <= ?)
       ORDER BY market_code ASC, candle_time_utc ASC
-    `,
-    [
-      params.marketCodes,
-      params.timeframe,
-      hasRange ? params.range?.start.toISOString() : null,
-      hasRange ? params.range?.end.toISOString() : null,
-      params.limit ?? null
-    ]
-  );
+    `
+  ).all(
+    ...params.marketCodes,
+    params.timeframe,
+    hasRange ? params.range?.start.toISOString() : null,
+    hasRange ? params.range?.start.toISOString() : null,
+    hasRange ? params.range?.end.toISOString() : null,
+    hasRange ? params.range?.end.toISOString() : null,
+    limitValue,
+    limitValue
+  ) as Array<Record<string, string | number | null>>;
 
   const grouped = Object.fromEntries(params.marketCodes.map((marketCode) => [marketCode, [] as Candle[]]));
 
-  for (const row of result.rows as Array<Record<string, string | Date>>) {
+  for (const row of rows) {
     const marketCode = String(row.market_code);
     grouped[marketCode]?.push({
       marketCode,
       timeframe: String(row.timeframe),
-      candleTimeUtc: new Date(row.candle_time_utc as string | Date),
+      candleTimeUtc: new Date(row.candle_time_utc as string),
       openPrice: Number(row.open_price),
       highPrice: Number(row.high_price),
       lowPrice: Number(row.low_price),
@@ -222,14 +225,12 @@ export async function upsertMarketBreadthFeatures(params: {
     return 0;
   }
 
+  const db = getDb();
   const resolvedConfig = resolveMarketStateConfig(params.config);
   const configKey = getMarketStateConfigKey(resolvedConfig);
   const configJson = JSON.stringify(resolvedConfig);
-  const client = await pool.connect();
 
-  try {
-    await client.query("BEGIN");
-
+  const trx = db.transaction(() => {
     for (const batch of chunk(params.rows, FEATURE_INSERT_BATCH_SIZE)) {
       const values: Array<boolean | number | string | null> = [];
 
@@ -264,7 +265,7 @@ export async function upsertMarketBreadthFeatures(params: {
         );
       }
 
-      await client.query(
+      db.prepare(
         `
           INSERT INTO market_breadth_features (
             universe_name,
@@ -319,20 +320,14 @@ export async function upsertMarketBreadthFeatures(params: {
             benchmark_above_trend = EXCLUDED.benchmark_above_trend,
             benchmark_historical_volatility = EXCLUDED.benchmark_historical_volatility,
             benchmark_regime = EXCLUDED.benchmark_regime,
-            updated_at = NOW()
-        `,
-        values
-      );
+            updated_at = datetime('now')
+        `
+      ).run(...values);
     }
+  });
 
-    await client.query("COMMIT");
-    return params.rows.length;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
+  trx();
+  return params.rows.length;
 }
 
 export async function upsertMarketRelativeStrengthFeatures(params: {
@@ -345,14 +340,12 @@ export async function upsertMarketRelativeStrengthFeatures(params: {
     return 0;
   }
 
+  const db = getDb();
   const resolvedConfig = resolveMarketStateConfig(params.config);
   const configKey = getMarketStateConfigKey(resolvedConfig);
   const configJson = JSON.stringify(resolvedConfig);
-  const client = await pool.connect();
 
-  try {
-    await client.query("BEGIN");
-
+  const trx = db.transaction(() => {
     for (const batch of chunk(params.rows, FEATURE_INSERT_BATCH_SIZE)) {
       const values: Array<number | string | null> = [];
 
@@ -379,7 +372,7 @@ export async function upsertMarketRelativeStrengthFeatures(params: {
         );
       }
 
-      await client.query(
+      db.prepare(
         `
           INSERT INTO market_relative_strength_features (
             universe_name,
@@ -417,20 +410,14 @@ export async function upsertMarketRelativeStrengthFeatures(params: {
             composite_change_spread = EXCLUDED.composite_change_spread,
             liquidity_spread = EXCLUDED.liquidity_spread,
             return_percentile = EXCLUDED.return_percentile,
-            updated_at = NOW()
-        `,
-        values
-      );
+            updated_at = datetime('now')
+        `
+      ).run(...values);
     }
+  });
 
-    await client.query("COMMIT");
-    return params.rows.length;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
+  trx();
+  return params.rows.length;
 }
 
 export async function loadMarketStateFeatureSeries(params: {
@@ -440,10 +427,11 @@ export async function loadMarketStateFeatureSeries(params: {
   config?: MarketStateConfig;
   range?: PeriodRange;
 }): Promise<Record<string, MarketStateContext>> {
+  const db = getDb();
   const hasRange = Boolean(params.range);
   const resolvedConfig = resolveMarketStateConfig(params.config);
   const configKey = getMarketStateConfigKey(resolvedConfig);
-  const result = await pool.query(
+  const rows = db.prepare(
     `
       SELECT
         b.universe_name,
@@ -487,28 +475,29 @@ export async function loadMarketStateFeatureSeries(params: {
        AND r.timeframe = b.timeframe
        AND r.config_key = b.config_key
        AND r.feature_time_utc = b.feature_time_utc
-       AND r.market_code = $4
-      WHERE b.universe_name = $1
-        AND b.timeframe = $2
-        AND b.config_key = $3
-        AND ($5::timestamptz IS NULL OR b.feature_time_utc >= $5)
-        AND ($6::timestamptz IS NULL OR b.feature_time_utc <= $6)
+       AND r.market_code = ?
+      WHERE b.universe_name = ?
+        AND b.timeframe = ?
+        AND b.config_key = ?
+        AND (? IS NULL OR b.feature_time_utc >= ?)
+        AND (? IS NULL OR b.feature_time_utc <= ?)
       ORDER BY b.feature_time_utc ASC
-    `,
-    [
-      params.universeName,
-      params.timeframe,
-      configKey,
-      params.marketCode,
-      hasRange ? params.range?.start.toISOString() : null,
-      hasRange ? params.range?.end.toISOString() : null
-    ]
-  );
+    `
+  ).all(
+    params.marketCode,
+    params.universeName,
+    params.timeframe,
+    configKey,
+    hasRange ? params.range?.start.toISOString() : null,
+    hasRange ? params.range?.start.toISOString() : null,
+    hasRange ? params.range?.end.toISOString() : null,
+    hasRange ? params.range?.end.toISOString() : null
+  ) as Array<Record<string, unknown>>;
 
   const featureSeries: Record<string, MarketStateContext> = {};
 
-  for (const row of result.rows as Array<Record<string, unknown>>) {
-    const referenceTime = new Date(row.feature_time_utc as string | Date);
+  for (const row of rows) {
+    const referenceTime = new Date(row.feature_time_utc as string);
     const compositeRegime =
       toOptionalBenchmarkRegime(row.composite_regime) ??
       toOptionalBenchmarkRegime(row.benchmark_regime);
@@ -610,8 +599,10 @@ export async function createBacktestRun(params: {
   trainRange: PeriodRange;
   testRange: PeriodRange;
 }): Promise<number> {
+  const db = getDb();
+
   try {
-    const result = await pool.query(
+    const result = db.prepare(
       `
         INSERT INTO backtest_runs (
           strategy_name,
@@ -627,31 +618,29 @@ export async function createBacktestRun(params: {
           test_end_at,
           status
         )
-        VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, 'running')
-        RETURNING id
-      `,
-      [
-        params.strategyName,
-        params.strategyVersion,
-        JSON.stringify(params.parameters),
-        params.marketCode,
-        params.universeName ?? null,
-        params.marketCount ?? null,
-        params.timeframe,
-        params.trainRange.start.toISOString(),
-        params.trainRange.end.toISOString(),
-        params.testRange.start.toISOString(),
-        params.testRange.end.toISOString()
-      ]
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')
+      `
+    ).run(
+      params.strategyName,
+      params.strategyVersion,
+      JSON.stringify(params.parameters),
+      params.marketCode,
+      params.universeName ?? null,
+      params.marketCount ?? null,
+      params.timeframe,
+      params.trainRange.start.toISOString(),
+      params.trainRange.end.toISOString(),
+      params.testRange.start.toISOString(),
+      params.testRange.end.toISOString()
     );
 
-    return (result.rows[0] as { id: number }).id;
+    return Number(result.lastInsertRowid);
   } catch (error) {
     if (!(error instanceof Error) || !/universe_name|market_count/.test(error.message)) {
       throw error;
     }
 
-    const fallback = await pool.query(
+    const fallback = db.prepare(
       `
         INSERT INTO backtest_runs (
           strategy_name,
@@ -665,23 +654,21 @@ export async function createBacktestRun(params: {
           test_end_at,
           status
         )
-        VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, 'running')
-        RETURNING id
-      `,
-      [
-        params.strategyName,
-        params.strategyVersion,
-        JSON.stringify(params.parameters),
-        params.marketCode,
-        params.timeframe,
-        params.trainRange.start.toISOString(),
-        params.trainRange.end.toISOString(),
-        params.testRange.start.toISOString(),
-        params.testRange.end.toISOString()
-      ]
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')
+      `
+    ).run(
+      params.strategyName,
+      params.strategyVersion,
+      JSON.stringify(params.parameters),
+      params.marketCode,
+      params.timeframe,
+      params.trainRange.start.toISOString(),
+      params.trainRange.end.toISOString(),
+      params.testRange.start.toISOString(),
+      params.testRange.end.toISOString()
     );
 
-    return (fallback.rows[0] as { id: number }).id;
+    return Number(fallback.lastInsertRowid);
   }
 }
 
@@ -689,15 +676,15 @@ export async function completeBacktestRun(
   backtestRunId: number,
   status: "success" | "failed"
 ): Promise<void> {
-  await pool.query(
+  const db = getDb();
+  db.prepare(
     `
       UPDATE backtest_runs
-      SET status = $2,
-          finished_at = NOW()
-      WHERE id = $1
-    `,
-    [backtestRunId, status]
-  );
+      SET status = ?,
+          finished_at = datetime('now')
+      WHERE id = ?
+    `
+  ).run(status, backtestRunId);
 }
 
 export async function insertBacktestMetrics(params: {
@@ -716,8 +703,10 @@ export async function insertBacktestMetrics(params: {
   rejectedOrdersCount?: number;
   cooldownSkipsCount?: number;
 }): Promise<void> {
+  const db = getDb();
+
   try {
-    await pool.query(
+    db.prepare(
       `
         INSERT INTO backtest_metrics (
           backtest_run_id,
@@ -735,31 +724,30 @@ export async function insertBacktestMetrics(params: {
           rejected_orders_count,
           cooldown_skips_count
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-      `,
-      [
-        params.backtestRunId,
-        params.segmentType,
-        params.totalReturn,
-        params.grossReturn ?? params.totalReturn,
-        params.netReturn ?? params.totalReturn,
-        params.maxDrawdown,
-        params.winRate,
-        params.tradeCount,
-        params.turnover ?? 0,
-        params.avgHoldBars ?? 0,
-        params.feePaid ?? 0,
-        params.slippagePaid ?? 0,
-        params.rejectedOrdersCount ?? 0,
-        params.cooldownSkipsCount ?? 0
-      ]
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `
+    ).run(
+      params.backtestRunId,
+      params.segmentType,
+      params.totalReturn,
+      params.grossReturn ?? params.totalReturn,
+      params.netReturn ?? params.totalReturn,
+      params.maxDrawdown,
+      params.winRate,
+      params.tradeCount,
+      params.turnover ?? 0,
+      params.avgHoldBars ?? 0,
+      params.feePaid ?? 0,
+      params.slippagePaid ?? 0,
+      params.rejectedOrdersCount ?? 0,
+      params.cooldownSkipsCount ?? 0
     );
   } catch (error) {
     if (!(error instanceof Error) || !/gross_return|net_return|turnover|avg_hold_bars|fee_paid|slippage_paid|rejected_orders_count|cooldown_skips_count/.test(error.message)) {
       throw error;
     }
 
-    await pool.query(
+    db.prepare(
       `
         INSERT INTO backtest_metrics (
           backtest_run_id,
@@ -773,16 +761,15 @@ export async function insertBacktestMetrics(params: {
           profit_factor,
           trade_count
         )
-        VALUES ($1, $2, $3, NULL, $4, NULL, NULL, $5, NULL, $6)
-      `,
-      [
-        params.backtestRunId,
-        params.segmentType,
-        params.totalReturn,
-        params.maxDrawdown,
-        params.winRate,
-        params.tradeCount
-      ]
+        VALUES (?, ?, ?, NULL, ?, NULL, NULL, ?, NULL, ?)
+      `
+    ).run(
+      params.backtestRunId,
+      params.segmentType,
+      params.totalReturn,
+      params.maxDrawdown,
+      params.winRate,
+      params.tradeCount
     );
   }
 }
@@ -791,19 +778,19 @@ export async function getSelectedUniverseMarkets(params: {
   universeName: string;
   limit?: number;
 }): Promise<string[]> {
-  const result = await pool.query(
+  const db = getDb();
+  const rows = db.prepare(
     `
       SELECT market_code
       FROM market_universe
-      WHERE universe_name = $1
-        AND is_selected = TRUE
+      WHERE universe_name = ?
+        AND is_selected = 1
       ORDER BY rank ASC
-      LIMIT $2
-    `,
-    [params.universeName, params.limit ?? 999]
-  );
+      LIMIT ?
+    `
+  ).all(params.universeName, params.limit ?? 999) as Array<{ market_code: string }>;
 
-  return (result.rows as Array<{ market_code: string }>).map((row) => row.market_code);
+  return rows.map((row) => row.market_code);
 }
 
 export async function getSelectedUniverseMarketsWithMinimumCandles(params: {
@@ -812,26 +799,26 @@ export async function getSelectedUniverseMarketsWithMinimumCandles(params: {
   minCandles: number;
   limit?: number;
 }): Promise<Array<{ marketCode: string; candleCount: number }>> {
-  const result = await pool.query(
+  const db = getDb();
+  const rows = db.prepare(
     `
       SELECT
         mu.market_code,
-        COUNT(c.id)::int AS candle_count
+        CAST(COUNT(c.id) AS INTEGER) AS candle_count
       FROM market_universe mu
       LEFT JOIN candles c
         ON c.market_code = mu.market_code
-       AND c.timeframe = $2
-      WHERE mu.universe_name = $1
-        AND mu.is_selected = TRUE
+       AND c.timeframe = ?
+      WHERE mu.universe_name = ?
+        AND mu.is_selected = 1
       GROUP BY mu.rank, mu.market_code
-      HAVING COUNT(c.id) >= $3
+      HAVING COUNT(c.id) >= ?
       ORDER BY mu.rank ASC
-      LIMIT $4
-    `,
-    [params.universeName, params.timeframe, params.minCandles, params.limit ?? 999]
-  );
+      LIMIT ?
+    `
+  ).all(params.timeframe, params.universeName, params.minCandles, params.limit ?? 999) as Array<{ market_code: string; candle_count: number }>;
 
-  return (result.rows as Array<{ market_code: string; candle_count: number }>).map((row) => ({
+  return rows.map((row) => ({
     marketCode: row.market_code,
     candleCount: row.candle_count
   }));
@@ -843,24 +830,24 @@ export async function getCandidateMarketsWithMinimumCandles(params: {
   minCandles: number;
   limit?: number;
 }): Promise<Array<{ marketCode: string; candleCount: number }>> {
+  const db = getDb();
   const quoteCurrency = params.quoteCurrency ?? "KRW";
-  const result = await pool.query(
+  const rows = db.prepare(
     `
       SELECT
         c.market_code,
-        COUNT(c.id)::int AS candle_count
+        CAST(COUNT(c.id) AS INTEGER) AS candle_count
       FROM candles c
-      WHERE c.timeframe = $1
-        AND c.market_code LIKE $2
+      WHERE c.timeframe = ?
+        AND c.market_code LIKE ?
       GROUP BY c.market_code
-      HAVING COUNT(c.id) >= $3
+      HAVING COUNT(c.id) >= ?
       ORDER BY c.market_code ASC
-      LIMIT $4
-    `,
-    [params.timeframe, `${quoteCurrency}-%`, params.minCandles, params.limit ?? 9999]
-  );
+      LIMIT ?
+    `
+  ).all(params.timeframe, `${quoteCurrency}-%`, params.minCandles, params.limit ?? 9999) as Array<{ market_code: string; candle_count: number }>;
 
-  return (result.rows as Array<{ market_code: string; candle_count: number }>).map((row) => ({
+  return rows.map((row) => ({
     marketCode: row.market_code,
     candleCount: row.candle_count
   }));
@@ -896,25 +883,22 @@ export async function replaceStrategyRegimes(params: {
     rank: number;
   }>;
 }): Promise<void> {
-  const client = await pool.connect();
+  const db = getDb();
 
-  try {
-    await client.query("BEGIN");
-
-    await client.query(
+  const trx = db.transaction(() => {
+    db.prepare(
       `
         UPDATE strategy_regimes
-        SET is_active = FALSE,
-            updated_at = NOW()
-        WHERE regime_name = $1
-          AND universe_name = $2
-          AND timeframe = $3
-      `,
-      [params.regimeName, params.universeName, params.timeframe]
-    );
+        SET is_active = 0,
+            updated_at = datetime('now')
+        WHERE regime_name = ?
+          AND universe_name = ?
+          AND timeframe = ?
+      `
+    ).run(params.regimeName, params.universeName, params.timeframe);
 
     for (const row of params.rows) {
-      await client.query(
+      db.prepare(
         `
           INSERT INTO strategy_regimes (
             regime_name,
@@ -946,43 +930,37 @@ export async function replaceStrategyRegimes(params: {
             updated_at
           )
           VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, TRUE, NOW(), NOW()
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now')
           )
-        `,
-        [
-          params.regimeName,
-          params.universeName,
-          params.timeframe,
-          params.holdoutDays,
-          params.metadata?.sourceLabel ?? null,
-          params.metadata?.trainingDays ?? null,
-          params.metadata?.stepDays ?? null,
-          params.metadata?.minMarkets ?? null,
-          params.metadata?.minTrades ?? null,
-          params.metadata?.candidatePoolSize ?? null,
-          params.metadata?.bestStrategyName ?? null,
-          params.metadata?.trainStartAt?.toISOString() ?? null,
-          params.metadata?.trainEndAt?.toISOString() ?? null,
-          params.metadata?.testStartAt?.toISOString() ?? null,
-          params.metadata?.testEndAt?.toISOString() ?? null,
-          row.strategyType,
-          row.strategyNames,
-          JSON.stringify(row.parameters),
-          JSON.stringify(row.weights),
-          row.marketCount,
-          row.avgTrainReturn,
-          row.avgTestReturn,
-          row.avgTestDrawdown,
-          row.rank
-        ]
+        `
+      ).run(
+        params.regimeName,
+        params.universeName,
+        params.timeframe,
+        params.holdoutDays,
+        params.metadata?.sourceLabel ?? null,
+        params.metadata?.trainingDays ?? null,
+        params.metadata?.stepDays ?? null,
+        params.metadata?.minMarkets ?? null,
+        params.metadata?.minTrades ?? null,
+        params.metadata?.candidatePoolSize ?? null,
+        params.metadata?.bestStrategyName ?? null,
+        params.metadata?.trainStartAt?.toISOString() ?? null,
+        params.metadata?.trainEndAt?.toISOString() ?? null,
+        params.metadata?.testStartAt?.toISOString() ?? null,
+        params.metadata?.testEndAt?.toISOString() ?? null,
+        row.strategyType,
+        JSON.stringify(row.strategyNames),
+        JSON.stringify(row.parameters),
+        JSON.stringify(row.weights),
+        row.marketCount,
+        row.avgTrainReturn,
+        row.avgTestReturn,
+        row.avgTestDrawdown,
+        row.rank
       );
     }
+  });
 
-    await client.query("COMMIT");
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
+  trx();
 }

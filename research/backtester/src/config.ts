@@ -2,6 +2,7 @@ import { config as loadEnv } from "dotenv";
 
 loadEnv({ path: ".env" });
 
+/** @deprecated Use getDb() from @fst/shared instead. Kept for backward compat. */
 export const DATABASE_URL =
   process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/fst";
 
