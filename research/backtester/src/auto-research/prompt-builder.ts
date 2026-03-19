@@ -482,6 +482,8 @@ Task:
 2. The block will later be combined with other blocks into a portfolio — you don't need to worry about portfolio-level allocation.
 3. Vary regime gate parameters meaningfully — they control when the strategy is active.
 4. Generate executable candidates from the listed block families only.
+5. Explore parameter extremes and corners, not just midpoints. If a family has produced 0 trades in prior iterations, try minimum gate thresholds to maximize signal activation.
+6. If a family consistently loses money from overtrading, try higher rebalanceBars or tighter entry thresholds.
 
 Return JSON only (same format as standard proposal).
 `.trim();

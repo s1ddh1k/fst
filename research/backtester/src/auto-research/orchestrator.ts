@@ -853,6 +853,12 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function getStepFraction(iteration?: number): number {
+  if (iteration === undefined || iteration <= 3) return 0.10;
+  if (iteration <= 6) return 0.15;
+  return 0.25;
+}
+
 function quantize(value: number): number {
   return Number(value.toFixed(4));
 }
@@ -952,6 +958,7 @@ function mutateCandidateToNovelVariant(params: {
   usedFingerprints: Set<string>;
   seed: number;
   suffix: string;
+  iteration?: number;
 }): NormalizedCandidateProposal | undefined {
   if (!params.family || params.family.parameterSpecs.length === 0) {
     return undefined;
@@ -969,9 +976,8 @@ function mutateCandidateToNovelVariant(params: {
       continue;
     }
 
-    const step = portfolioFamily
-      ? Math.max(width * 0.1, width / 10)
-      : Math.max(width * 0.05, width / 20);
+    const stepFraction = portfolioFamily ? 0.1 : getStepFraction(params.iteration);
+    const step = Math.max(width * stepFraction, width / (portfolioFamily ? 10 : 20));
 
     for (const direction of directions) {
       const next = clamp(current + step * direction, spec.min, spec.max);
@@ -1251,7 +1257,8 @@ function buildFallbackNextCandidates(params: {
       const current = parameters[spec.name];
 
       if (typeof current === "number" && Number.isFinite(current) && width > 0) {
-        const step = Math.max(width * 0.05, width / 20);
+        const stepFrac = getStepFraction(params.iteration);
+        const step = Math.max(width * stepFrac, width / 20);
         const direction = candidateIndex % 2 === 0 ? 1 : -1;
         let nextValue = clamp(current + step * direction, spec.min, spec.max);
 
@@ -2136,6 +2143,9 @@ export function createAutoResearchOrchestrator(deps: {
         const blockFamilyIds = new Set(
           config.researchStage === "block" ? selectedFamilies.map((f) => f.familyId) : []
         );
+        const blockFamilyConsecutiveZeroTrades = new Map<string, number>();
+        const skippedFamilyIds = new Set<string>();
+        const CONSECUTIVE_ZERO_TRADE_SKIP_THRESHOLD = 3;
 
         const startIteration = iterations.length + 1;
         for (let iteration = startIteration; iteration <= config.iterations; iteration += 1) {
@@ -2206,7 +2216,9 @@ export function createAutoResearchOrchestrator(deps: {
           limit: config.candidatesPerIteration
         });
         const diversifiedCandidates = selectDiversifiedCandidates(
-          normalizedCandidates,
+          skippedFamilyIds.size > 0
+            ? normalizedCandidates.filter((c) => !skippedFamilyIds.has(c.familyId))
+            : normalizedCandidates,
           config.candidatesPerIteration
         );
         await log(
@@ -2414,12 +2426,31 @@ export function createAutoResearchOrchestrator(deps: {
         }
 
         if (config.researchStage === "block") {
+          // Track per-family best and consecutive zero-trade count
+          const familyTradeMap = new Map<string, boolean>();
           for (const evaluation of evaluations) {
             const fid = evaluation.candidate.familyId;
             if (!blockFamilyIds.has(fid)) continue;
             const current = blockFamilyBestMap.get(fid);
             if (!current || compareEvaluations(current, evaluation) > 0) {
               blockFamilyBestMap.set(fid, evaluation);
+            }
+            if (evaluation.summary.tradeCount > 0) {
+              familyTradeMap.set(fid, true);
+            } else if (!familyTradeMap.has(fid)) {
+              familyTradeMap.set(fid, false);
+            }
+          }
+          for (const [fid, hadTrades] of familyTradeMap) {
+            if (hadTrades) {
+              blockFamilyConsecutiveZeroTrades.set(fid, 0);
+            } else {
+              const count = (blockFamilyConsecutiveZeroTrades.get(fid) ?? 0) + 1;
+              blockFamilyConsecutiveZeroTrades.set(fid, count);
+              if (count >= CONSECUTIVE_ZERO_TRADE_SKIP_THRESHOLD && !skippedFamilyIds.has(fid)) {
+                skippedFamilyIds.add(fid);
+                await log(`[auto-research] skipping family ${fid} after ${count} consecutive 0-trade iterations`);
+              }
             }
           }
         }
@@ -2628,14 +2659,22 @@ export function createAutoResearchOrchestrator(deps: {
             await saveValidatedBlockCatalog(catalogPath, blockCatalog);
 
             // Check if all families are covered
-            const uncoveredFamilies = [...blockFamilyIds].filter((fid) => !promotedFamilyIds.has(fid));
-            if (uncoveredFamilies.length > 0) {
-              // Still have uncovered families — keep searching
-              await log(`[auto-research] block families uncovered: ${uncoveredFamilies.join(",")} — continuing`);
-            } else {
+            const uncoveredFamilies = [...blockFamilyIds].filter(
+              (fid) => !promotedFamilyIds.has(fid) && !skippedFamilyIds.has(fid)
+            );
+            if (uncoveredFamilies.length === 0) {
+              const skippedCount = skippedFamilyIds.size;
               outcome = "completed";
-              outcomeReason = `All ${blockFamilyIds.size} block families validated.`;
+              outcomeReason = skippedCount > 0
+                ? `${promotedFamilyIds.size} block families validated, ${skippedCount} skipped (0-trade).`
+                : `All ${blockFamilyIds.size} block families validated.`;
               break;
+            } else if (iteration >= config.iterations && promotedFamilyIds.size > 0) {
+              outcome = "completed";
+              outcomeReason = `Max iterations reached. ${promotedFamilyIds.size}/${blockFamilyIds.size} families promoted. Uncovered: ${uncoveredFamilies.join(",")}.`;
+              break;
+            } else {
+              await log(`[auto-research] block families uncovered: ${uncoveredFamilies.join(",")} — continuing`);
             }
           } else {
             // Non-block stage: original behavior
