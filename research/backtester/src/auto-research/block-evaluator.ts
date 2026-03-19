@@ -253,9 +253,9 @@ export async function evaluateBlockCandidate(params: {
 
   const sleeves: StrategySleeveConfig[] = [{
     sleeveId,
-    capitalBudgetPct: 0.9,
-    maxOpenPositions: 3,
-    maxSinglePositionPct: 0.5,
+    capitalBudgetPct: 0.95,
+    maxOpenPositions: 8,
+    maxSinglePositionPct: 0.3,
     priority: 10
   }];
 
@@ -287,10 +287,10 @@ export async function evaluateBlockCandidate(params: {
         lookbackBars: 28,
         refreshEveryBars: 4
       },
-      maxOpenPositions: 3,
-      maxCapitalUsagePct: 0.9,
-      cooldownBarsAfterLoss: 8,
-      minBarsBetweenEntries: 2
+      maxOpenPositions: 8,
+      maxCapitalUsagePct: 0.95,
+      cooldownBarsAfterLoss: 0,
+      minBarsBetweenEntries: 0
     });
 
   if (config.mode === "holdout") {
