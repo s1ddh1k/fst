@@ -144,60 +144,57 @@ export async function loadCandlesForMarkets(params: {
 
   const db = getDb();
   const hasRange = Boolean(params.range);
-  const codePlaceholders = params.marketCodes.map(() => '?').join(',');
-  const limitValue = params.limit ?? null;
+  const limitValue = params.limit ?? 0;
 
-  const rows = db.prepare(
-    `
-      WITH ranked AS (
-        SELECT
-          market_code,
-          timeframe,
-          candle_time_utc,
-          open_price,
-          high_price,
-          low_price,
-          close_price,
-          volume,
-          notional,
-          ROW_NUMBER() OVER (
-            PARTITION BY market_code
-            ORDER BY candle_time_utc DESC
-          ) AS row_number
+  // Query per market to avoid expensive ROW_NUMBER() window function on large datasets
+  const stmt = db.prepare(
+    hasRange
+      ? `
+        SELECT market_code, timeframe, candle_time_utc, open_price, high_price,
+               low_price, close_price, volume, notional
         FROM candles
-        WHERE market_code IN (${codePlaceholders})
-          AND timeframe = ?
-          AND (? IS NULL OR candle_time_utc >= ?)
-          AND (? IS NULL OR candle_time_utc <= ?)
-      )
-      SELECT
-        market_code,
-        timeframe,
-        candle_time_utc,
-        open_price,
-        high_price,
-        low_price,
-        close_price,
-        volume,
-        notional
-      FROM ranked
-      WHERE (? IS NULL OR row_number <= ?)
-      ORDER BY market_code ASC, candle_time_utc ASC
-    `
-  ).all(
-    ...params.marketCodes,
-    params.timeframe,
-    hasRange ? params.range?.start.toISOString() : null,
-    hasRange ? params.range?.start.toISOString() : null,
-    hasRange ? params.range?.end.toISOString() : null,
-    hasRange ? params.range?.end.toISOString() : null,
-    limitValue,
-    limitValue
-  ) as Array<Record<string, string | number | null>>;
+        WHERE market_code = ? AND timeframe = ?
+          AND candle_time_utc >= ? AND candle_time_utc <= ?
+        ORDER BY candle_time_utc ASC
+      `
+      : limitValue > 0
+        ? `
+          SELECT market_code, timeframe, candle_time_utc, open_price, high_price,
+                 low_price, close_price, volume, notional
+          FROM (
+            SELECT market_code, timeframe, candle_time_utc, open_price, high_price,
+                   low_price, close_price, volume, notional
+            FROM candles
+            WHERE market_code = ? AND timeframe = ?
+            ORDER BY candle_time_utc DESC
+            LIMIT ?
+          )
+          ORDER BY candle_time_utc ASC
+        `
+        : `
+          SELECT market_code, timeframe, candle_time_utc, open_price, high_price,
+                 low_price, close_price, volume, notional
+          FROM candles
+          WHERE market_code = ? AND timeframe = ?
+          ORDER BY candle_time_utc ASC
+        `
+  );
+
+  const allRows: Array<Record<string, unknown>> = [];
+  for (const marketCode of params.marketCodes) {
+    const rows = hasRange
+      ? stmt.all(marketCode, params.timeframe, params.range!.start.toISOString(), params.range!.end.toISOString())
+      : limitValue > 0
+        ? stmt.all(marketCode, params.timeframe, limitValue)
+        : stmt.all(marketCode, params.timeframe);
+    for (const row of rows as Array<Record<string, unknown>>) {
+      allRows.push(row);
+    }
+  }
 
   const grouped = Object.fromEntries(params.marketCodes.map((marketCode) => [marketCode, [] as Candle[]]));
 
-  for (const row of rows) {
+  for (const row of allRows) {
     const marketCode = String(row.market_code);
     grouped[marketCode]?.push({
       marketCode,
