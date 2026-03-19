@@ -2372,9 +2372,9 @@ export function createAutoResearchOrchestrator(deps: {
         let evaluations: CandidateBacktestEvaluation[];
 
         if (useInProcessBlock) {
-          // Split: non-1m blocks in-process (memory safe), 1m blocks via isolated worker
-          const inProcessCandidates = diversifiedCandidates.filter((c) => !blockCandidateNeeds1m(c.familyId));
-          const workerCandidates = diversifiedCandidates.filter((c) => blockCandidateNeeds1m(c.familyId));
+          // All blocks in-process — 1m is capped to 6 months so memory is safe
+          const inProcessCandidates = diversifiedCandidates;
+          const workerCandidates: NormalizedCandidateProposal[] = [];
 
           const inProcessResults = inProcessCandidates.length > 0
             ? await evaluateBlockCandidatesInProcess({
