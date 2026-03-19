@@ -1797,14 +1797,16 @@ export function createAutoResearchOrchestrator(deps: {
       return data;
     };
 
-    // 1m candles are extremely large — cap market count to reduce memory
+    // 1m: cap to 6 months + fewer markets — scalping doesn't need long history
+    const MAX_1M_CANDLES = 180 * 24 * 60;
     const marketCodes1m = needs1m
-      ? params.marketCodes.slice(0, Math.min(params.marketCodes.length, Math.max(params.config.marketLimit, 6)))
+      ? params.marketCodes.slice(0, Math.min(params.marketCodes.length, Math.max(params.config.marketLimit, 3)))
       : [];
+    const limit1m = needs1m ? Math.min(loadLimit("1m"), MAX_1M_CANDLES) : 0;
     const [candles1h, candles5m, candles1m] = await Promise.all([
       needs1h ? loadOrCache("1h", params.marketCodes, Math.max(params.config.limit, loadLimit("1h"))) : Promise.resolve({} as CandleMap),
       needs5m ? loadOrCache("5m", params.marketCodes, loadLimit("5m")) : Promise.resolve({} as CandleMap),
-      needs1m ? loadOrCache("1m", marketCodes1m, loadLimit("1m")) : Promise.resolve({} as CandleMap)
+      needs1m ? loadOrCache("1m", marketCodes1m, limit1m) : Promise.resolve({} as CandleMap)
     ]);
     const result: Partial<Record<StrategyTimeframe, CandleMap>> = {};
     if (needs1h) result["1h"] = candles1h;

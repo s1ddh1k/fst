@@ -213,10 +213,16 @@ export async function evaluateBlockCandidate(params: {
   const needs5m = requiredTimeframes.includes("5m") || requiredTimeframes.includes("15m");
   const needs1m = requiredTimeframes.includes("1m");
 
+  // Cap 1m candles to 6 months — scalping strategies don't benefit from longer history
+  // and 1m bar-by-bar simulation is extremely CPU-heavy
+  const MAX_1M_CANDLES = 180 * 24 * 60; // 6 months of 1m data = ~259,200 per market
+  const limit1m = needs1m ? Math.min(loadLimit("1m"), MAX_1M_CANDLES) : 0;
+  const marketCodes1m = needs1m ? marketCodes.slice(0, Math.max(config.marketLimit, 3)) : [];
+
   const [candles1h, candles5m, candles1m] = await Promise.all([
     needs1h ? loadCandles({ marketCodes, timeframe: "1h", limit: Math.max(config.limit, loadLimit("1h")) }) : Promise.resolve({}),
     needs5m ? loadCandles({ marketCodes, timeframe: "5m", limit: loadLimit("5m") }) : Promise.resolve({}),
-    needs1m ? loadCandles({ marketCodes, timeframe: "1m", limit: loadLimit("1m") }) : Promise.resolve({})
+    needs1m ? loadCandles({ marketCodes: marketCodes1m, timeframe: "1m", limit: limit1m }) : Promise.resolve({})
   ]);
 
   const candles15m = requiredTimeframes.includes("15m") ? aggregate5mCandlesTo15m(candles5m as CandleMap) : {};
