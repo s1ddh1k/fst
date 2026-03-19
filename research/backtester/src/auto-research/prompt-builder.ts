@@ -5,7 +5,8 @@ import type {
   PreparationExecutionResult,
   ProposalBatch,
   ResearchIterationRecord,
-  StrategyFamilyDefinition
+  StrategyFamilyDefinition,
+  ValidatedBlockCatalog
 } from "./types.js";
 
 const AUTO_RESEARCH_SYSTEM_PROMPT = `
@@ -438,6 +439,249 @@ Return JSON only:
 Requirements:
 - If verdict=promote_candidate, promotedCandidateId must match one of the evaluated candidates.
 - If verdict=keep_searching, provide at least 1 next candidate unless you also conclude stop_no_edge.
+- Do not emit markdown.
+`.trim();
+}
+
+export function buildBlockProposalPrompt(params: {
+  config: AutoResearchRunConfig;
+  families: StrategyFamilyDefinition[];
+  marketCodes: string[];
+  history: ResearchIterationRecord[];
+}): string {
+  return `
+${AUTO_RESEARCH_SYSTEM_PROMPT}
+
+${AUTO_RESEARCH_GLOBAL_PROMPT}
+
+Goal:
+- You are optimizing a SINGLE strategy block (not a full portfolio).
+- Each block has 5-12 parameters: strategy-specific params + regime gate params.
+- Find the optimal parameters for this strategy in its target regime.
+- Long only, Upbit KRW spot, point-in-time.
+
+Current run config:
+${jsonBlock({
+  universe: params.config.universeName,
+  timeframe: params.config.timeframe,
+  marketLimit: params.config.marketLimit,
+  limit: params.config.limit,
+  holdoutDays: params.config.holdoutDays,
+  mode: params.config.mode,
+  researchStage: "block",
+  candidatesPerIteration: params.config.candidatesPerIteration,
+  marketCodes: params.marketCodes,
+  families: compactFamilies(params.families),
+  familyPerformanceSummary: compactFamilyPerformance(params.history),
+  candidateLedgerSummary: compactCandidateLedger(params.history),
+  priorHistory: compactHistory(params.history)
+})}
+
+Task:
+1. Focus on finding the best parameters for each block family in isolation.
+2. The block will later be combined with other blocks into a portfolio — you don't need to worry about portfolio-level allocation.
+3. Vary regime gate parameters meaningfully — they control when the strategy is active.
+4. Generate executable candidates from the listed block families only.
+
+Return JSON only (same format as standard proposal).
+`.trim();
+}
+
+export function buildBlockReviewPrompt(params: {
+  config: AutoResearchRunConfig;
+  families: StrategyFamilyDefinition[];
+  history: ResearchIterationRecord[];
+  latestProposal: ProposalBatch;
+  preparationResults: PreparationExecutionResult[];
+  codeMutationResults: CodeMutationExecutionResult[];
+  validationResults: Array<{ command: string; status: "passed" | "failed" | "skipped"; detail: string }>;
+  evaluations: CandidateBacktestEvaluation[];
+}): string {
+  return `
+${AUTO_RESEARCH_SYSTEM_PROMPT}
+
+${AUTO_RESEARCH_GLOBAL_PROMPT}
+
+You are reviewing a BLOCK-level research iteration (single strategy optimization).
+
+Structured run facts:
+${jsonBlock({
+  config: {
+    mode: params.config.mode,
+    universe: params.config.universeName,
+    timeframe: params.config.timeframe,
+    researchStage: "block",
+    holdoutDays: params.config.holdoutDays
+  },
+  families: compactFamilies(params.families),
+  latestProposal: params.latestProposal,
+  latestEvaluations: params.evaluations.map(compactEvaluation),
+  familyPerformanceSummary: compactFamilyPerformance(params.history),
+  candidateLedgerSummary: compactCandidateLedger(params.history),
+  priorHistory: compactHistory(params.history)
+})}
+
+Task:
+1. Each block is evaluated independently — judge if parameters produce decent risk-adjusted returns within its regime.
+2. A block that passes will be promoted to the validated block catalog for later portfolio assembly.
+3. If searching should continue, propose genuinely different parameter combinations — avoid trivial nudges.
+4. Use diagnostics.coverage and diagnostics.reasons to diagnose zero-trade or weak outcomes.
+5. If a family consistently produces zero trades, suggest widening regime gates or trying extreme parameter corners.
+
+Return JSON only — the verdict field MUST be exactly one of these three strings:
+{
+  "summary": "short assessment",
+  "verdict": "keep_searching" | "promote_candidate" | "stop_no_edge",
+  "promotedCandidateId": "candidate-id-or-null",
+  "nextPreparation": [],
+  "proposedFamilies": [],
+  "codeTasks": [],
+  "nextCandidates": [
+    {
+      "candidateId": "optional-id",
+      "familyId": "block:leader-1h-trend-up",
+      "thesis": "one sentence",
+      "parameters": {},
+      "parentCandidateIds": ["prior-candidate-id"],
+      "origin": "llm",
+      "invalidationSignals": ["..."]
+    }
+  ],
+  "retireCandidateIds": ["candidate-id"],
+  "observations": ["short bullet text"]
+}
+
+Requirements:
+- verdict MUST be one of: "keep_searching", "promote_candidate", "stop_no_edge". No other values are accepted.
+- If verdict=promote_candidate, promotedCandidateId must match one of the evaluated candidates.
+- If verdict=keep_searching, provide at least 1 next candidate with meaningfully different parameters.
+- Do not emit markdown.
+`.trim();
+}
+
+export function buildPortfolioCompositionProposalPrompt(params: {
+  config: AutoResearchRunConfig;
+  families: StrategyFamilyDefinition[];
+  marketCodes: string[];
+  history: ResearchIterationRecord[];
+  blockCatalog: ValidatedBlockCatalog;
+}): string {
+  const blockSummary = params.blockCatalog.blocks.map((b) => ({
+    blockId: b.blockId,
+    family: b.family,
+    sleeveId: b.sleeveId,
+    decisionTimeframe: b.decisionTimeframe,
+    regimeGate: b.regimeGate.allowedRegimes,
+    performance: b.performance
+  }));
+
+  return `
+${AUTO_RESEARCH_SYSTEM_PROMPT}
+
+${AUTO_RESEARCH_GLOBAL_PROMPT}
+
+Goal:
+- You are composing a PORTFOLIO from pre-validated strategy blocks.
+- Block parameters are FROZEN — you cannot change them.
+- Your job: decide sleeve capital allocations and portfolio-level parameters.
+
+Validated blocks:
+${jsonBlock(blockSummary)}
+
+Current run config:
+${jsonBlock({
+  universe: params.config.universeName,
+  mode: params.config.mode,
+  researchStage: "portfolio",
+  candidatesPerIteration: params.config.candidatesPerIteration,
+  marketCodes: params.marketCodes,
+  families: compactFamilies(params.families),
+  priorHistory: compactHistory(params.history)
+})}
+
+Tunable parameters:
+- sleeveAlloc_<sleeveId>: float 0.05-0.8 for each sleeve
+- universeTopN, maxOpenPositions, maxCapitalUsagePct, cooldownBarsAfterLoss, minBarsBetweenEntries, universeLookbackBars, refreshEveryBars
+
+Task:
+1. Propose capital allocation across sleeves that diversifies regime exposure.
+2. Set portfolio-level risk controls appropriately.
+3. Use the standard proposal JSON format.
+
+Return JSON only.
+`.trim();
+}
+
+export function buildPortfolioCompositionReviewPrompt(params: {
+  config: AutoResearchRunConfig;
+  families: StrategyFamilyDefinition[];
+  history: ResearchIterationRecord[];
+  latestProposal: ProposalBatch;
+  preparationResults: PreparationExecutionResult[];
+  codeMutationResults: CodeMutationExecutionResult[];
+  validationResults: Array<{ command: string; status: "passed" | "failed" | "skipped"; detail: string }>;
+  evaluations: CandidateBacktestEvaluation[];
+  blockCatalog: ValidatedBlockCatalog;
+}): string {
+  return `
+${AUTO_RESEARCH_SYSTEM_PROMPT}
+
+${AUTO_RESEARCH_GLOBAL_PROMPT}
+
+You are reviewing a PORTFOLIO COMPOSITION research iteration.
+Blocks are frozen; you are only tuning allocations and portfolio-level params.
+
+Structured run facts:
+${jsonBlock({
+  config: {
+    mode: params.config.mode,
+    universe: params.config.universeName,
+    researchStage: "portfolio",
+    holdoutDays: params.config.holdoutDays
+  },
+  families: compactFamilies(params.families),
+  latestProposal: params.latestProposal,
+  latestEvaluations: params.evaluations.map(compactEvaluation),
+  priorHistory: compactHistory(params.history),
+  validatedBlocks: params.blockCatalog.blocks.map((b) => ({
+    blockId: b.blockId,
+    family: b.family,
+    sleeveId: b.sleeveId,
+    performance: b.performance
+  }))
+})}
+
+Task:
+1. Evaluate whether the allocation produces a well-diversified portfolio.
+2. If searching should continue, propose different sleeve allocations or portfolio-level params.
+
+Return JSON only — the verdict field MUST be exactly one of these three strings:
+{
+  "summary": "short assessment",
+  "verdict": "keep_searching" | "promote_candidate" | "stop_no_edge",
+  "promotedCandidateId": "candidate-id-or-null",
+  "nextPreparation": [],
+  "proposedFamilies": [],
+  "codeTasks": [],
+  "nextCandidates": [
+    {
+      "candidateId": "optional-id",
+      "familyId": "assembled-portfolio",
+      "thesis": "one sentence",
+      "parameters": {},
+      "parentCandidateIds": ["prior-candidate-id"],
+      "origin": "llm",
+      "invalidationSignals": ["..."]
+    }
+  ],
+  "retireCandidateIds": ["candidate-id"],
+  "observations": ["short bullet text"]
+}
+
+Requirements:
+- verdict MUST be one of: "keep_searching", "promote_candidate", "stop_no_edge". No other values are accepted.
+- If verdict=promote_candidate, promotedCandidateId must match one of the evaluated candidates.
+- If verdict=keep_searching, provide at least 1 next candidate.
 - Do not emit markdown.
 `.trim();
 }

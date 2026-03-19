@@ -1965,6 +1965,16 @@ export function createAutoResearchOrchestrator(deps: {
       let selectedFamilies: StrategyFamilyDefinition[];
 
       if (config.researchStage === "block") {
+        // Block stage: use shorter walk-forward windows for more statistical power.
+        // Default holdout=365 yields only 2 windows; holdout=90 yields ~12 windows.
+        if (config.holdoutDays >= 365) {
+          config = {
+            ...config,
+            holdoutDays: 90,
+            trainingDays: config.trainingDays && config.trainingDays < 365 ? config.trainingDays : 180,
+            stepDays: config.stepDays && config.stepDays < 365 ? config.stepDays : 90
+          };
+        }
         selectedFamilies = config.strategyFamilyIds
           ? getBlockFamilyDefinitions().filter((f) => config.strategyFamilyIds!.includes(f.familyId))
           : getBlockFamilyDefinitions();
