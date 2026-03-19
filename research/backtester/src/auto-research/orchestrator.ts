@@ -1768,6 +1768,9 @@ export function createAutoResearchOrchestrator(deps: {
     return groups;
   }
 
+  // E2: Inter-iteration candle cache — data doesn't change between iterations
+  const candleCache = new Map<string, CandleMap>();
+
   async function loadCandlesForTimeframes(params: {
     timeframes: StrategyTimeframe[];
     marketCodes: string[];
@@ -1784,19 +1787,29 @@ export function createAutoResearchOrchestrator(deps: {
     const needs1h = params.timeframes.includes("1h");
     const needs5m = params.timeframes.includes("5m") || params.timeframes.includes("15m");
     const needs1m = params.timeframes.includes("1m");
+
+    const loadOrCache = async (tf: StrategyTimeframe, marketCodes: string[], limit: number): Promise<CandleMap> => {
+      const cacheKey = `${tf}:${limit}:${marketCodes.length}`;
+      const cached = candleCache.get(cacheKey);
+      if (cached) return cached;
+      const data = await loadCandlesForMarkets({ marketCodes, timeframe: tf, limit }) as CandleMap;
+      candleCache.set(cacheKey, data);
+      return data;
+    };
+
     // 1m candles are extremely large — cap market count to reduce memory
     const marketCodes1m = needs1m
       ? params.marketCodes.slice(0, Math.min(params.marketCodes.length, Math.max(params.config.marketLimit, 6)))
       : [];
     const [candles1h, candles5m, candles1m] = await Promise.all([
-      needs1h ? loadCandlesForMarkets({ marketCodes: params.marketCodes, timeframe: "1h", limit: Math.max(params.config.limit, loadLimit("1h")) }) : Promise.resolve({}),
-      needs5m ? loadCandlesForMarkets({ marketCodes: params.marketCodes, timeframe: "5m", limit: loadLimit("5m") }) : Promise.resolve({}),
-      needs1m ? loadCandlesForMarkets({ marketCodes: marketCodes1m, timeframe: "1m", limit: loadLimit("1m") }) : Promise.resolve({})
+      needs1h ? loadOrCache("1h", params.marketCodes, Math.max(params.config.limit, loadLimit("1h"))) : Promise.resolve({} as CandleMap),
+      needs5m ? loadOrCache("5m", params.marketCodes, loadLimit("5m")) : Promise.resolve({} as CandleMap),
+      needs1m ? loadOrCache("1m", marketCodes1m, loadLimit("1m")) : Promise.resolve({} as CandleMap)
     ]);
     const result: Partial<Record<StrategyTimeframe, CandleMap>> = {};
-    if (needs1h) result["1h"] = candles1h as CandleMap;
-    if (needs5m) result["5m"] = candles5m as CandleMap;
-    if (needs1m) result["1m"] = candles1m as CandleMap;
+    if (needs1h) result["1h"] = candles1h;
+    if (needs5m) result["5m"] = candles5m;
+    if (needs1m) result["1m"] = candles1m;
     return result;
   }
 
