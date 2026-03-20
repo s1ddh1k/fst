@@ -15,6 +15,7 @@ export * from "./LeaderPullbackStateMachineStrategy.js";
 export * from "./RelativeMomentumPullbackStrategy.js";
 export * from "./RelativeBreakoutRotationMultiStrategy.js";
 export * from "./ResidualReversionMultiStrategy.js";
+export * from "./BollingerMeanReversionStrategy.js";
 export * from "./RegimeGatedStrategy.js";
 export * from "./PortfolioEngine.js";
 export * from "./MultiStrategyBacktestEngine.js";

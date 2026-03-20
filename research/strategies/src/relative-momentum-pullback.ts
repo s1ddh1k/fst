@@ -304,42 +304,13 @@ export function createRelativeMomentumPullbackStrategy(params?: {
         return hold("trend_position_still_valid");
       }
 
-      if (composite.regime === "trend_down" || composite.regime === "volatile") {
-        return hold("market_regime_blocked", {
-          tags: [`regime:${composite.regime}`]
-        });
-      }
+      // Regime filtering is handled by withRegimeGate() — no internal regime/breadth checks needed.
 
       const rejectTags: string[] = [];
 
-      if (composite.trendScore <= 0) {
-        rejectTags.push("composite_trend_non_positive");
-      }
-      if (breadth.riskOnScore < minRiskOn) {
-        rejectTags.push("risk_on_below_floor");
-      }
-      if (breadth.aboveTrendRatio < 0.55) {
-        rejectTags.push("breadth_above_trend_too_low");
-      }
-
+      // Hard gates: only the essential conditions that define the pullback-reclaim pattern
       if ((relativeStrength.momentumPercentile ?? 0) < minStrengthPct) {
         rejectTags.push("strength_percentile_below_floor");
-      }
-      if ((relativeStrength.returnPercentile ?? 0) < 0.55) {
-        rejectTags.push("return_percentile_below_floor");
-      }
-      if ((relativeStrength.compositeMomentumSpread ?? Number.NEGATIVE_INFINITY) <= 0) {
-        rejectTags.push("composite_momentum_spread_negative");
-      }
-      if ((relativeStrength.liquiditySpread ?? Number.NEGATIVE_INFINITY) < 0) {
-        rejectTags.push("liquidity_spread_negative");
-      }
-
-      if (close <= ema50) {
-        rejectTags.push("close_below_ema50");
-      }
-      if (ema20 <= ema50) {
-        rejectTags.push("ema20_below_ema50");
       }
 
       const pullbackLow = lowestCloseInRange(candles, peak.peakIndex, index - 1);
@@ -369,24 +340,17 @@ export function createRelativeMomentumPullbackStrategy(params?: {
         close < peak.peakClose &&
         (reclaimedPreviousBar || reclaimedPullbackMid);
 
+      // Core pullback gate: must have had a meaningful dip recently
       if (recentPullbackMin > -pullbackZ) {
         rejectTags.push("pullback_not_deep_enough");
       }
+      // Core reclaim gate: price must be back above EMA20 after dipping below it
       if (!(close > ema20 && hasRecentCloseBelowEma(candles, index, 20, reclaimLookbackBars))) {
         rejectTags.push("ema20_reclaim_missing");
       }
-      if (rsi14 < 50) {
-        rejectTags.push("rsi_below_reclaim_floor");
-      }
-      if (z20 >= 1.0) {
+      // Guard against chasing overextended moves
+      if (z20 >= 1.5) {
         rejectTags.push("too_extended_after_reclaim");
-      }
-      if (!pullbackStructureValid) {
-        rejectTags.push("swing_pullback_structure_invalid");
-      }
-
-      if (volumeSpikeRatio < 0.8) {
-        rejectTags.push("volume_confirmation_missing");
       }
 
       if (rejectTags.length > 0) {
@@ -405,19 +369,31 @@ export function createRelativeMomentumPullbackStrategy(params?: {
         });
       }
 
-      const conviction = clamp01(
-        average([
-          normalizeWindow(relativeStrength.momentumPercentile ?? 0, minStrengthPct, 1),
-          normalizeWindow(relativeStrength.returnPercentile ?? 0, 0.55, 1),
-          normalizeWindow(breadth.riskOnScore, minRiskOn, 0.75),
-          normalizeWindow(composite.trendScore, 0, 0.6),
-          normalizeWindow(Math.abs(recentPullbackMin), pullbackZ, pullbackZ + 1.5),
+      // Soft factors: contribute to conviction but don't block entry
+      const convictionComponents = [
+        normalizeWindow(relativeStrength.momentumPercentile ?? 0, minStrengthPct, 1),
+        normalizeWindow(relativeStrength.returnPercentile ?? 0, 0.4, 1),
+        normalizeWindow(breadth.riskOnScore, minRiskOn, 0.75),
+        normalizeWindow(composite.trendScore, 0, 0.6),
+        normalizeWindow(Math.abs(recentPullbackMin), pullbackZ, pullbackZ + 1.5),
+        normalizeWindow((close - ema20) / ema20, 0, 0.04),
+        normalizeWindow(rsi14, 45, 70)
+      ];
+      // pullback structure and volume are conviction bonuses, not gates
+      if (pullbackStructureValid) {
+        convictionComponents.push(
           normalizeWindow(pullbackDepth, minimumPullbackDepth, Math.max(minimumPullbackDepth + 0.03, 0.05)),
-          normalizeWindow(recoveryRatio, minRecoveryRatio, 0.85),
-          normalizeWindow((close - ema20) / ema20, 0, 0.04),
-          normalizeWindow(rsi14, 50, 70)
-        ])
-      );
+          normalizeWindow(recoveryRatio, minRecoveryRatio, 0.85)
+        );
+      }
+      if (volumeSpikeRatio >= 0.8) {
+        convictionComponents.push(normalizeWindow(volumeSpikeRatio, 0.8, 1.5));
+      }
+      if ((relativeStrength.compositeMomentumSpread ?? 0) > 0) {
+        convictionComponents.push(normalizeWindow(relativeStrength.compositeMomentumSpread ?? 0, 0, 0.05));
+      }
+
+      const conviction = clamp01(average(convictionComponents));
 
       if (conviction <= 0) {
         return hold("conviction_collapsed_to_zero", {
@@ -430,7 +406,9 @@ export function createRelativeMomentumPullbackStrategy(params?: {
       }
 
       return buy(Math.max(0.55, conviction), "trend_pullback_reclaim", {
-        tags: ["regime_ok", "strong_leader", "pullback_reclaim"],
+        tags: pullbackStructureValid
+          ? ["strong_leader", "pullback_reclaim", "structure_valid"]
+          : ["strong_leader", "pullback_reclaim"],
         metrics: {
           trendScore: composite.trendScore,
           riskOnScore: breadth.riskOnScore,

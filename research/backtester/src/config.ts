@@ -11,7 +11,9 @@ export const DEFAULT_INITIAL_CAPITAL = Number.parseInt(
   10
 );
 
-export const DEFAULT_FEE_RATE = Number.parseFloat(process.env.BACKTEST_FEE_RATE ?? "0.0005");
+// Upbit KRW spot: 0.05% standard, 0.025% with fee coupon (common).
+// Use coupon rate as default — matches real trading conditions.
+export const DEFAULT_FEE_RATE = Number.parseFloat(process.env.BACKTEST_FEE_RATE ?? "0.00025");
 
 export const DEFAULT_SLIPPAGE_RATE = Number.parseFloat(
   process.env.BACKTEST_SLIPPAGE_RATE ?? "0.0005"

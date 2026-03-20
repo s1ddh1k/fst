@@ -53,11 +53,12 @@ export function adaptScoredStrategy(params: {
         decisionTime: context.decisionTime,
         decisionTimeframe: params.decisionTimeframe,
         executionTimeframe: params.executionTimeframe,
-        reason: result.signal === "BUY" ? "adapter_buy" : result.signal === "SELL" ? "adapter_sell" : "adapter_hold",
+        reason: result.metadata?.reason ?? (result.signal === "BUY" ? "adapter_buy" : result.signal === "SELL" ? "adapter_sell" : "adapter_hold"),
         stages: {
           universe_eligible: true,
           trigger_pass: result.signal !== "HOLD"
-        }
+        },
+        metadata: result.metadata?.metrics ? { ...result.metadata.metrics } : undefined
       };
     }
   };

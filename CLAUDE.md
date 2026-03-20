@@ -9,7 +9,7 @@
 
 - **Monorepo**: pnpm workspace
 - **언어**: TypeScript (ESM)
-- **DB**: PostgreSQL 16 (Docker)
+- **DB**: SQLite (better-sqlite3, 로컬 파일)
 - **빌드**: tsc + tsx (런타임)
 - **테스트**: node --test (내장 test runner)
 - **커밋 규칙**: conventional commits (commitlint)
@@ -43,8 +43,7 @@ cd services/paper-trader
 pnpm dev            # paper trading 실행
 pnpm test           # 테스트 실행
 
-# DB
-docker compose up -d  # PostgreSQL 시작
+# DB — SQLite 로컬 파일, 별도 서버 불필요
 ```
 
 ## 핵심 모듈: auto-research (`research/backtester/src/auto-research/`)

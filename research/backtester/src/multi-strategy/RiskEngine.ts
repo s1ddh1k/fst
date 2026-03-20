@@ -54,12 +54,15 @@ export function estimateIntentNotional(params: {
   signal: StrategySignal;
 }): number {
   const convictionWeight = 0.25 + params.signal.conviction * 0.75;
+  // Size each position as equity / maxOpenPositions, scaled by conviction.
+  // This ensures capital is utilized when few positions are open.
+  const positionBudget = params.equity * params.config.maxCapitalUsagePct / Math.max(1, params.config.maxOpenPositions);
   return Math.max(
     0,
     Math.min(
       params.maxSinglePositionNotional,
       params.sleeveBudgetNotional,
-      params.equity * params.config.maxCapitalUsagePct * convictionWeight * 0.2
+      positionBudget * convictionWeight
     )
   );
 }

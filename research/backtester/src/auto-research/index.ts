@@ -17,3 +17,8 @@ export * from "./ranking.js";
 export * from "./run-manager.js";
 export * from "./report-html.js";
 export * from "./orchestrator.js";
+export * from "./block-families.js";
+export * from "./block-evaluator.js";
+export * from "./block-catalog.js";
+export * from "./portfolio-assembler.js";
+export * from "./portfolio-composition-families.js";

@@ -169,55 +169,45 @@ export function createLeaderPullbackStateMachineStrategy(params?: {
 
       if (hasPosition && currentPosition) {
         const highestClose = highestCloseSinceEntry(candles, index, currentPosition.barsHeld);
-        const failedReclaim = currentPosition.barsHeld <= 2 && close < ema20;
-        const noFollowThrough =
-          currentPosition.barsHeld >= 3 &&
-          highestClose !== null &&
-          highestClose < currentPosition.entryPrice + 0.5 * atr14;
-        const rankDecay =
-          close < ema20 &&
-          (relativeStrength.momentumPercentile ?? 0) < 0.45 &&
-          (relativeStrength.compositeMomentumSpread ?? 0) < 0;
-        const trailStop =
-          highestClose !== null &&
-          close <= highestClose - trailAtrMult * atr14;
 
+        // Hard stop: regime fully deteriorated
         if (riskOff) {
           return sell(0.95, "market_regime_deteriorated", "risk_off_exit");
         }
 
-        if (failedReclaim) {
-          return sell(0.9, "failed_reclaim", "signal_exit");
+        // Hard stop: price breaks well below entry early on
+        const earlyFailure =
+          currentPosition.barsHeld <= 3 &&
+          close < currentPosition.entryPrice - 0.8 * atr14;
+        if (earlyFailure) {
+          return sell(0.9, "early_stop_loss", "stop_exit");
         }
 
-        if (noFollowThrough) {
-          return sell(0.82, "follow_through_missing", "signal_exit");
-        }
-
-        if (rankDecay) {
-          return sell(0.8, "leadership_rank_decay", "signal_exit");
-        }
-
+        // Trailing stop: primary exit mechanism — let winners run
+        const trailStop =
+          highestClose !== null &&
+          close <= highestClose - trailAtrMult * atr14;
         if (trailStop) {
           return sell(0.88, "atr_trailing_stop_hit", "trail_exit");
+        }
+
+        // Rank decay: only exit after sustained weakness (6+ bars held, confirmed breakdown)
+        const rankDecay =
+          currentPosition.barsHeld >= 6 &&
+          close < ema20 &&
+          close < ema50 &&
+          (relativeStrength.momentumPercentile ?? 0) < 0.35 &&
+          (relativeStrength.compositeMomentumSpread ?? 0) < -0.01;
+        if (rankDecay) {
+          return sell(0.8, "leadership_rank_decay", "signal_exit");
         }
 
         return hold("setup_still_valid");
       }
 
-      if (composite.regime === "trend_down" || composite.regime === "volatile") {
-        return hold("market_regime_blocked", {
-          tags: [`regime:${composite.regime}`]
-        });
-      }
+      // Regime filtering is handled by withRegimeGate() — no internal regime check needed.
+      // Only check leadership strength and entry trigger.
 
-      const ema20Slope = ema20 > ema20Prev;
-      const regimeGood =
-        composite.trendScore > 0 &&
-        breadth.aboveTrendRatio >= 0.55 &&
-        close > ema50 &&
-        ema20 > ema50 &&
-        ema20Slope;
       const leader =
         (relativeStrength.momentumPercentile ?? 0) >= strengthFloor &&
         (relativeStrength.returnPercentile ?? 0) >= 0.5 &&
@@ -229,20 +219,15 @@ export function createLeaderPullbackStateMachineStrategy(params?: {
       const trigger =
         close > ema20 &&
         close > Math.max(previous?.highPrice ?? Number.NEGATIVE_INFINITY, previous2?.highPrice ?? Number.NEGATIVE_INFINITY) &&
-        closePositionInBar(candle) >= 0.6 &&
-        close - ema20 <= 0.8 * atr14;
+        closePositionInBar(candle) >= 0.45 &&
+        close - ema20 <= 1.2 * atr14;
 
       const rejectTags: string[] = [];
 
-      if (!regimeGood) {
-        rejectTags.push("trend_regime_not_aligned");
-      }
       if (!leader) {
         rejectTags.push("leader_strength_below_floor");
       }
-      if (!armed) {
-        rejectTags.push("pullback_state_not_armed");
-      }
+      // armed is optional — leader + trigger is sufficient for entry
       if (!trigger) {
         rejectTags.push("reclaim_trigger_missing");
       }
@@ -261,23 +246,27 @@ export function createLeaderPullbackStateMachineStrategy(params?: {
         });
       }
 
-      const conviction = clamp01(
-        average([
-          normalizeWindow(relativeStrength.momentumPercentile ?? 0, strengthFloor, 1),
-          normalizeWindow(relativeStrength.returnPercentile ?? 0, 0.5, 1),
-          normalizeWindow(breadth.riskOnScore, 0, 0.75),
-          normalizeWindow(composite.trendScore, 0, 0.6),
-          normalizeWindow(Math.abs(setupWindow.minDistanceToEma20Atr ?? 0), pullbackAtr, pullbackAtr + 1),
-          normalizeWindow(closePositionInBar(candle), 0.6, 1)
-        ])
-      );
+      const convictionComponents = [
+        normalizeWindow(relativeStrength.momentumPercentile ?? 0, strengthFloor, 1),
+        normalizeWindow(relativeStrength.returnPercentile ?? 0, 0.5, 1),
+        normalizeWindow(breadth.riskOnScore, 0, 0.75),
+        normalizeWindow(composite.trendScore, 0, 0.6),
+        normalizeWindow(closePositionInBar(candle), 0.6, 1)
+      ];
+      // armed pullback gives conviction bonus but is not required
+      if (armed) {
+        convictionComponents.push(
+          normalizeWindow(Math.abs(setupWindow.minDistanceToEma20Atr ?? 0), pullbackAtr, pullbackAtr + 1)
+        );
+      }
+      const conviction = clamp01(average(convictionComponents));
 
       if (conviction <= 0) {
         return hold("conviction_collapsed_to_zero");
       }
 
       return buy(Math.max(0.55, conviction), "leader_pullback_reclaim", {
-        tags: ["leader", "armed_pullback", "reacceleration"],
+        tags: armed ? ["leader", "armed_pullback", "reacceleration"] : ["leader", "reacceleration"],
         metrics: {
           momentumPercentile: relativeStrength.momentumPercentile ?? null,
           returnPercentile: relativeStrength.returnPercentile ?? null,

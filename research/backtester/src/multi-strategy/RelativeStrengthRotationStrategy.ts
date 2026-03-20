@@ -14,6 +14,7 @@ export function createRelativeStrengthRotationStrategy(params?: {
   minAboveTrendRatio?: number;
   minLiquidityScore?: number;
   minCompositeTrend?: number;
+  reEntryCooldownBars?: number;
 }): Strategy {
   const strategyId = params?.strategyId ?? "relative-strength-rotation";
   const sleeveId = params?.sleeveId ?? "trend";
@@ -24,6 +25,8 @@ export function createRelativeStrengthRotationStrategy(params?: {
   const minAboveTrendRatio = params?.minAboveTrendRatio ?? 0.55;
   const minLiquidityScore = params?.minLiquidityScore ?? 0.05;
   const minCompositeTrend = params?.minCompositeTrend ?? 0;
+  const reEntryCooldownBars = params?.reEntryCooldownBars ?? 3;
+  let lastSellDecisionIndex = -Infinity;
 
   return {
     id: strategyId,
@@ -68,12 +71,18 @@ export function createRelativeStrengthRotationStrategy(params?: {
       let signal: StrategySignal["signal"] = "HOLD";
       let reason = "no_setup";
 
+      const cooldownActive = context.featureView.decisionIndex - lastSellDecisionIndex < reEntryCooldownBars;
+
       if (existingPosition?.market === context.market) {
-        if (!regimePass || score < exitFloor || compositeMomentumSpread < 0) {
+        // Exit only on regime breakdown or score deterioration.
+        // Do NOT exit on momentumSpread < 0 alone — it flips too rapidly on 15m,
+        // causing massive turnover that destroys gross returns with costs.
+        if (!regimePass || score < exitFloor) {
           signal = "SELL";
           reason = "rotation_exit";
+          lastSellDecisionIndex = context.featureView.decisionIndex;
         }
-      } else if (rebalancePass && regimePass && liquidityPass && score >= entryFloor) {
+      } else if (!cooldownActive && rebalancePass && regimePass && liquidityPass && score >= entryFloor) {
         if (!existingPosition || heldScore === undefined || score - heldScore >= switchGap) {
           signal = "BUY";
           reason = "rotation_entry";

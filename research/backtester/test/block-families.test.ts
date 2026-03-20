@@ -29,9 +29,11 @@ describe("block-families", () => {
     );
   });
 
-  it("each block family has gate parameters", () => {
+  it("each non-bb block family has gate parameters", () => {
     const families = getBlockFamilyDefinitions();
     for (const family of families) {
+      // BB mean reversion families operate without regime gates
+      if (family.familyId.includes("bb-reversion")) continue;
       const gateParams = family.parameterSpecs.filter((p) => p.name.startsWith("gate"));
       assert.ok(gateParams.length >= 2, `Family ${family.familyId} should have at least 2 gate params, got ${gateParams.length}`);
     }

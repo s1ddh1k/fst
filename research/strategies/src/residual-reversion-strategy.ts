@@ -96,13 +96,21 @@ export function createResidualReversionStrategy(params?: {
 
         // 3. 잔차 복귀 + 모멘텀 약화 → 청산
         if (residualZ !== null && momentumSpread !== null) {
+          // Time-decay: lower exit threshold as position ages to prevent positions stuck open
+          const holdRatio = clamp(currentPosition.barsHeld / maxHoldBars, 0, 1);
+          const decayedExitThreshold = exitThreshold * (1 - holdRatio * 0.8);
           const exitScore =
             0.60 * clamp(residualZ / 1.5, -1, 1) +
             0.40 * clamp(-momentumSpread / 0.03, -1, 1);
 
-          if (exitScore >= exitThreshold) {
+          if (exitScore >= decayedExitThreshold) {
             return { signal: "SELL", conviction: clamp(exitScore, 0.3, 1) };
           }
+        }
+
+        // 4. Profit-taking: exit if position has modest gain and approaching hold limit
+        if (pnl > 0.005 && currentPosition.barsHeld >= maxHoldBars * 0.6) {
+          return { signal: "SELL", conviction: 0.6 };
         }
 
         return { signal: "HOLD", conviction: 0 };

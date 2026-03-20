@@ -15,6 +15,7 @@ import {
   createRelativeMomentumPullbackMultiStrategy,
   createResidualReversionMultiStrategy,
   createRelativeStrengthRotationStrategy,
+  createBollingerMeanReversionMultiStrategy,
   withRegimeGate
 } from "../multi-strategy/index.js";
 import type { Strategy, StrategySleeveConfig } from "../../../../packages/shared/src/index.js";
@@ -44,10 +45,17 @@ function roundInt(value: number, min: number, max: number): number {
 function buildBlockGateConfig(familyId: string, params: Record<string, number>): RegimeGateConfig {
   const gate: RegimeGateConfig = {};
 
+  if (familyId.includes("bb-reversion")) {
+    // BB mean reversion works in ALL regimes — oversold happens everywhere
+    gate.allowedRegimes = ["trend_up", "trend_down", "range", "volatile"];
+    gate.allowUnknownRegime = true;
+    return gate;
+  }
+
   if (familyId.includes("rangedown") || familyId.includes("reversion")) {
     gate.allowedRegimes = ["range", "trend_down", "volatile"];
-    gate.maxRiskOnScore = clamp(finiteOrDefault(params.gateMaxRiskOnScore, 0.1), -0.2, 0.3);
-    gate.maxCompositeTrendScore = clamp(finiteOrDefault(params.gateMaxTrendScore, 0.06), -0.2, 0.25);
+    gate.maxRiskOnScore = clamp(finiteOrDefault(params.gateMaxRiskOnScore, 0.2), -0.2, 0.35);
+    gate.maxCompositeTrendScore = clamp(finiteOrDefault(params.gateMaxTrendScore, 0.15), -0.2, 0.3);
     gate.maxHistoricalVolatility = clamp(finiteOrDefault(params.gateMaxVolatility, 0.06), 0.015, 0.08);
   } else if (familyId.includes("upvol") || familyId.includes("micro")) {
     gate.allowedRegimes = ["trend_up", "volatile"];
@@ -69,8 +77,9 @@ function createBlockStrategy(familyId: string, candidateId: string, params: Reco
   if (familyId.includes("rotation")) {
     return createRelativeStrengthRotationStrategy({
       strategyId: `${candidateId}-rotation`,
-      rebalanceBars: roundInt(finiteOrDefault(params.rebalanceBars, 5), 2, 8),
-      entryFloor: clamp(finiteOrDefault(params.entryFloor, 0.78), 0.68, 0.88),
+      rebalanceBars: roundInt(finiteOrDefault(params.rebalanceBars, 5), 4, 8),
+      entryFloor: clamp(finiteOrDefault(params.entryFloor, 0.80), 0.72, 0.92),
+      reEntryCooldownBars: 3,
       exitFloor: clamp(finiteOrDefault(params.exitFloor, 0.56), 0.42, 0.72),
       switchGap: clamp(finiteOrDefault(params.switchGap, 0.12), 0.06, 0.18),
       minAboveTrendRatio: clamp(finiteOrDefault(params.minAboveTrendRatio, 0.68), 0.55, 0.86),
@@ -110,6 +119,32 @@ function createBlockStrategy(familyId: string, candidateId: string, params: Reco
       strengthFloor: clamp(finiteOrDefault(params.strengthFloor, 0.8), 0.65, 0.95),
       maxExtensionAtr: clamp(finiteOrDefault(params.maxExtensionAtr, 1.3), 0.8, 2.2),
       trailAtrMult: clamp(finiteOrDefault(params.trailAtrMult, 2.2), 1.2, 3.4)
+    });
+  }
+
+  if (familyId.includes("bb-reversion") && familyId.includes("daily")) {
+    return createBollingerMeanReversionMultiStrategy({
+      strategyId: `${candidateId}-bb-daily`,
+      bbWindow: roundInt(finiteOrDefault(params.bbWindow, 72), 48, 120),
+      bbMultiplier: clamp(finiteOrDefault(params.bbMultiplier, 2.5), 2.0, 3.0),
+      rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 48), 24, 72),
+      exitRsi: clamp(finiteOrDefault(params.exitRsi, 45), 38, 50),
+      stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.15), 0.10, 0.25),
+      maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 120), 48, 240),
+      entryPercentB: clamp(finiteOrDefault(params.entryPercentB, -0.05), -0.15, 0.0)
+    });
+  }
+
+  if (familyId.includes("bb-reversion")) {
+    return createBollingerMeanReversionMultiStrategy({
+      strategyId: `${candidateId}-bb-weekly`,
+      bbWindow: roundInt(finiteOrDefault(params.bbWindow, 336), 336, 504),
+      bbMultiplier: clamp(finiteOrDefault(params.bbMultiplier, 3.0), 2.5, 3.5),
+      rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 120), 72, 168),
+      exitRsi: clamp(finiteOrDefault(params.exitRsi, 50), 45, 60),
+      stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.30), 0.20, 0.35),
+      maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 504), 336, 1008),
+      entryPercentB: clamp(finiteOrDefault(params.entryPercentB, -0.1), -0.2, 0.0)
     });
   }
 
@@ -219,9 +254,16 @@ export async function evaluateBlockCandidate(params: {
   const limit1m = needs1m ? Math.min(loadLimit("1m"), MAX_1M_CANDLES) : 0;
   const marketCodes1m = needs1m ? marketCodes.slice(0, Math.max(config.marketLimit, 3)) : [];
 
+  // Ensure execution timeframe candles cover at least the same time span as decision candles.
+  // Without this, 1h decisions spanning ~1685 days have no 5m execution data for early windows.
+  const limit1h = needs1h ? Math.max(config.limit, loadLimit("1h")) : 0;
+  const limit5m = needs5m
+    ? Math.max(loadLimit("5m"), needs1h ? limit1h * 12 : 0)
+    : 0;
+
   const [candles1h, candles5m, candles1m] = await Promise.all([
-    needs1h ? loadCandles({ marketCodes, timeframe: "1h", limit: Math.max(config.limit, loadLimit("1h")) }) : Promise.resolve({}),
-    needs5m ? loadCandles({ marketCodes, timeframe: "5m", limit: loadLimit("5m") }) : Promise.resolve({}),
+    needs1h ? loadCandles({ marketCodes, timeframe: "1h", limit: limit1h }) : Promise.resolve({}),
+    needs5m ? loadCandles({ marketCodes, timeframe: "5m", limit: limit5m }) : Promise.resolve({}),
     needs1m ? loadCandles({ marketCodes: marketCodes1m, timeframe: "1m", limit: limit1m }) : Promise.resolve({})
   ]);
 
@@ -235,7 +277,30 @@ export async function evaluateBlockCandidate(params: {
       : referenceTimeframe === "5m"
         ? (candles5m as CandleMap)
         : (candles1m as CandleMap);
-  const referenceCandles = chooseReferenceCandles(referenceCandleMap, referenceTimeframe);
+
+  // Clip reference candles to the available execution data range.
+  // Without this, 1h reference candles spanning 1685 days create WF windows
+  // in periods where 5m execution data doesn't exist, causing 100% no_execution_window blocks.
+  const executionTimeframe = (familyDef.requiredData ?? [familyDef.timeframe]).includes("5m") ? "5m"
+    : (familyDef.requiredData ?? [familyDef.timeframe]).includes("1m") ? "1m" : null;
+  const executionCandleMap = executionTimeframe === "5m" ? (candles5m as CandleMap)
+    : executionTimeframe === "1m" ? (candles1m as CandleMap) : null;
+  let clippedReferenceCandleMap = referenceCandleMap;
+  if (executionCandleMap && referenceTimeframe !== executionTimeframe) {
+    const execCandles = Object.values(executionCandleMap).flat();
+    if (execCandles.length > 0) {
+      const execStart = execCandles.reduce((min, c) => c.candleTimeUtc < min ? c.candleTimeUtc : min, execCandles[0].candleTimeUtc);
+      const execEnd = execCandles.reduce((max, c) => c.candleTimeUtc > max ? c.candleTimeUtc : max, execCandles[0].candleTimeUtc);
+      clippedReferenceCandleMap = Object.fromEntries(
+        Object.entries(referenceCandleMap).map(([market, candles]) => [
+          market,
+          candles.filter((c: { candleTimeUtc: Date }) => c.candleTimeUtc >= execStart && c.candleTimeUtc <= execEnd)
+        ])
+      );
+    }
+  }
+
+  const referenceCandles = chooseReferenceCandles(clippedReferenceCandleMap, referenceTimeframe);
 
   if (referenceCandles.length === 0) {
     throw new Error(`No reference candles for block evaluation (${familyDef.timeframe})`);
