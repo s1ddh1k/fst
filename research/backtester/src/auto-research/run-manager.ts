@@ -5,6 +5,7 @@ import type {
   AutoResearchRunConfig,
   AutoResearchRunOutcome,
   AutoResearchRunReport,
+  AutoResearchRunVerification,
   CandidateBacktestEvaluation,
   CatalogEntryRecord,
   ProposalBatch,
@@ -28,6 +29,7 @@ export type AutoResearchRunState = {
   pendingProposal?: ProposalBatch;
   noTradeIterations: number;
   lineage?: ResearchLineage;
+  verification?: AutoResearchRunVerification;
 };
 
 type RunLockPayload = {
@@ -45,6 +47,7 @@ export type AutoResearchStatus = {
     | "validation"
     | "evaluation"
     | "review"
+    | "verifying"
     | "completed"
     | "failed"
     | "partial"
@@ -57,6 +60,7 @@ export type AutoResearchStatus = {
   candidateTotal?: number;
   bestCandidateId?: string;
   bestNetReturn?: number;
+  verification?: AutoResearchRunVerification;
 };
 
 function reviveDates<T>(value: T): T {
@@ -121,13 +125,14 @@ export async function loadRunState(outputDir: string): Promise<AutoResearchRunSt
       catalog: parsed.catalog ?? [],
       marketCodes: parsed.marketCodes ?? [],
       iterations: parsed.iterations ?? [],
-      outcome: parsed.outcome ?? "completed",
+      outcome: parsed.outcome ?? "partial",
       outcomeReason: parsed.outcomeReason,
       configRepairs: parsed.configRepairs ?? [],
       bestCandidate: parsed.bestCandidate,
       pendingProposal: parsed.pendingProposal,
       noTradeIterations: parsed.noTradeIterations ?? 0,
-      lineage: parsed.lineage
+      lineage: parsed.lineage,
+      verification: parsed.verification
     };
   } catch {
     return undefined;
@@ -185,8 +190,11 @@ export async function reconcilePartialRunStatus(outputDir: string): Promise<void
   try {
     const statusPath = path.join(outputDir, "status.json");
     const raw = JSON.parse(await readFile(statusPath, "utf8")) as AutoResearchStatus;
+    const completedButUnverified =
+      raw.phase === "completed" && raw.verification?.artifactAudit?.ok !== true;
+
     if (
-      raw.phase === "completed" ||
+      (raw.phase === "completed" && !completedButUnverified) ||
       raw.phase === "failed" ||
       raw.phase === "partial" ||
       raw.phase === "aborted" ||
@@ -199,7 +207,9 @@ export async function reconcilePartialRunStatus(outputDir: string): Promise<void
       ...raw,
       updatedAt: new Date().toISOString(),
       phase: "partial",
-      message: "Previous auto research run ended before reaching a terminal state."
+      message: completedButUnverified
+        ? "Previous auto research run claimed completion without verified artifacts."
+        : "Previous auto research run ended before reaching a terminal state."
     });
   } catch {
     // ignore missing or malformed status
@@ -239,6 +249,7 @@ export function toReport(state: AutoResearchRunState): AutoResearchRunReport {
     configRepairs: state.configRepairs,
     bestCandidate: state.bestCandidate,
     bestTradeCandidate: selectBestTradeCandidate(state.iterations),
-    lineage: state.lineage
+    lineage: state.lineage,
+    verification: state.verification
   };
 }

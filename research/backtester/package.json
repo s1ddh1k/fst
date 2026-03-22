@@ -7,6 +7,10 @@
     "build": "pnpm exec tsc -p tsconfig.json",
     "dev": "node --import tsx src/index.ts",
     "tune:bb": "node --import tsx src/tune-bb-blocks.ts",
+    "audit:bb": "node --import tsx src/audit-deterministic-bb.ts",
+    "audit:auto-research": "node --import tsx src/audit-auto-research.ts",
+    "replay:bb": "node --import tsx src/replay-deterministic-bb.ts",
+    "doctor:research": "node --import tsx src/doctor-research-stack.ts",
     "typecheck": "pnpm exec tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/**/*.test.ts"
   },

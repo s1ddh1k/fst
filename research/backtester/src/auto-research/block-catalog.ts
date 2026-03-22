@@ -1,6 +1,10 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { calculateCandidateRiskAdjustedScore } from "./ranking.js";
+import {
+  calculateCandidateRiskAdjustedScore,
+  resolveEvaluationMaxDrawdown,
+  resolveEvaluationTradeCount
+} from "./ranking.js";
 import type {
   CandidateBacktestEvaluation,
   StrategyFamilyDefinition,
@@ -115,8 +119,8 @@ export function promoteToValidatedBlock(params: {
     parameters: { ...evaluation.candidate.parameters },
     performance: {
       netReturn: evaluation.summary.netReturn,
-      maxDrawdown: evaluation.summary.maxDrawdown,
-      tradeCount: evaluation.summary.tradeCount,
+      maxDrawdown: resolveEvaluationMaxDrawdown(evaluation),
+      tradeCount: resolveEvaluationTradeCount(evaluation),
       positiveWindowRatio: evaluation.diagnostics.windows.positiveWindowRatio ?? 0,
       riskAdjustedScore: calculateCandidateRiskAdjustedScore(evaluation)
     },
@@ -156,15 +160,17 @@ export async function saveValidatedBlockCatalog(
   catalog: ValidatedBlockCatalog
 ): Promise<void> {
   await mkdir(path.dirname(catalogPath), { recursive: true });
+  const tempPath = `${catalogPath}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(
-    catalogPath,
-    JSON.stringify(
+    tempPath,
+    `${JSON.stringify(
       {
         ...catalog,
         updatedAt: nowIso()
       },
       null,
       2
-    )
+    )}\n`
   );
+  await rename(tempPath, catalogPath);
 }

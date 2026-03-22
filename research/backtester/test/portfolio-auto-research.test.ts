@@ -574,6 +574,8 @@ test("portfolio auto-research evaluates walk-forward candidates and preserves wi
   assert.equal(evaluation.diagnostics.windows.mode, "walk-forward");
   assert.ok((evaluation.diagnostics.windows.windowCount ?? 0) >= 2);
   assert.ok((evaluation.diagnostics.windows.positiveWindowCount ?? 0) >= 0);
+  assert.ok(typeof evaluation.diagnostics.windows.worstWindowMaxDrawdown === "number");
+  assert.ok((evaluation.diagnostics.windows.worstWindowMaxDrawdown ?? 0) >= 0);
   assert.ok(evaluation.summary.signalCount > 0);
   assert.equal(
     evaluation.diagnostics.coverage.rawBuySignals +

@@ -24,6 +24,7 @@ export * from "./limit-resolution.js";
 export * from "./ranking.js";
 export * from "./run-manager.js";
 export * from "./report-html.js";
+export * from "../audit-auto-research.js";
 export * from "./orchestrator.js";
 export * from "./block-families.js";
 export * from "./block-evaluator.js";

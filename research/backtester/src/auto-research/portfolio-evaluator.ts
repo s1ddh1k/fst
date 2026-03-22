@@ -462,12 +462,17 @@ function universeSizeSummary(result: MultiStrategyBacktestResult): {
 function buildWalkForwardCrossCheck(
   evaluation: CandidateBacktestEvaluation
 ): CandidateBacktestEvaluation["diagnostics"]["crossChecks"][number] {
+  const tradeCount =
+    evaluation.diagnostics.windows.totalClosedTrades ?? evaluation.summary.tradeCount;
+  const maxDrawdown =
+    evaluation.diagnostics.windows.worstWindowMaxDrawdown ?? evaluation.summary.maxDrawdown;
+
   return {
     mode: "walk-forward",
     status: "completed",
     netReturn: evaluation.summary.netReturn,
-    maxDrawdown: evaluation.summary.maxDrawdown,
-    tradeCount: evaluation.summary.tradeCount,
+    maxDrawdown,
+    tradeCount,
     bootstrapSignificant: evaluation.summary.bootstrapSignificant,
     randomPercentile: evaluation.summary.randomPercentile,
     testStartAt: evaluation.diagnostics.windows.testStartAt,
@@ -516,6 +521,8 @@ function completedCrossCheckWindowStats(
     negativeWindowCount: evaluation.diagnostics.windows.negativeWindowCount,
     bestWindowNetReturn: evaluation.diagnostics.windows.bestWindowNetReturn,
     worstWindowNetReturn: evaluation.diagnostics.windows.worstWindowNetReturn,
+    bestWindowMaxDrawdown: evaluation.diagnostics.windows.bestWindowMaxDrawdown,
+    worstWindowMaxDrawdown: evaluation.diagnostics.windows.worstWindowMaxDrawdown,
     totalClosedTrades: evaluation.diagnostics.windows.totalClosedTrades,
     windowCount: evaluation.diagnostics.windows.windowCount
   };
@@ -608,6 +615,8 @@ function buildHoldoutEvaluation(params: {
         negativeWindowCount: params.crossCheckWindows?.negativeWindowCount,
         bestWindowNetReturn: params.crossCheckWindows?.bestWindowNetReturn,
         worstWindowNetReturn: params.crossCheckWindows?.worstWindowNetReturn,
+        bestWindowMaxDrawdown: params.crossCheckWindows?.bestWindowMaxDrawdown,
+        worstWindowMaxDrawdown: params.crossCheckWindows?.worstWindowMaxDrawdown,
         totalClosedTrades: params.crossCheckWindows?.totalClosedTrades,
         windowCount: params.crossCheckWindows?.windowCount
       }
@@ -650,6 +659,7 @@ function buildPortfolioWalkForwardEvaluation(params: {
   }));
 
   const testReturns = results.map((window) => window.test.metrics.netReturn);
+  const testDrawdowns = results.map((window) => window.test.metrics.maxDrawdown);
   const positiveWindowCount = testReturns.filter((value) => value > 0).length;
   const negativeWindowCount = testReturns.filter((value) => value < 0).length;
   const totalClosedTrades = results.reduce((sum, window) => sum + window.test.completedTrades.length, 0);
@@ -804,6 +814,8 @@ function buildPortfolioWalkForwardEvaluation(params: {
         negativeWindowCount,
         bestWindowNetReturn: Math.max(...testReturns),
         worstWindowNetReturn: Math.min(...testReturns),
+        bestWindowMaxDrawdown: Math.min(...testDrawdowns),
+        worstWindowMaxDrawdown: Math.max(...testDrawdowns),
         totalClosedTrades
       }
     }

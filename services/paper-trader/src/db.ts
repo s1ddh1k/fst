@@ -18,6 +18,39 @@ import type {
   StrategyRegimeSnapshotRow
 } from "./types.js";
 
+const STRATEGY_REGIME_VERIFICATION_COLUMNS = [
+  ["verification_status", "TEXT"],
+  ["verification_source_kind", "TEXT"],
+  ["verification_output_dir", "TEXT"],
+  ["verification_checked_at", "TEXT"],
+  ["verification_details_json", "TEXT"]
+] as const;
+
+let strategyRegimeVerificationColumnsEnsured = false;
+
+function ensureStrategyRegimeVerificationColumns(): void {
+  if (strategyRegimeVerificationColumnsEnsured) {
+    return;
+  }
+
+  const db = getDb();
+  const existingColumns = new Set(
+    (
+      db.prepare("PRAGMA table_info(strategy_regimes)").all() as Array<{
+        name: string;
+      }>
+    ).map((row) => row.name)
+  );
+
+  for (const [columnName, columnType] of STRATEGY_REGIME_VERIFICATION_COLUMNS) {
+    if (!existingColumns.has(columnName)) {
+      db.exec(`ALTER TABLE strategy_regimes ADD COLUMN ${columnName} ${columnType}`);
+    }
+  }
+
+  strategyRegimeVerificationColumnsEnsured = true;
+}
+
 export async function closeDb(): Promise<void> {
   closeSqliteDb();
 }
@@ -28,6 +61,7 @@ export async function loadActiveStrategyRegimes(params: {
   timeframe: string;
   limit?: number;
 }): Promise<StrategyRegimeRow[]> {
+  ensureStrategyRegimeVerificationColumns();
   const db = getDb();
   const rows = db.prepare(
     `
@@ -51,6 +85,7 @@ export async function loadActiveStrategyRegimes(params: {
         AND universe_name = ?
         AND timeframe = ?
         AND is_active = 1
+        AND verification_status = 'verified'
       ORDER BY rank ASC
       LIMIT ?
     `
@@ -75,6 +110,7 @@ export async function loadActiveStrategyRegimes(params: {
 }
 
 export async function loadStrategyRegimeById(id: number): Promise<StrategyRegimeRow | null> {
+  ensureStrategyRegimeVerificationColumns();
   const db = getDb();
   const row = db.prepare(
     `
@@ -96,6 +132,7 @@ export async function loadStrategyRegimeById(id: number): Promise<StrategyRegime
       FROM strategy_regimes
       WHERE id = ?
         AND is_active = 1
+        AND verification_status = 'verified'
       LIMIT 1
     `
   ).get(id) as Record<string, unknown> | undefined;
@@ -123,6 +160,7 @@ export async function loadStrategyRegimeById(id: number): Promise<StrategyRegime
 }
 
 export async function listActiveStrategyRegimeSnapshots(limit = 20): Promise<StrategyRegimeSnapshotRow[]> {
+  ensureStrategyRegimeVerificationColumns();
   const db = getDb();
   const rows = db.prepare(
     `
@@ -149,6 +187,7 @@ export async function listActiveStrategyRegimeSnapshots(limit = 20): Promise<Str
         MAX(updated_at) AS updated_at
       FROM strategy_regimes
       WHERE is_active = 1
+        AND verification_status = 'verified'
       GROUP BY regime_name, universe_name, timeframe, holdout_days
       ORDER BY MAX(updated_at) DESC, regime_name ASC, timeframe ASC
       LIMIT ?

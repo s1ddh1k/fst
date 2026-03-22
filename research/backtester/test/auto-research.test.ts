@@ -12,6 +12,7 @@ import {
   getStrategyFamilies,
   loadLineageSnapshot,
   passesPromotionGate,
+  writeAutoResearchArtifactAudit,
   type AutoResearchRunConfig,
   type ResearchLlmClient,
   type CandidateBacktestEvaluation,
@@ -708,7 +709,7 @@ test("auto research rejects keep_searching reviews that omit next candidates", a
       allowCodeMutation: false,
       minNetReturnForPromotion: 0.05
     }),
-    /Invalid review decision: LLM review returned keep_searching without any unique next candidates/
+    /LLM review failed: LLM review returned keep_searching without any unique next candidates/
   );
 
   const savedStatus = JSON.parse(await readFile(path.join(outputDir, "status.json"), "utf8"));
@@ -1940,7 +1941,7 @@ test("auto research resume continues from saved run-state", async () => {
   assert.equal(proposeCalls, 1);
   const resumedStatus = JSON.parse(await readFile(path.join(outputDir, "status.json"), "utf8"));
   const resumedLog = await readFile(path.join(outputDir, "run.log"), "utf8");
-  assert.equal(resumedStatus.phase, "completed");
+  assert.equal(resumedStatus.phase, "partial");
   assert.match(resumedLog, /iteration 2\/2/);
 });
 
@@ -3443,4 +3444,180 @@ test("auto research v2 repairs empty keep_searching batches with deterministic c
       iteration.review.observations.some((observation) => /Objective compiler supplied a deterministic next batch/i.test(observation))
     )
   );
+});
+
+test("auto research completed runs persist artifact audit verification and iteration provenance", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-audit-"));
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "verified proposal",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "verified-01",
+            familyId: "relative-momentum-pullback",
+            thesis: "verified candidate",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.95,
+              trailAtrMult: 2.3
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration({ evaluations }) {
+      return {
+        summary: "promote verified winner",
+        verdict: "promote_candidate",
+        promotedCandidateId: evaluations[0]?.candidate.candidateId,
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, 0.12);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  const report = await orchestrator.run({
+    strategyFamilyIds: ["relative-momentum-pullback"],
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 3,
+    limit: 2000,
+    holdoutDays: 30,
+    trainingDays: 90,
+    stepDays: 30,
+    iterations: 1,
+    candidatesPerIteration: 1,
+    parallelism: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false,
+    loopVersion: "v2",
+    minNetReturnForPromotion: 0.1
+  });
+
+  const savedState = JSON.parse(await readFile(path.join(outputDir, "run-state.json"), "utf8"));
+  const savedStatus = JSON.parse(await readFile(path.join(outputDir, "status.json"), "utf8"));
+  const savedAudit = JSON.parse(await readFile(path.join(outputDir, "artifact-audit.json"), "utf8"));
+
+  assert.equal(report.outcome, "completed");
+  assert.equal(savedStatus.phase, "completed");
+  assert.equal(savedState.verification.artifactAudit.ok, true);
+  assert.equal(savedAudit.ok, true);
+  assert.equal(savedState.iterations[0].provenance.proposalSource, "llm");
+  assert.equal(savedState.iterations[0].provenance.reviewUsedObjectiveGovernance, false);
+});
+
+test("auto research artifact audit fails after leaderboard tampering", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-audit-tamper-"));
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "tamper proposal",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "tamper-01",
+            familyId: "relative-momentum-pullback",
+            thesis: "tamper candidate",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.95,
+              trailAtrMult: 2.3
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration({ evaluations }) {
+      return {
+        summary: "promote tamper winner",
+        verdict: "promote_candidate",
+        promotedCandidateId: evaluations[0]?.candidate.candidateId,
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, 0.12);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  await orchestrator.run({
+    strategyFamilyIds: ["relative-momentum-pullback"],
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 3,
+    limit: 2000,
+    holdoutDays: 30,
+    trainingDays: 90,
+    stepDays: 30,
+    iterations: 1,
+    candidatesPerIteration: 1,
+    parallelism: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false,
+    loopVersion: "v2",
+    minNetReturnForPromotion: 0.1
+  });
+
+  await writeFile(
+    path.join(outputDir, "leaderboard.json"),
+    `${JSON.stringify([{ candidateId: "corrupted" }], null, 2)}\n`
+  );
+
+  const audit = await writeAutoResearchArtifactAudit(outputDir);
+  assert.equal(audit.ok, false);
+  assert.match(audit.failureReason ?? "", /leaderboard\.json/i);
 });

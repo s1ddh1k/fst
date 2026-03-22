@@ -34,6 +34,7 @@ import {
   promoteToValidatedBlock,
   saveValidatedBlockCatalog
 } from "./block-catalog.js";
+import { writeAutoResearchArtifactAudit } from "../audit-auto-research.js";
 import { getBlockFamilyById } from "./block-families.js";
 import { getPortfolioCompositionFamilies } from "./portfolio-composition-families.js";
 import type {
@@ -41,6 +42,7 @@ import type {
   AutoResearchRunConfig,
   AutoResearchRunOutcome,
   AutoResearchRunReport,
+  AutoResearchRunVerification,
   CandidateBacktestEvaluation,
   CodeMutationExecutionResult,
   CatalogEntryRecord,
@@ -242,6 +244,23 @@ function summarizeMarkdown(report: AutoResearchRunReport): string {
 
 function compareEvaluations(left: CandidateBacktestEvaluation, right: CandidateBacktestEvaluation): number {
   return compareCandidateEvaluations(left, right);
+}
+
+function defaultOutcomeMessage(outcome: AutoResearchRunOutcome): string {
+  switch (outcome) {
+    case "completed":
+      return "Auto research run completed.";
+    case "partial":
+      return "Auto research run ended without reaching a promotable terminal outcome.";
+    case "failed":
+      return "Auto research run failed.";
+    case "aborted":
+      return "Auto research run aborted.";
+    case "invalid_config":
+      return "Auto research run has an invalid configuration.";
+    default:
+      return "Auto research run finished.";
+  }
 }
 
 async function runShellCommand(command: string, cwd: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
@@ -1900,6 +1919,7 @@ async function persistRunArtifacts(params: {
   pendingProposal?: ProposalBatch;
   noTradeIterations: number;
   lineage?: ResearchLineage;
+  verification?: AutoResearchRunVerification;
   status?: AutoResearchStatus;
   liveEvaluations?: CandidateBacktestEvaluation[];
 }): Promise<AutoResearchRunReport> {
@@ -1916,7 +1936,8 @@ async function persistRunArtifacts(params: {
     bestCandidate: params.bestCandidate,
     pendingProposal: params.pendingProposal,
     noTradeIterations: params.noTradeIterations,
-    lineage: params.lineage
+    lineage: params.lineage,
+    verification: params.verification
   };
   const report = toReport(state);
   const rawLeaderboard = buildLeaderboard(params.iterations, params.liveEvaluations);
@@ -2404,7 +2425,10 @@ export function createAutoResearchOrchestrator(deps: {
         }
 
         const iterations: ResearchIterationRecord[] = restored?.iterations ?? [];
-        let outcome: AutoResearchRunOutcome = restored?.outcome ?? "completed";
+        let outcome: AutoResearchRunOutcome =
+          restored?.outcome && restored.outcome !== "completed"
+            ? restored.outcome
+            : "partial";
         let outcomeReason = restored?.outcomeReason;
         const configRepairs: AutoResearchConfigRepair[] = restored?.configRepairs ?? [];
         let catalog: CatalogEntryRecord[] = refreshCatalogImplementations(
@@ -3108,6 +3132,12 @@ export function createAutoResearchOrchestrator(deps: {
           codeMutationResults: normalizedCodeMutationResults,
           validationResults,
           evaluations,
+          provenance: {
+            proposalSource: proposalResult!.source,
+            proposalFailureMessage: proposalResult!.note,
+            reviewUsedObjectiveGovernance: reviewResult!.usedObjectiveGovernance,
+            reviewFailureMessage: reviewResult!.reviewFailureMessage
+          },
           review: {
             ...review,
             observations: [
@@ -3281,21 +3311,49 @@ export function createAutoResearchOrchestrator(deps: {
           await saveValidatedBlockCatalog(catalogPath, blockCatalog);
         }
 
-        const report = toReport({
-          generatedAt: new Date().toISOString(),
+        let verification: AutoResearchRunVerification | undefined;
+        const terminalGeneratedAt = new Date().toISOString();
+        const terminalPendingProposal = outcome === "invalid_config" ? undefined : nextProposal;
+        const preAuditOutcome = outcome === "completed" ? "partial" : outcome;
+        const preAuditPhase = outcome === "completed" ? "verifying" : outcome;
+        const preAuditMessage = outcome === "completed"
+          ? "Terminal candidate loop completed. Verifying auto-research artifacts."
+          : (outcomeReason ?? defaultOutcomeMessage(outcome));
+
+        await queueArtifactWrite(() => persistRunArtifacts({
+          outputDir: config.outputDir,
+          generatedAt: terminalGeneratedAt,
           config,
           families: runtimeFamilies,
           catalog,
           marketCodes,
           iterations,
-          outcome,
+          outcome: preAuditOutcome,
           outcomeReason,
           configRepairs,
           bestCandidate,
-          pendingProposal: undefined,
+          pendingProposal: terminalPendingProposal,
           noTradeIterations,
-          lineage
-        });
+          lineage,
+          verification,
+          status: {
+            updatedAt: new Date().toISOString(),
+            phase: preAuditPhase,
+            iteration: iterations.length,
+            totalIterations: config.iterations,
+            message: preAuditMessage
+          }
+        }));
+
+        await releaseRunLock(config.outputDir);
+        const artifactAudit = await writeAutoResearchArtifactAudit(config.outputDir);
+        verification = { artifactAudit };
+        if (outcome === "completed" && !artifactAudit.ok) {
+          outcome = "failed";
+          outcomeReason = `Auto research artifact audit failed: ${artifactAudit.failureReason ?? "unknown mismatch"}`;
+          await log(`[auto-research] artifact-audit failed ${artifactAudit.failureReason ?? "unknown mismatch"}`);
+        }
+
         if (config.loopVersion === "v2") {
           await appendLineageEvent({
             outputDir: config.outputDir,
@@ -3308,15 +3366,16 @@ export function createAutoResearchOrchestrator(deps: {
                 outcome,
                 outcomeReason,
                 iterations: iterations.length,
-                bestCandidateId: bestCandidate?.candidate.candidateId
+                bestCandidateId: bestCandidate?.candidate.candidateId,
+                artifactAuditOk: artifactAudit.ok
               }
             }
           });
         }
 
-        await queueArtifactWrite(() => persistRunArtifacts({
+        const finalReport = await queueArtifactWrite(() => persistRunArtifacts({
           outputDir: config.outputDir,
-          generatedAt: report.generatedAt,
+          generatedAt: new Date().toISOString(),
           config,
           families: runtimeFamilies,
           catalog,
@@ -3326,26 +3385,21 @@ export function createAutoResearchOrchestrator(deps: {
           outcomeReason,
           configRepairs,
           bestCandidate,
-          pendingProposal: outcome === "invalid_config" ? undefined : nextProposal,
+          pendingProposal: terminalPendingProposal,
           noTradeIterations,
           lineage,
+          verification,
           status: {
             updatedAt: new Date().toISOString(),
             phase: outcome,
-            iteration: report.iterations.length,
+            iteration: iterations.length,
             totalIterations: config.iterations,
-            message: outcomeReason ?? "Auto research run completed."
+            message: outcomeReason ?? defaultOutcomeMessage(outcome),
+            verification
           }
         }));
-        await saveRunStatus(config.outputDir, {
-          updatedAt: new Date().toISOString(),
-          phase: outcome,
-          iteration: report.iterations.length,
-          totalIterations: config.iterations,
-          message: outcomeReason ?? "Auto research run completed."
-        });
 
-        return report;
+        return finalReport;
       } finally {
         process.removeListener("SIGINT", handleAbort);
         process.removeListener("SIGTERM", handleAbort);

@@ -19,6 +19,7 @@ AUTO_RESEARCH_STAGE="${BB_AUTO_STAGE:-block}"
 HOLDOUT_DAYS="${BB_AUTO_HOLDOUT_DAYS:-365}"
 TRAINING_DAYS="${BB_AUTO_TRAINING_DAYS:-365}"
 STEP_DAYS="${BB_AUTO_STEP_DAYS:-90}"
+OVERALL_EXIT=0
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -90,7 +91,20 @@ for index in "${!FAMILIES[@]}"; do
     echo "[bb-seeded-auto] label=$label family=$family finished_at=$(date --iso-8601=seconds)"
   } >"$log_path" 2>&1 || {
     echo "[bb-seeded-auto] label=$label family=$family failed_at=$(date --iso-8601=seconds)" >>"$log_path"
+    OVERALL_EXIT=1
+    continue
   }
+
+  child_phase="$(node -e 'const fs=require("fs"); const file=process.argv[1]; try { const parsed=JSON.parse(fs.readFileSync(file, "utf8")); process.stdout.write(String(parsed.phase ?? "")); } catch { process.stdout.write(""); }' "$output_dir/status.json")"
+  child_verified="false"
+  if node -e 'const fs=require("fs"); const file=process.argv[1]; try { const parsed=JSON.parse(fs.readFileSync(file, "utf8")); process.exit(parsed?.verification?.artifactAudit?.ok === true ? 0 : 1); } catch { process.exit(1); }' "$output_dir/status.json"; then
+    child_verified="true"
+  fi
+  if [[ "$child_phase" != "completed" || "$child_verified" != "true" ]]; then
+    echo "[bb-seeded-auto] label=$label family=$family child_phase=$child_phase child_verified=$child_verified treated_as_failure" >>"$log_path"
+    OVERALL_EXIT=1
+  fi
 done
 
 echo "$OUTPUT_ROOT"
+exit "$OVERALL_EXIT"

@@ -1,4 +1,8 @@
 import { getDb, closeDb as sharedCloseDb } from "./sqlite.js";
+import {
+  resolveStrategyRegimePublicationVerification,
+  type StrategyRegimePublicationVerification
+} from "./strategy-regime-verification.js";
 
 import {
   getMarketStateConfigKey,
@@ -75,6 +79,39 @@ function toOptionalBenchmarkRegime(
     default:
       return undefined;
   }
+}
+
+const STRATEGY_REGIME_VERIFICATION_COLUMNS = [
+  ["verification_status", "TEXT"],
+  ["verification_source_kind", "TEXT"],
+  ["verification_output_dir", "TEXT"],
+  ["verification_checked_at", "TEXT"],
+  ["verification_details_json", "TEXT"]
+] as const;
+
+let strategyRegimeVerificationColumnsEnsured = false;
+
+function ensureStrategyRegimeVerificationColumns(): void {
+  if (strategyRegimeVerificationColumnsEnsured) {
+    return;
+  }
+
+  const db = getDb();
+  const existingColumns = new Set(
+    (
+      db.prepare("PRAGMA table_info(strategy_regimes)").all() as Array<{
+        name: string;
+      }>
+    ).map((row) => row.name)
+  );
+
+  for (const [columnName, columnType] of STRATEGY_REGIME_VERIFICATION_COLUMNS) {
+    if (!existingColumns.has(columnName)) {
+      db.exec(`ALTER TABLE strategy_regimes ADD COLUMN ${columnName} ${columnType}`);
+    }
+  }
+
+  strategyRegimeVerificationColumnsEnsured = true;
 }
 
 export async function closeDb(): Promise<void> {
@@ -876,6 +913,7 @@ export async function replaceStrategyRegimes(params: {
   universeName: string;
   timeframe: string;
   holdoutDays: number;
+  verification: StrategyRegimePublicationVerification;
   metadata?: {
     sourceLabel?: string;
     trainingDays?: number;
@@ -902,6 +940,8 @@ export async function replaceStrategyRegimes(params: {
   }>;
 }): Promise<void> {
   const db = getDb();
+  ensureStrategyRegimeVerificationColumns();
+  const verification = await resolveStrategyRegimePublicationVerification(params.verification);
 
   const trx = db.transaction(() => {
     db.prepare(
@@ -934,6 +974,11 @@ export async function replaceStrategyRegimes(params: {
             train_end_at,
             test_start_at,
             test_end_at,
+            verification_status,
+            verification_source_kind,
+            verification_output_dir,
+            verification_checked_at,
+            verification_details_json,
             strategy_type,
             strategy_names,
             parameters_json,
@@ -948,7 +993,7 @@ export async function replaceStrategyRegimes(params: {
             updated_at
           )
           VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now')
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now')
           )
         `
       ).run(
@@ -967,6 +1012,11 @@ export async function replaceStrategyRegimes(params: {
         params.metadata?.trainEndAt?.toISOString() ?? null,
         params.metadata?.testStartAt?.toISOString() ?? null,
         params.metadata?.testEndAt?.toISOString() ?? null,
+        verification.status,
+        verification.sourceKind,
+        verification.outputDir,
+        verification.checkedAt,
+        JSON.stringify(verification.details),
         row.strategyType,
         JSON.stringify(row.strategyNames),
         JSON.stringify(row.parameters),

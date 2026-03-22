@@ -26,6 +26,8 @@ STATUS_PATH="$OUTPUT_ROOT/status.json"
 LOG_PATH="$OUTPUT_ROOT/batch.log"
 LAST_STATUS_PHASE="starting"
 LAST_STATUS_DETAIL="deadline batch created"
+BATCH_FAILURES=0
+BATCH_RUNS=0
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -60,12 +62,22 @@ log() {
 should_resume_output() {
   local output_dir="$1"
   local status_path="$output_dir/status.json"
+  local phase
+  local verified
 
   if [[ ! -f "$status_path" ]]; then
     return 0
   fi
 
-  if grep -q '"phase": "completed"' "$status_path"; then
+  phase="$(node -e 'const fs=require("fs"); const file=process.argv[1]; try { const parsed=JSON.parse(fs.readFileSync(file, "utf8")); process.stdout.write(String(parsed.phase ?? "")); } catch { process.stdout.write(""); }' "$status_path")"
+  verified="$(node -e 'const fs=require("fs"); const file=process.argv[1]; try { const parsed=JSON.parse(fs.readFileSync(file, "utf8")); process.stdout.write(parsed?.verification?.artifactAudit?.ok === true ? "true" : "false"); } catch { process.stdout.write("false"); }' "$status_path")"
+  case "$phase" in
+    failed|aborted|invalid_config)
+      return 1
+      ;;
+  esac
+
+  if [[ "$phase" == "completed" && "$verified" == "true" ]]; then
     return 1
   fi
 
@@ -85,6 +97,9 @@ run_family() {
   local exit_code=0
   local timed_out=false
   local resume_json="null"
+  local child_phase="missing"
+  local child_message=""
+  local child_verified=false
   local -a command
 
   mkdir -p "$family_output"
@@ -152,6 +167,14 @@ run_family() {
     timed_out=true
   fi
 
+  if [[ -f "$family_output/status.json" ]]; then
+    child_phase="$(node -e 'const fs=require("fs"); const file=process.argv[1]; try { const parsed=JSON.parse(fs.readFileSync(file, "utf8")); process.stdout.write(String(parsed.phase ?? "")); } catch { process.stdout.write(""); }' "$family_output/status.json")"
+    child_message="$(node -e 'const fs=require("fs"); const file=process.argv[1]; try { const parsed=JSON.parse(fs.readFileSync(file, "utf8")); process.stdout.write(String(parsed.message ?? "")); } catch { process.stdout.write(""); }' "$family_output/status.json")"
+    if node -e 'const fs=require("fs"); const file=process.argv[1]; try { const parsed=JSON.parse(fs.readFileSync(file, "utf8")); process.exit(parsed?.verification?.artifactAudit?.ok === true ? 0 : 1); } catch { process.exit(1); }' "$family_output/status.json"; then
+      child_verified=true
+    fi
+  fi
+
   cat >"$family_status" <<JSON
 {
   "updatedAt": "$(date --iso-8601=seconds)",
@@ -162,17 +185,36 @@ run_family() {
   "timedOut": $timed_out,
   "timeoutSeconds": $effective_timeout_seconds,
   "logPath": "$family_log",
-  "resumeFrom": $resume_json
+  "resumeFrom": $resume_json,
+  "childPhase": "$child_phase",
+  "childVerified": $child_verified,
+  "childMessage": $(printf '%s' "$child_message" | node -e 'let data=""; process.stdin.on("data", chunk => data += chunk); process.stdin.on("end", () => process.stdout.write(JSON.stringify(data)));')
 }
 JSON
 
+  BATCH_RUNS=$((BATCH_RUNS + 1))
+  if [[ "$exit_code" != "0" || "$child_phase" != "completed" || "$child_verified" != "true" ]]; then
+    BATCH_FAILURES=$((BATCH_FAILURES + 1))
+  fi
+
   write_status "running" "lastCompleted label=$label family=$family attempt=$attempt exitCode=$exit_code"
-  log "finish label=$label family=$family attempt=$attempt exitCode=$exit_code timeoutSeconds=$effective_timeout_seconds"
+  log "finish label=$label family=$family attempt=$attempt exitCode=$exit_code childPhase=$child_phase childVerified=$child_verified timeoutSeconds=$effective_timeout_seconds"
+
+  if [[ "$exit_code" != "0" || "$child_phase" != "completed" || "$child_verified" != "true" ]]; then
+    return 1
+  fi
+
+  return 0
 }
 
 handle_exit() {
   local exit_code=$?
   if (( exit_code == 0 )); then
+    return
+  fi
+
+  if [[ "$LAST_STATUS_PHASE" == "failed" || "$LAST_STATUS_PHASE" == "partial" ]]; then
+    printf '[%s] wrapper exited nonzero exitCode=%s lastStatus=%s\n' "$(date --iso-8601=seconds)" "$exit_code" "$LAST_STATUS_DETAIL" >>"$LOG_PATH"
     return
   fi
 
@@ -210,9 +252,17 @@ while [[ "$(date +%s)" -lt "$DEADLINE_EPOCH" ]]; do
 
     label="${item%%:*}"
     family="${item#*:}"
-    run_family "$label" "$family" "$attempt"
+    if ! run_family "$label" "$family" "$attempt"; then
+      true
+    fi
   done
 done
 
-write_status "completed" "deadline reached"
+if (( BATCH_FAILURES > 0 )); then
+  write_status "partial" "deadline reached with $BATCH_FAILURES failing family runs across $BATCH_RUNS attempts"
+  log "deadline batch completed with failures count=$BATCH_FAILURES runs=$BATCH_RUNS"
+  exit 1
+fi
+
+write_status "completed" "deadline reached with all family runs completed successfully"
 log "deadline batch completed"

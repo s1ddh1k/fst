@@ -250,6 +250,11 @@ CREATE TABLE IF NOT EXISTS strategy_regimes (
   train_end_at TEXT,
   test_start_at TEXT,
   test_end_at TEXT,
+  verification_status TEXT,
+  verification_source_kind TEXT,
+  verification_output_dir TEXT,
+  verification_checked_at TEXT,
+  verification_details_json TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

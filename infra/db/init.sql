@@ -271,7 +271,12 @@ ALTER TABLE strategy_regimes
   ADD COLUMN IF NOT EXISTS train_start_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS train_end_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS test_start_at TIMESTAMPTZ,
-  ADD COLUMN IF NOT EXISTS test_end_at TIMESTAMPTZ;
+  ADD COLUMN IF NOT EXISTS test_end_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS verification_status TEXT,
+  ADD COLUMN IF NOT EXISTS verification_source_kind TEXT,
+  ADD COLUMN IF NOT EXISTS verification_output_dir TEXT,
+  ADD COLUMN IF NOT EXISTS verification_checked_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS verification_details_json JSONB;
 
 CREATE TABLE IF NOT EXISTS paper_sessions (
   id BIGSERIAL PRIMARY KEY,

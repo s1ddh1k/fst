@@ -42,6 +42,7 @@ import {
   createAutoResearchOrchestrator
 } from "./auto-research/index.js";
 import type { Candle } from "./types.js";
+import type { StrategyRegimePublicationVerification } from "./strategy-regime-verification.js";
 import { resolveWorkspaceRelativePath } from "./workspace-path.js";
 
 function getOption(args: string[], key: string): string | undefined {
@@ -265,6 +266,7 @@ async function main(): Promise<void> {
   const paperCandidates = process.argv.includes("--paper-candidates");
   const portfolioSweep = process.argv.includes("--portfolio-sweep");
   const saveRegime = process.argv.includes("--save-regime");
+  const unsafeAllowUnverifiedPublish = process.argv.includes("--unsafe-allow-unverified-publish");
   const scoredBaseline = process.argv.includes("--scored-baseline");
   const scoredSweep = process.argv.includes("--scored-sweep");
   const scoredWalkForward = process.argv.includes("--scored-walk-forward");
@@ -299,6 +301,11 @@ async function main(): Promise<void> {
     getOption(process.argv, "--auto-research-output") ??
     `research/backtester/artifacts/auto-research/${new Date().toISOString().replace(/[:.]/g, "-")}`;
   const resolvedAutoResearchOutput = resolveWorkspaceRelativePath(autoResearchOutput, process.cwd());
+  const publishVerificationDirOption = getOption(process.argv, "--publish-verification-dir");
+  const publishVerificationKindOption = getOption(process.argv, "--publish-verification-kind");
+  const resolvedPublishVerificationDir = publishVerificationDirOption
+    ? resolveWorkspaceRelativePath(publishVerificationDirOption, process.cwd())
+    : undefined;
   const autoResearchStage = getOption(process.argv, "--stage") as "block" | "portfolio" | "auto" | undefined;
   const autoResearchBlockCatalog = getOption(process.argv, "--block-catalog");
   const autoResearchResume = getOption(process.argv, "--auto-research-resume");
@@ -388,6 +395,27 @@ async function main(): Promise<void> {
     requestedMinCandles ?? String(Math.max(150, limit)),
     10
   );
+
+  function getPublicationVerification(targetLabel: string): StrategyRegimePublicationVerification {
+    if (resolvedPublishVerificationDir) {
+      return {
+        kind: publishVerificationKindOption === "deterministic-bb" ? "deterministic_bb" : "auto_research",
+        outputDir: resolvedPublishVerificationDir
+      };
+    }
+
+    if (unsafeAllowUnverifiedPublish) {
+      return {
+        kind: "unsafe_override",
+        reason: `legacy_cli_publish:${targetLabel}`
+      };
+    }
+
+    throw new Error(
+      `Publishing ${targetLabel} requires a verified research manifest. Pass --publish-verification-dir <dir> ` +
+        `[--publish-verification-kind auto-research|deterministic-bb] or explicitly override with --unsafe-allow-unverified-publish.`
+    );
+  }
 
   try {
     if (autoResearch) {
@@ -916,6 +944,7 @@ async function main(): Promise<void> {
             universeName,
             timeframe,
             holdoutDays,
+            verification: getPublicationVerification(regimeName),
             metadata: {
               sourceLabel: scoredWalkForward ? "scored-walk-forward" : "scored-holdout-sweep",
               trainingDays,
@@ -1040,6 +1069,7 @@ async function main(): Promise<void> {
             universeName,
             timeframe,
             holdoutDays,
+            verification: getPublicationVerification("universe-portfolio-recommendation"),
             metadata: {
               sourceLabel: "universe-cross-sectional",
               minMarkets: maxPositions,
@@ -1060,6 +1090,7 @@ async function main(): Promise<void> {
             universeName,
             timeframe,
             holdoutDays,
+            verification: getPublicationVerification("paper-trading-candidate"),
             metadata: {
               sourceLabel: "universe-cross-sectional-paper",
               minMarkets: maxPositions,
@@ -1285,6 +1316,9 @@ async function main(): Promise<void> {
           universeName,
           timeframe,
           holdoutDays,
+          verification: getPublicationVerification(
+            candidateWalkForward ? "candidate-walk-forward-recommendation" : "walk-forward-recommendation"
+          ),
           metadata: {
             sourceLabel: candidateWalkForward ? "candidate-walk-forward" : "walk-forward-sweep",
             trainingDays,
@@ -1346,6 +1380,7 @@ async function main(): Promise<void> {
           universeName,
           timeframe,
           holdoutDays,
+          verification: getPublicationVerification("paper-trading-candidate"),
           metadata: {
             sourceLabel: "walk-forward-paper-candidates",
             trainingDays,
@@ -1453,6 +1488,7 @@ async function main(): Promise<void> {
         universeName,
         timeframe,
         holdoutDays,
+        verification: getPublicationVerification("portfolio-recommendation"),
         metadata: {
           sourceLabel: "portfolio-sweep",
           minMarkets,
@@ -1568,6 +1604,9 @@ async function main(): Promise<void> {
           universeName,
           timeframe,
           holdoutDays,
+          verification: getPublicationVerification(
+            candidateSweep ? "candidate-holdout-recommendation" : "strategy-recommendation"
+          ),
           metadata: {
             sourceLabel: candidateSweep
               ? "candidate-holdout-sweep"

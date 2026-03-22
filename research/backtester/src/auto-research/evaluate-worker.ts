@@ -317,6 +317,7 @@ async function main(): Promise<void> {
       const slippagePaid = summary.scoredWindows.reduce((sum, window) => sum + window.metrics.slippagePaid, 0);
       const resolved = getResolvedWalkForwardConfig(payload.config);
       const windowReturns = summary.windows.map((window) => window.test.netReturn);
+      const windowDrawdowns = summary.windows.map((window) => window.test.maxDrawdown);
       const positiveWindowCount = windowReturns.filter((value) => value > 0).length;
       const negativeWindowCount = windowReturns.filter((value) => value < 0).length;
       const totalClosedTrades = summary.windows.reduce((sum, window) => sum + window.test.tradeCount, 0);
@@ -357,7 +358,7 @@ async function main(): Promise<void> {
         },
         diagnostics: {
           coverage: {
-            tradeCount: summary.averageTestTradeCount,
+            tradeCount: totalClosedTrades,
             signalCount: aggregateSignals.signalCount,
             ghostSignalCount: aggregateSignals.ghostSignalCount,
             rejectedOrdersCount: summary.scoredWindows.reduce(
@@ -407,6 +408,10 @@ async function main(): Promise<void> {
             negativeWindowCount,
             bestWindowNetReturn: windowReturns.length > 0 ? Math.max(...windowReturns) : undefined,
             worstWindowNetReturn: windowReturns.length > 0 ? Math.min(...windowReturns) : undefined,
+            bestWindowMaxDrawdown:
+              windowDrawdowns.length > 0 ? Math.min(...windowDrawdowns) : undefined,
+            worstWindowMaxDrawdown:
+              windowDrawdowns.length > 0 ? Math.max(...windowDrawdowns) : undefined,
             totalClosedTrades
           }
         },

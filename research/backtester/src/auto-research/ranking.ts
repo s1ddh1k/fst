@@ -8,8 +8,14 @@ function positiveWindowRatio(evaluation: CandidateBacktestEvaluation): number {
   return evaluation.diagnostics.windows.positiveWindowRatio ?? 0;
 }
 
-function totalClosedTrades(evaluation: CandidateBacktestEvaluation): number {
+export function resolveEvaluationTradeCount(evaluation: CandidateBacktestEvaluation): number {
   return evaluation.diagnostics.windows.totalClosedTrades ?? evaluation.summary.tradeCount;
+}
+
+export function resolveEvaluationMaxDrawdown(
+  evaluation: CandidateBacktestEvaluation
+): number {
+  return evaluation.diagnostics.windows.worstWindowMaxDrawdown ?? evaluation.summary.maxDrawdown;
 }
 
 function worstWindowNetReturn(evaluation: CandidateBacktestEvaluation): number {
@@ -21,7 +27,7 @@ function windowCount(evaluation: CandidateBacktestEvaluation): number {
 }
 
 function tradefulScore(evaluation: CandidateBacktestEvaluation): number {
-  return evaluation.summary.tradeCount > 0 ? 1 : 0;
+  return resolveEvaluationTradeCount(evaluation) > 0 ? 1 : 0;
 }
 
 function profitabilityTier(evaluation: CandidateBacktestEvaluation): number {
@@ -57,12 +63,13 @@ export function calculateCandidateRiskAdjustedScore(
     return Number.NEGATIVE_INFINITY;
   }
 
-  const trades = totalClosedTrades(evaluation);
+  const trades = resolveEvaluationTradeCount(evaluation);
   const windows = windowCount(evaluation);
   const percentile = randomPercentile(evaluation);
+  const maxDrawdown = resolveEvaluationMaxDrawdown(evaluation);
 
   let score = evaluation.summary.netReturn;
-  score -= evaluation.summary.maxDrawdown * 1.25;
+  score -= maxDrawdown * 1.25;
   score += positiveWindowRatio(evaluation) * 0.15;
   score += worstWindowNetReturn(evaluation) * 0.35;
   score += Math.min(trades, 20) * 0.0025;
@@ -100,7 +107,7 @@ export function passesPromotionGate(
 
   if (
     config?.minTrades !== undefined &&
-    evaluation.summary.tradeCount < config.minTrades
+    resolveEvaluationTradeCount(evaluation) < config.minTrades
   ) {
     return false;
   }
@@ -111,7 +118,7 @@ export function passesPromotionGate(
   }
 
   const maxDrawdown = config?.maxDrawdown ?? DEFAULT_MAX_DRAWDOWN_FOR_PROMOTION;
-  if (evaluation.summary.maxDrawdown > maxDrawdown) {
+  if (resolveEvaluationMaxDrawdown(evaluation) > maxDrawdown) {
     return false;
   }
 
@@ -196,14 +203,16 @@ export function compareCandidateEvaluations(
     return right.summary.netReturn - left.summary.netReturn;
   }
 
-  const leftClosedTrades = totalClosedTrades(left);
-  const rightClosedTrades = totalClosedTrades(right);
+  const leftClosedTrades = resolveEvaluationTradeCount(left);
+  const rightClosedTrades = resolveEvaluationTradeCount(right);
   if (leftClosedTrades !== rightClosedTrades) {
     return rightClosedTrades - leftClosedTrades;
   }
 
-  if (left.summary.maxDrawdown !== right.summary.maxDrawdown) {
-    return left.summary.maxDrawdown - right.summary.maxDrawdown;
+  const leftMaxDrawdown = resolveEvaluationMaxDrawdown(left);
+  const rightMaxDrawdown = resolveEvaluationMaxDrawdown(right);
+  if (leftMaxDrawdown !== rightMaxDrawdown) {
+    return leftMaxDrawdown - rightMaxDrawdown;
   }
 
   return right.summary.tradeCount - left.summary.tradeCount;
@@ -211,15 +220,15 @@ export function compareCandidateEvaluations(
 
 export function summarizeEvaluationRanking(evaluation: CandidateBacktestEvaluation) {
   return {
-    tradeful: evaluation.summary.tradeCount > 0,
+    tradeful: resolveEvaluationTradeCount(evaluation) > 0,
     riskAdjustedScore: calculateCandidateRiskAdjustedScore(evaluation),
     netReturn: evaluation.summary.netReturn,
-    maxDrawdown: evaluation.summary.maxDrawdown,
-    tradeCount: evaluation.summary.tradeCount,
+    maxDrawdown: resolveEvaluationMaxDrawdown(evaluation),
+    tradeCount: resolveEvaluationTradeCount(evaluation),
     positiveWindowRatio: positiveWindowRatio(evaluation),
     worstWindowNetReturn: worstWindowNetReturn(evaluation),
     windowCount: windowCount(evaluation),
-    totalClosedTrades: totalClosedTrades(evaluation),
+    totalClosedTrades: resolveEvaluationTradeCount(evaluation),
     randomPercentile: randomPercentile(evaluation),
     bootstrapSignificant: bootstrapSignificant(evaluation)
   };

@@ -283,6 +283,8 @@ export type CandidateEvaluationDiagnostics = {
     negativeWindowCount?: number;
     bestWindowNetReturn?: number;
     worstWindowNetReturn?: number;
+    bestWindowMaxDrawdown?: number;
+    worstWindowMaxDrawdown?: number;
     totalClosedTrades?: number;
   };
 };
@@ -335,6 +337,13 @@ export type ReviewDecision = {
   observations: string[];
 };
 
+export type ResearchIterationProvenance = {
+  proposalSource: "resume" | "llm" | "objective_continuation" | "objective_seed";
+  proposalFailureMessage?: string;
+  reviewUsedObjectiveGovernance: boolean;
+  reviewFailureMessage?: string;
+};
+
 export type PreparationExecutionResult = {
   action: ResearchPreparationAction;
   status: "executed" | "skipped" | "failed";
@@ -364,6 +373,30 @@ export type ResearchIterationRecord = {
   validationResults: ValidationCommandResult[];
   evaluations: CandidateBacktestEvaluation[];
   review: ReviewDecision;
+  provenance?: ResearchIterationProvenance;
+};
+
+export type AutoResearchArtifactAudit = {
+  ok: boolean;
+  auditedAt: string;
+  reportPath: string;
+  failureReason?: string;
+  checks: {
+    runStateMatchesReport: boolean;
+    statusMatchesState: boolean;
+    iterationArtifactsMatchState: boolean;
+    leaderboardMatchesState: boolean;
+    rawLeaderboardMatchesState: boolean;
+    candidateLedgerMatchesState: boolean;
+    familySummaryMatchesState: boolean;
+    candidateGenealogyMatchesState: boolean;
+    blockCatalogReadable: boolean;
+    runLockCleared: boolean;
+  };
+};
+
+export type AutoResearchRunVerification = {
+  artifactAudit?: AutoResearchArtifactAudit;
 };
 
 export type AutoResearchRunConfig = {
@@ -438,6 +471,7 @@ export type AutoResearchRunReport = {
   bestCandidate?: CandidateBacktestEvaluation;
   bestTradeCandidate?: CandidateBacktestEvaluation;
   lineage?: ResearchLineage;
+  verification?: AutoResearchRunVerification;
 };
 
 export type ValidatedBlock = {

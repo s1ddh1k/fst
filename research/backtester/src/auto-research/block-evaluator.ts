@@ -664,6 +664,7 @@ export async function evaluateBlockCandidate(params: {
   }
 
   const testReturns = results.map((r) => r.test.metrics.netReturn);
+  const testDrawdowns = results.map((r) => r.test.metrics.maxDrawdown);
   const positiveWindowCount = testReturns.filter((v) => v > 0).length;
   const totalClosedTrades = results.reduce((s, r) => s + r.test.completedTrades.length, 0);
   const signalCount = results.reduce((s, r) => s + r.test.metrics.signalCount, 0);
@@ -801,6 +802,8 @@ export async function evaluateBlockCandidate(params: {
         negativeWindowCount: testReturns.filter((v) => v < 0).length,
         bestWindowNetReturn: Math.max(...testReturns),
         worstWindowNetReturn: Math.min(...testReturns),
+        bestWindowMaxDrawdown: Math.min(...testDrawdowns),
+        worstWindowMaxDrawdown: Math.max(...testDrawdowns),
         totalClosedTrades
       }
     }
