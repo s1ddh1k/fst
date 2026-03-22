@@ -13,6 +13,35 @@ import type { SimulationFill } from "./types.js";
 export function createExecutionRouter(params?: { exchangeAdapter?: ExchangeAdapter }) {
   const exchangeAdapter = params?.exchangeAdapter ?? createUpbitKrwExchangeAdapter();
   const orderStateMachine = new OrderStateMachine();
+  const simulatorByStyle = new Map<OrderIntent["style"], ReturnType<typeof createExecutionSimulator>>();
+
+  function getSimulator(style: OrderIntent["style"]) {
+    const cached = simulatorByStyle.get(style);
+
+    if (cached) {
+      return cached;
+    }
+
+    const simulator = createExecutionSimulator({
+      exchangeAdapter,
+      policy:
+        style === "limit_passive"
+          ? {
+              defaultFeeSide: "maker",
+              maxSlippageBps: 3
+            }
+          : style === "limit_aggressive"
+            ? {
+                defaultFeeSide: "taker",
+                maxSlippageBps: 8
+              }
+            : {
+                maxSlippageBps: 35
+              }
+    });
+    simulatorByStyle.set(style, simulator);
+    return simulator;
+  }
 
   return {
     orderStateMachine,
@@ -43,23 +72,7 @@ export function createExecutionRouter(params?: { exchangeAdapter?: ExchangeAdapt
         orderId: params.orderIntent.orderId
       });
 
-      const simulator = createExecutionSimulator({
-        exchangeAdapter,
-        policy:
-          params.orderIntent.style === "limit_passive"
-            ? {
-                defaultFeeSide: "maker",
-                maxSlippageBps: 3
-              }
-            : params.orderIntent.style === "limit_aggressive"
-              ? {
-                  defaultFeeSide: "taker",
-                  maxSlippageBps: 8
-                }
-              : {
-                  maxSlippageBps: 35
-                }
-      });
+      const simulator = getSimulator(params.orderIntent.style);
 
       const fill = simulator.simulate({
         orderIntent: {

@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { readFileSync, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 let db: Database.Database | undefined;
@@ -17,19 +17,38 @@ function findSchemaPath(): string {
   throw new Error("Cannot find infra/db/init-sqlite.sql");
 }
 
-function resolveDbPath(): string {
-  if (process.env.SQLITE_PATH) return process.env.SQLITE_PATH;
-  // Default: data/fst.db relative to workspace root
+function findWorkspaceRoot(): string {
   let dir = process.cwd();
   for (let i = 0; i < 10; i++) {
     if (existsSync(path.join(dir, "pnpm-workspace.yaml"))) {
-      return path.join(dir, "data", "fst.db");
+      return dir;
     }
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return path.join(process.cwd(), "data", "fst.db");
+  return process.cwd();
+}
+
+function isWritableDirectory(dir: string): boolean {
+  try {
+    accessSync(dir, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveDbPath(): string {
+  if (process.env.SQLITE_PATH) return process.env.SQLITE_PATH;
+  const workspaceRoot = findWorkspaceRoot();
+  const preferredDir = path.join(workspaceRoot, "data");
+
+  if (!existsSync(preferredDir) || isWritableDirectory(preferredDir)) {
+    return path.join(preferredDir, "fst.db");
+  }
+
+  return path.join(workspaceRoot, ".sqlite", "fst.db");
 }
 
 export function getDb(): Database.Database {
@@ -38,7 +57,6 @@ export function getDb(): Database.Database {
   const dbPath = resolveDbPath();
   const dir = path.dirname(dbPath);
   if (!existsSync(dir)) {
-    const { mkdirSync } = require("node:fs") as typeof import("node:fs");
     mkdirSync(dir, { recursive: true });
   }
 

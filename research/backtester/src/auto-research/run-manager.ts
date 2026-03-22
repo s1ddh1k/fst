@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   AutoResearchConfigRepair,
@@ -8,6 +8,7 @@ import type {
   CandidateBacktestEvaluation,
   CatalogEntryRecord,
   ProposalBatch,
+  ResearchLineage,
   ResearchIterationRecord,
   StrategyFamilyDefinition
 } from "./types.js";
@@ -26,6 +27,7 @@ export type AutoResearchRunState = {
   bestCandidate?: CandidateBacktestEvaluation;
   pendingProposal?: ProposalBatch;
   noTradeIterations: number;
+  lineage?: ResearchLineage;
 };
 
 type RunLockPayload = {
@@ -44,6 +46,7 @@ export type AutoResearchStatus = {
     | "evaluation"
     | "review"
     | "completed"
+    | "failed"
     | "partial"
     | "aborted"
     | "invalid_config";
@@ -93,6 +96,13 @@ function isProcessAlive(pid: number | undefined): boolean {
   }
 }
 
+async function writeFileAtomic(filePath: string, content: string): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tempPath, content);
+  await rename(tempPath, filePath);
+}
+
 function selectBestTradeCandidate(iterations: ResearchIterationRecord[]): CandidateBacktestEvaluation | undefined {
   return iterations
     .flatMap((iteration) => iteration.evaluations)
@@ -116,7 +126,8 @@ export async function loadRunState(outputDir: string): Promise<AutoResearchRunSt
       configRepairs: parsed.configRepairs ?? [],
       bestCandidate: parsed.bestCandidate,
       pendingProposal: parsed.pendingProposal,
-      noTradeIterations: parsed.noTradeIterations ?? 0
+      noTradeIterations: parsed.noTradeIterations ?? 0,
+      lineage: parsed.lineage
     };
   } catch {
     return undefined;
@@ -163,13 +174,11 @@ export async function releaseRunLock(outputDir: string): Promise<void> {
 }
 
 export async function saveRunState(outputDir: string, state: AutoResearchRunState): Promise<void> {
-  await mkdir(outputDir, { recursive: true });
-  await writeFile(path.join(outputDir, "run-state.json"), `${JSON.stringify(state, null, 2)}\n`);
+  await writeFileAtomic(path.join(outputDir, "run-state.json"), `${JSON.stringify(state, null, 2)}\n`);
 }
 
 export async function saveRunStatus(outputDir: string, status: AutoResearchStatus): Promise<void> {
-  await mkdir(outputDir, { recursive: true });
-  await writeFile(path.join(outputDir, "status.json"), `${JSON.stringify(status, null, 2)}\n`);
+  await writeFileAtomic(path.join(outputDir, "status.json"), `${JSON.stringify(status, null, 2)}\n`);
 }
 
 export async function reconcilePartialRunStatus(outputDir: string): Promise<void> {
@@ -178,6 +187,7 @@ export async function reconcilePartialRunStatus(outputDir: string): Promise<void
     const raw = JSON.parse(await readFile(statusPath, "utf8")) as AutoResearchStatus;
     if (
       raw.phase === "completed" ||
+      raw.phase === "failed" ||
       raw.phase === "partial" ||
       raw.phase === "aborted" ||
       raw.phase === "invalid_config"
@@ -213,8 +223,7 @@ export async function saveLeaderboard(
   }>,
   fileName = "leaderboard.json"
 ): Promise<void> {
-  await mkdir(outputDir, { recursive: true });
-  await writeFile(path.join(outputDir, fileName), `${JSON.stringify(leaderboard, null, 2)}\n`);
+  await writeFileAtomic(path.join(outputDir, fileName), `${JSON.stringify(leaderboard, null, 2)}\n`);
 }
 
 export function toReport(state: AutoResearchRunState): AutoResearchRunReport {
@@ -229,6 +238,7 @@ export function toReport(state: AutoResearchRunState): AutoResearchRunReport {
     outcomeReason: state.outcomeReason,
     configRepairs: state.configRepairs,
     bestCandidate: state.bestCandidate,
-    bestTradeCandidate: selectBestTradeCandidate(state.iterations)
+    bestTradeCandidate: selectBestTradeCandidate(state.iterations),
+    lineage: state.lineage
   };
 }

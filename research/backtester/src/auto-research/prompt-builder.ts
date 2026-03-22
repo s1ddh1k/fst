@@ -34,7 +34,7 @@ function jsonBlock(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function compactFamilies(families: StrategyFamilyDefinition[]) {
+export function compactFamilies(families: StrategyFamilyDefinition[]) {
   return families.map((family) => ({
     familyId: family.familyId,
     strategyName: family.strategyName,
@@ -48,7 +48,7 @@ function compactFamilies(families: StrategyFamilyDefinition[]) {
   }));
 }
 
-function compactEvaluation(evaluation: CandidateBacktestEvaluation) {
+export function compactEvaluation(evaluation: CandidateBacktestEvaluation) {
   return {
     candidate: evaluation.candidate,
     mode: evaluation.mode,
@@ -59,7 +59,7 @@ function compactEvaluation(evaluation: CandidateBacktestEvaluation) {
   };
 }
 
-function compactHistory(history: ResearchIterationRecord[]) {
+export function compactHistory(history: ResearchIterationRecord[]) {
   return history.map((iteration) => ({
     iteration: iteration.iteration,
     proposal: {
@@ -75,7 +75,35 @@ function compactHistory(history: ResearchIterationRecord[]) {
   }));
 }
 
-function compactPreparationResults(results: PreparationExecutionResult[]) {
+export function compactRecentHistory(history: ResearchIterationRecord[], limit = 2) {
+  return history.slice(-Math.max(0, limit)).map((iteration) => ({
+    iteration: iteration.iteration,
+    proposal: {
+      researchSummary: iteration.proposal.researchSummary,
+      candidateIds: iteration.proposal.candidates.map((candidate) => candidate.candidateId),
+      families: Array.from(new Set(iteration.proposal.candidates.map((candidate) => candidate.familyId)))
+    },
+    topEvaluations: iteration.evaluations
+      .map((evaluation) => ({
+        candidateId: evaluation.candidate.candidateId,
+        familyId: evaluation.candidate.familyId,
+        netReturn: evaluation.summary.netReturn,
+        maxDrawdown: evaluation.summary.maxDrawdown,
+        tradeCount: evaluation.summary.tradeCount,
+        status: evaluation.status
+      }))
+      .sort((left, right) => right.netReturn - left.netReturn)
+      .slice(0, 5),
+    review: {
+      verdict: iteration.review.verdict,
+      promotedCandidateId: iteration.review.promotedCandidateId,
+      retireCandidateIds: iteration.review.retireCandidateIds,
+      observationCount: iteration.review.observations.length
+    }
+  }));
+}
+
+export function compactPreparationResults(results: PreparationExecutionResult[]) {
   return results.map((result) => ({
     action: result.action,
     status: result.status,
@@ -83,7 +111,7 @@ function compactPreparationResults(results: PreparationExecutionResult[]) {
   }));
 }
 
-function compactCodeMutationResults(results: CodeMutationExecutionResult[]) {
+export function compactCodeMutationResults(results: CodeMutationExecutionResult[]) {
   return results.map((result) => ({
     taskId: result.taskId,
     familyId: result.familyId,
@@ -106,7 +134,7 @@ function parameterKey(parameters: Record<string, number>) {
   );
 }
 
-function compactCandidateLedger(history: ResearchIterationRecord[]) {
+export function compactCandidateLedger(history: ResearchIterationRecord[], limit = 20) {
   const ledger = new Map<string, {
     familyId: string;
     parameters: Record<string, number>;
@@ -148,10 +176,10 @@ function compactCandidateLedger(history: ResearchIterationRecord[]) {
 
       return right.appearances - left.appearances;
     })
-    .slice(0, 20);
+    .slice(0, limit);
 }
 
-function compactCandidateGenealogy(history: ResearchIterationRecord[]) {
+export function compactCandidateGenealogy(history: ResearchIterationRecord[], limit = 30) {
   return history
     .flatMap((iteration) =>
       iteration.evaluations.map((evaluation) => ({
@@ -164,10 +192,10 @@ function compactCandidateGenealogy(history: ResearchIterationRecord[]) {
         tradeCount: evaluation.summary.tradeCount
       }))
     )
-    .slice(-30);
+    .slice(-limit);
 }
 
-function compactFamilyPerformance(history: ResearchIterationRecord[]) {
+export function compactFamilyPerformance(history: ResearchIterationRecord[]) {
   const byFamily = new Map<string, {
     evaluations: number;
     tradeful: number;
@@ -292,7 +320,7 @@ Return JSON only:
         }
       ],
       "requiredData": ["1h", "feature_cache:breadth"],
-      "implementationNotes": ["what code would need to change"]
+      "implementationNotes": ["what code would need to change"],
       "composition": {
         "mode": "weighted_vote",
         "buyThreshold": 0.55,
@@ -381,6 +409,12 @@ ${AUTO_RESEARCH_GLOBAL_PROMPT}
 
 You are reviewing an autonomous crypto strategy research iteration.
 
+Output contract:
+- Choose "keep_searching" when you can provide 1 to ${params.config.candidatesPerIteration} concrete nextCandidates.
+- Fill nextCandidates with unique, executable candidates when you continue searching.
+- Choose "stop_no_edge" when you prefer not to provide a next candidate batch.
+- Return JSON only.
+
 Structured run facts:
 ${jsonBlock({
   config: {
@@ -438,7 +472,10 @@ Return JSON only:
 
 Requirements:
 - If verdict=promote_candidate, promotedCandidateId must match one of the evaluated candidates.
-- If verdict=keep_searching, provide at least 1 next candidate unless you also conclude stop_no_edge.
+- If verdict=keep_searching, provide 1 to ${params.config.candidatesPerIteration} concrete nextCandidates.
+- Let nextCandidates be the fully populated next batch whenever you continue searching.
+- Use verdict="stop_no_edge" when you do not want to provide a next candidate batch.
+- Final response reminder: when verdict=keep_searching, fill nextCandidates with unique, executable candidates.
 - Do not emit markdown.
 `.trim();
 }
@@ -456,7 +493,8 @@ ${AUTO_RESEARCH_GLOBAL_PROMPT}
 
 Goal:
 - You are optimizing a SINGLE strategy block (not a full portfolio).
-- Each block has 5-12 parameters: strategy-specific params + regime gate params.
+- Each block has strategy-specific parameters plus optional regime controls.
+- Some block families may expose more than 12 tunable parameters.
 - Find the optimal parameters for this strategy in its target regime.
 - Long only, Upbit KRW spot, point-in-time.
 
@@ -485,7 +523,47 @@ Task:
 5. Explore parameter extremes and corners, not just midpoints. If a family has produced 0 trades in prior iterations, try minimum gate thresholds to maximize signal activation.
 6. If a family consistently loses money from overtrading, try higher rebalanceBars or tighter entry thresholds.
 
-Return JSON only (same format as standard proposal).
+Return JSON only:
+{
+  "researchSummary": "short summary",
+  "preparation": [
+    {
+      "kind": "build_feature_cache" | "sync_latest_batch" | "backfill_batch",
+      "timeframe": "1h" | "15m" | "5m" | "1m",
+      "timeframes": ["1h"],
+      "pages": 4,
+      "reason": "why this is worth doing",
+      "familyId": "block:leader-1h-trend-up",
+      "marketLimit": 10,
+      "limit": 40000,
+      "minCandles": 5000
+    }
+  ],
+  "proposedFamilies": [],
+  "codeTasks": [],
+  "candidates": [
+    {
+      "candidateId": "optional-id",
+      "familyId": "block:leader-1h-trend-up",
+      "thesis": "one sentence",
+      "parameters": {
+        "strengthFloor": 0.78,
+        "pullbackAtr": 0.9,
+        "setupExpiryBars": 4,
+        "trailAtrMult": 2.4
+      },
+      "parentCandidateIds": ["prior-candidate-id"],
+      "origin": "llm",
+      "invalidationSignals": ["trade count collapses", "drawdown expands in trend_down"]
+    }
+  ]
+}
+
+Requirements:
+- Return 1 to ${params.config.candidatesPerIteration} candidates.
+- Every response MUST include a top-level "candidates" array, even when empty.
+- Use only parameter names that belong to the chosen family.
+- Do not emit markdown.
 `.trim();
 }
 
@@ -505,6 +583,12 @@ ${AUTO_RESEARCH_SYSTEM_PROMPT}
 ${AUTO_RESEARCH_GLOBAL_PROMPT}
 
 You are reviewing a BLOCK-level research iteration (single strategy optimization).
+
+Output contract:
+- Choose "keep_searching" when you can provide 1 to ${params.config.candidatesPerIteration} concrete nextCandidates.
+- Fill nextCandidates with unique, executable parameter sets when you continue searching.
+- Choose "stop_no_edge" when you prefer not to provide a next candidate batch.
+- Return JSON only.
 
 Structured run facts:
 ${jsonBlock({
@@ -556,7 +640,10 @@ Return JSON only — the verdict field MUST be exactly one of these three string
 Requirements:
 - verdict MUST be one of: "keep_searching", "promote_candidate", "stop_no_edge". No other values are accepted.
 - If verdict=promote_candidate, promotedCandidateId must match one of the evaluated candidates.
-- If verdict=keep_searching, provide at least 1 next candidate with meaningfully different parameters.
+- If verdict=keep_searching, provide 1 to ${params.config.candidatesPerIteration} nextCandidates with meaningfully different parameters.
+- Let nextCandidates be the fully populated next batch whenever you continue searching.
+- Use verdict="stop_no_edge" when you do not want to provide a next candidate batch.
+- Final response reminder: when verdict=keep_searching, fill nextCandidates with unique, executable candidates.
 - Do not emit markdown.
 `.trim();
 }
@@ -633,6 +720,12 @@ ${AUTO_RESEARCH_GLOBAL_PROMPT}
 You are reviewing a PORTFOLIO COMPOSITION research iteration.
 Blocks are frozen; you are only tuning allocations and portfolio-level params.
 
+Output contract:
+- Choose "keep_searching" when you can provide 1 to ${params.config.candidatesPerIteration} concrete nextCandidates.
+- Fill nextCandidates with unique, executable allocation candidates when you continue searching.
+- Choose "stop_no_edge" when you prefer not to provide a next candidate batch.
+- Return JSON only.
+
 Structured run facts:
 ${jsonBlock({
   config: {
@@ -683,7 +776,10 @@ Return JSON only — the verdict field MUST be exactly one of these three string
 Requirements:
 - verdict MUST be one of: "keep_searching", "promote_candidate", "stop_no_edge". No other values are accepted.
 - If verdict=promote_candidate, promotedCandidateId must match one of the evaluated candidates.
-- If verdict=keep_searching, provide at least 1 next candidate.
+- If verdict=keep_searching, provide 1 to ${params.config.candidatesPerIteration} concrete nextCandidates.
+- Let nextCandidates be the fully populated next batch whenever you continue searching.
+- Use verdict="stop_no_edge" when you do not want to provide a next candidate batch.
+- Final response reminder: when verdict=keep_searching, fill nextCandidates with unique, executable candidates.
 - Do not emit markdown.
 `.trim();
 }

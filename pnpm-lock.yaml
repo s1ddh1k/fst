@@ -90,6 +90,9 @@ importers:
 
   services/data-collector:
     dependencies:
+      better-sqlite3:
+        specifier: ^12.8.0
+        version: 12.8.0
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -10,12 +10,14 @@ import {
   createAutoResearchOrchestrator,
   createComposedScoredStrategy,
   getStrategyFamilies,
+  loadLineageSnapshot,
   passesPromotionGate,
   type AutoResearchRunConfig,
   type ResearchLlmClient,
   type CandidateBacktestEvaluation,
   type NormalizedCandidateProposal
 } from "../src/auto-research/index.js";
+import { resolveCandidateMarketRequirements } from "../src/auto-research/orchestrator.js";
 
 function buildEvaluation(candidate: NormalizedCandidateProposal, netReturn: number): CandidateBacktestEvaluation {
   return {
@@ -307,8 +309,8 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
   assert.match(savedHtml, /Cross-Checks/);
 });
 
-test("auto research fallback review diversifies next candidates instead of cloning the same proposal", async () => {
-  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-fallback-review-"));
+test("auto research review failure marks the run failed instead of synthesizing candidates", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-review-failed-"));
 
   const llmClient: ResearchLlmClient = {
     async proposeCandidates() {
@@ -329,18 +331,6 @@ test("auto research fallback review diversifies next candidates instead of cloni
               trailAtrMult: 2.2
             },
             invalidationSignals: []
-          },
-          {
-            candidateId: "lpsm-base",
-            familyId: "leader-pullback-state-machine",
-            thesis: "second",
-            parameters: {
-              strengthFloor: 0.7,
-              pullbackAtr: 0.9,
-              setupExpiryBars: 4,
-              trailAtrMult: 2.2
-            },
-            invalidationSignals: []
           }
         ]
       };
@@ -353,7 +343,7 @@ test("auto research fallback review diversifies next candidates instead of cloni
   const orchestrator = createAutoResearchOrchestrator({
     llmClient,
     async evaluateCandidate({ candidate }) {
-      return buildEvaluation(candidate, candidate.familyId === "leader-pullback-state-machine" ? 0.07 : 0.03);
+      return buildEvaluation(candidate, 0.03);
     },
     async prepareActions() {
       return [];
@@ -365,57 +355,45 @@ test("auto research fallback review diversifies next candidates instead of cloni
     }
   });
 
-  const report = await orchestrator.run({
-    universeName: "krw-top",
-    timeframe: "1h",
-    marketLimit: 5,
-    limit: 2000,
-    holdoutDays: 180,
-    iterations: 1,
-    candidatesPerIteration: 2,
-    mode: "holdout",
-    outputDir,
-    allowDataCollection: false,
-    allowFeatureCacheBuild: false,
-    allowCodeMutation: false,
-    minNetReturnForPromotion: 0.1
-  });
+  await assert.rejects(
+    () => orchestrator.run({
+      universeName: "krw-top",
+      timeframe: "1h",
+      marketLimit: 5,
+      limit: 2000,
+      holdoutDays: 180,
+      iterations: 1,
+      candidatesPerIteration: 1,
+      mode: "holdout",
+      outputDir,
+      allowDataCollection: false,
+      allowFeatureCacheBuild: false,
+      allowCodeMutation: false,
+      minNetReturnForPromotion: 0.1
+    }),
+    /LLM review failed: synthetic review outage/
+  );
 
-  const review = report.iterations[0]?.review;
-  assert.equal(review?.verdict, "keep_searching");
-  assert.equal(review?.nextCandidates.length, 2);
-  assert.match(review?.observations[0] ?? "", /diversified fallback candidates/);
-  assert.ok(review?.nextCandidates.every((candidate) => /fallback-01-0[12]/.test(candidate.candidateId ?? "")));
-  assert.ok(review?.nextCandidates.some((candidate) => candidate.familyId === "leader-pullback-state-machine"));
+  const savedStatus = JSON.parse(await readFile(path.join(outputDir, "status.json"), "utf8"));
+  assert.equal(savedStatus.phase, "failed");
+  assert.match(savedStatus.message, /LLM review failed: synthetic review outage/);
 });
 
-test("auto research fallback review promotes the objective winner when the gate passes", async () => {
-  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-fallback-promote-"));
+test("auto research review failure no longer auto-promotes a promotable winner", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-review-no-promote-"));
 
   const llmClient: ResearchLlmClient = {
     async proposeCandidates() {
       return {
-        researchSummary: "review fallback should not block a promotable winner",
+        researchSummary: "review failure should fail even with a promotable winner",
         preparation: [],
         proposedFamilies: [],
         codeTasks: [],
         candidates: [
           {
-            candidateId: "fragile-rmp",
-            familyId: "relative-momentum-pullback",
-            thesis: "weaker fallback candidate",
-            parameters: {
-              minStrengthPct: 0.8,
-              minRiskOn: 0.1,
-              pullbackZ: 0.9,
-              trailAtrMult: 2.2
-            },
-            invalidationSignals: []
-          },
-          {
             candidateId: "robust-lpsm",
             familyId: "leader-pullback-state-machine",
-            thesis: "strong fallback candidate",
+            thesis: "strong candidate",
             parameters: {
               strengthFloor: 0.7,
               pullbackAtr: 0.9,
@@ -435,7 +413,7 @@ test("auto research fallback review promotes the objective winner when the gate 
   const orchestrator = createAutoResearchOrchestrator({
     llmClient,
     async evaluateCandidate({ candidate }) {
-      return buildEvaluation(candidate, candidate.candidateId === "robust-lpsm" ? 0.12 : 0.04);
+      return buildEvaluation(candidate, 0.12);
     },
     async prepareActions() {
       return [];
@@ -447,31 +425,27 @@ test("auto research fallback review promotes the objective winner when the gate 
     }
   });
 
-  const report = await orchestrator.run({
-    universeName: "krw-top",
-    timeframe: "1h",
-    marketLimit: 5,
-    limit: 2000,
-    holdoutDays: 180,
-    iterations: 1,
-    candidatesPerIteration: 2,
-    mode: "holdout",
-    outputDir,
-    allowDataCollection: false,
-    allowFeatureCacheBuild: false,
-    allowCodeMutation: false,
-    minNetReturnForPromotion: 0.1
-  });
+  await assert.rejects(
+    () => orchestrator.run({
+      universeName: "krw-top",
+      timeframe: "1h",
+      marketLimit: 5,
+      limit: 2000,
+      holdoutDays: 180,
+      iterations: 1,
+      candidatesPerIteration: 1,
+      mode: "holdout",
+      outputDir,
+      allowDataCollection: false,
+      allowFeatureCacheBuild: false,
+      allowCodeMutation: false,
+      minNetReturnForPromotion: 0.1
+    }),
+    /LLM review failed: review worker unavailable/
+  );
 
-  const review = report.iterations[0]?.review;
-  const topCandidateId = report.iterations[0]?.evaluations[0]?.candidate.candidateId;
   const savedStatus = JSON.parse(await readFile(path.join(outputDir, "status.json"), "utf8"));
-
-  assert.equal(review?.verdict, "promote_candidate");
-  assert.equal(review?.promotedCandidateId, topCandidateId);
-  assert.equal(report.bestCandidate?.candidate.candidateId, topCandidateId);
-  assert.equal(savedStatus.phase, "completed");
-  assert.match(review?.observations.join("\n") ?? "", /objective governance promoted/i);
+  assert.equal(savedStatus.phase, "failed");
 });
 
 test("auto research final keep_searching promotes an eligible candidate instead of dropping it", async () => {
@@ -664,9 +638,8 @@ test("auto research replaces blocked llm promotions with the highest eligible ca
   assert.match(review?.observations.join("\n") ?? "", /objective governance selected robust-candidate/i);
 });
 
-test("auto research fills empty keep_searching reviews with fallback next candidates", async () => {
+test("auto research rejects keep_searching reviews that omit next candidates", async () => {
   const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-empty-next-candidates-"));
-  let reviewCalls = 0;
 
   const llmClient: ResearchLlmClient = {
     async proposeCandidates() {
@@ -691,24 +664,9 @@ test("auto research fills empty keep_searching reviews with fallback next candid
       };
     },
     async reviewIteration() {
-      reviewCalls += 1;
-
-      if (reviewCalls === 1) {
-        return {
-          summary: "keep searching but forgot to send candidates",
-          verdict: "keep_searching",
-          nextPreparation: [],
-          proposedFamilies: [],
-          codeTasks: [],
-          nextCandidates: [],
-          retireCandidateIds: [],
-          observations: []
-        };
-      }
-
       return {
-        summary: "stop on second pass",
-        verdict: "stop_no_edge",
+        summary: "keep searching but forgot to send candidates",
+        verdict: "keep_searching",
         nextPreparation: [],
         proposedFamilies: [],
         codeTasks: [],
@@ -734,30 +692,30 @@ test("auto research fills empty keep_searching reviews with fallback next candid
     }
   });
 
-  const report = await orchestrator.run({
-    universeName: "krw-top",
-    timeframe: "1h",
-    marketLimit: 5,
-    limit: 2000,
-    holdoutDays: 180,
-    iterations: 2,
-    candidatesPerIteration: 1,
-    mode: "holdout",
-    outputDir,
-    allowDataCollection: false,
-    allowFeatureCacheBuild: false,
-    allowCodeMutation: false,
-    minNetReturnForPromotion: 0.05
-  });
+  await assert.rejects(
+    () => orchestrator.run({
+      universeName: "krw-top",
+      timeframe: "1h",
+      marketLimit: 5,
+      limit: 2000,
+      holdoutDays: 180,
+      iterations: 2,
+      candidatesPerIteration: 1,
+      mode: "holdout",
+      outputDir,
+      allowDataCollection: false,
+      allowFeatureCacheBuild: false,
+      allowCodeMutation: false,
+      minNetReturnForPromotion: 0.05
+    }),
+    /Invalid review decision: LLM review returned keep_searching without any unique next candidates/
+  );
 
-  assert.equal(report.iterations.length, 2);
-  assert.equal(reviewCalls, 2);
-  assert.equal(report.iterations[0]?.review.nextCandidates.length, 1);
-  assert.match(report.iterations[0]?.review.observations.join("\n") ?? "", /topped up/i);
-  assert.match(report.iterations[1]?.evaluations[0]?.candidate.candidateId ?? "", /fallback-01-01/);
+  const savedStatus = JSON.parse(await readFile(path.join(outputDir, "status.json"), "utf8"));
+  assert.equal(savedStatus.phase, "failed");
 });
 
-test("auto research tops up duplicate keep_searching candidate batches with fallback variants", async () => {
+test("auto research dedupes duplicate keep_searching candidates without inventing extra ones", async () => {
   const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-partial-next-candidates-"));
   let reviewCalls = 0;
 
@@ -868,18 +826,119 @@ test("auto research tops up duplicate keep_searching candidate batches with fall
 
   assert.equal(report.iterations.length, 2);
   assert.equal(reviewCalls, 2);
-  assert.equal(report.iterations[0]?.review.nextCandidates.length, 2);
+  assert.equal(report.iterations[0]?.review.nextCandidates.length, 1);
   assert.match(report.iterations[0]?.review.observations.join("\n") ?? "", /deduped/i);
-  assert.match(report.iterations[0]?.review.observations.join("\n") ?? "", /topped up/i);
   assert.equal(report.iterations[1]?.evaluations.length, 2);
   assert.ok(
-    report.iterations[1]?.evaluations.some(
-      (evaluation) =>
-        evaluation.candidate.candidateId.includes("fallback") ||
-        evaluation.candidate.origin === "engine_seed" ||
-        evaluation.candidate.origin === "engine_mutation"
+    report.iterations[1]?.evaluations.every(
+      (evaluation) => !evaluation.candidate.candidateId.includes("fallback")
     )
   );
+});
+
+test("auto research review sees only the evaluated candidate batch", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-review-batch-"));
+  const reviewProposalSizes: number[] = [];
+  const reviewProposalIds: string[][] = [];
+  const reviewedEvaluationIds: string[][] = [];
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "proposal can exceed evaluation limit",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "proposal-a",
+            familyId: "relative-momentum-pullback",
+            thesis: "candidate a",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.9,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: []
+          },
+          {
+            candidateId: "proposal-b",
+            familyId: "relative-momentum-pullback",
+            thesis: "candidate b",
+            parameters: {
+              minStrengthPct: 0.78,
+              minRiskOn: 0.12,
+              pullbackZ: 1,
+              trailAtrMult: 2
+            },
+            invalidationSignals: []
+          },
+          {
+            candidateId: "proposal-c",
+            familyId: "relative-momentum-pullback",
+            thesis: "candidate c",
+            parameters: {
+              minStrengthPct: 0.76,
+              minRiskOn: 0.08,
+              pullbackZ: 1.1,
+              trailAtrMult: 2.4
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration({ latestProposal, evaluations }) {
+      reviewProposalSizes.push(latestProposal.candidates.length);
+      reviewProposalIds.push(latestProposal.candidates.map((candidate) => candidate.candidateId ?? ""));
+      reviewedEvaluationIds.push(evaluations.map((evaluation) => evaluation.candidate.candidateId));
+
+      return {
+        summary: "stop after verifying reviewed batch",
+        verdict: "stop_no_edge",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, 0.03);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  await orchestrator.run({
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 5,
+    limit: 2000,
+    holdoutDays: 180,
+    iterations: 1,
+    candidatesPerIteration: 2,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false
+  });
+
+  assert.deepEqual(reviewProposalSizes, [2]);
+  assert.deepEqual(reviewProposalIds, reviewedEvaluationIds);
 });
 
 test("auto research tops up undersized proposal batches before evaluation", async () => {
@@ -2178,7 +2237,7 @@ test("auto research converts evaluation failures into structured artifacts inste
   assert.match(savedIteration.evaluations[0].failure.message, /split/i);
 });
 
-test("auto research proposal fallback keeps the run moving when proposal LLM fails", async () => {
+test("auto research proposal failure marks the run failed instead of inventing candidates", async () => {
   const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-proposal-fallback-"));
 
   const llmClient: ResearchLlmClient = {
@@ -2214,23 +2273,26 @@ test("auto research proposal fallback keeps the run moving when proposal LLM fai
     }
   });
 
-  const report = await orchestrator.run({
-    universeName: "krw-top",
-    timeframe: "1h",
-    marketLimit: 5,
-    limit: 2000,
-    holdoutDays: 180,
-    iterations: 1,
-    candidatesPerIteration: 2,
-    mode: "holdout",
-    outputDir,
-    allowDataCollection: false,
-    allowFeatureCacheBuild: false,
-    allowCodeMutation: false
-  });
+  await assert.rejects(
+    () => orchestrator.run({
+      universeName: "krw-top",
+      timeframe: "1h",
+      marketLimit: 5,
+      limit: 2000,
+      holdoutDays: 180,
+      iterations: 1,
+      candidatesPerIteration: 2,
+      mode: "holdout",
+      outputDir,
+      allowDataCollection: false,
+      allowFeatureCacheBuild: false,
+      allowCodeMutation: false
+    }),
+    /LLM proposal failed: proposal outage/
+  );
 
-  assert.equal(report.iterations.length, 1);
-  assert.equal(report.iterations[0]?.proposal.candidates[0]?.origin, "proposal_fallback");
+  const savedStatus = JSON.parse(await readFile(path.join(outputDir, "status.json"), "utf8"));
+  assert.equal(savedStatus.phase, "failed");
 });
 
 test("robustness-aware ranking prefers stronger walk-forward window quality over raw return alone", () => {
@@ -2622,11 +2684,77 @@ test("auto research trims candidate markets for micro portfolio families before 
 
   const llmClient: ResearchLlmClient = {
     async proposeCandidates() {
-      throw new Error("force fallback candidate generation");
+      return {
+        researchSummary: "evaluate candidate market cap directly",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            familyId: "multi-tf-regime-switch",
+            thesis: "direct proposal",
+            parameters: {
+              universeTopN: 10,
+              maxOpenPositions: 4,
+              maxCapitalUsagePct: 0.7,
+              trendBudgetPct: 0.3,
+              breakoutBudgetPct: 0.2,
+              microBudgetPct: 0.15,
+              trendRebalanceBars: 4,
+              trendEntryFloor: 0.78,
+              trendExitFloor: 0.55,
+              trendSwitchGap: 0.1,
+              trendMinAboveTrendRatio: 0.68,
+              trendMinLiquidityScore: 0.1,
+              trendMinCompositeTrend: 0.05,
+              trendMinRiskOnGate: 0.05,
+              trendMinTrendScoreGate: 0.05,
+              trendGateMinAboveTrendRatio: 0.6,
+              trendGateMinLiquidityScore: 0.08,
+              leaderStrengthFloor: 0.7,
+              leaderPullbackAtr: 0.9,
+              leaderSetupExpiryBars: 4,
+              leaderTrailAtrMult: 2.2,
+              leaderMinRiskOnGate: 0.05,
+              leaderMinTrendScoreGate: 0.05,
+              leaderMinLiquidityGate: 0.08,
+              breakoutLookback: 20,
+              breakoutStrengthFloor: 0.8,
+              breakoutMaxExtensionAtr: 1.4,
+              breakoutTrailAtrMult: 2.2,
+              breakoutMinRiskOnGate: 0.05,
+              breakoutMinLiquidityGate: 0.08,
+              breakoutMinVolatilityGate: 0.015,
+              reversionEntryThreshold: 0.25,
+              reversionExitThreshold: 0.15,
+              reversionStopLossPct: 0.02,
+              reversionMaxHoldBars: 24,
+              reversionMaxRiskOnGate: 0.05,
+              reversionMaxTrendScoreGate: 0.05,
+              reversionMaxVolatilityGate: 0.04,
+              cooldownBarsAfterLoss: 8,
+              minBarsBetweenEntries: 4,
+              universeLookbackBars: 24,
+              microLookbackBars: 10,
+              microExtensionThreshold: 0.003,
+              microHoldingBarsMax: 8,
+              microStopAtrMult: 1.1,
+              microMinVolumeSpike: 1,
+              microMinRiskOnScore: 0.02,
+              microMinLiquidityScore: 0.04,
+              microProfitTarget: 0.004,
+              microMinRiskOnGate: 0.02,
+              microMinLiquidityGate: 0.04,
+              microMinVolatilityGate: 0.01
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
     },
     async reviewIteration({ evaluations }) {
       return {
-        summary: "promote evaluated fallback candidate",
+        summary: "promote evaluated candidate",
         verdict: "promote_candidate",
         promotedCandidateId: evaluations[0]?.candidate.candidateId,
         nextPreparation: [],
@@ -2702,6 +2830,52 @@ test("auto research trims candidate markets for micro portfolio families before 
   ]);
 });
 
+test("auto research candidate market requirements include hidden confirm-family data needs", () => {
+  const families = getStrategyFamilies([
+    "multi-tf-regime-switch-screen",
+    "multi-tf-regime-switch"
+  ]);
+  const requirements = resolveCandidateMarketRequirements({
+    config: {
+      universeName: "krw-top",
+      timeframe: "1h",
+      marketLimit: 5,
+      limit: 5000,
+      holdoutDays: 30,
+      trainingDays: 90,
+      stepDays: 30,
+      iterations: 1,
+      candidatesPerIteration: 1,
+      parallelism: 1,
+      mode: "walk-forward",
+      outputDir: "/tmp/unused",
+      allowDataCollection: false,
+      allowFeatureCacheBuild: false,
+      allowCodeMutation: false
+    },
+    families
+  });
+
+  assert.deepEqual(
+    requirements.map((item) => item.timeframe).sort(),
+    ["1h", "1m", "5m"]
+  );
+  assert.equal(
+    requirements.find((item) => item.timeframe === "1h")?.minCandles,
+    5000
+  );
+  assert.equal(
+    requirements.find((item) => item.timeframe === "1m")?.minCandles,
+    calculateAutoResearchMinimumLimit({
+      timeframe: "1m",
+      holdoutDays: 30,
+      trainingDays: 90,
+      stepDays: 30,
+      mode: "walk-forward"
+    })
+  );
+});
+
 test("auto research stages full regime-switch evaluation behind the screen family", async () => {
   const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-staged-"));
   const screenFamily = getStrategyFamilies(["multi-tf-regime-switch-screen"])[0];
@@ -2742,7 +2916,15 @@ test("auto research stages full regime-switch evaluation behind the screen famil
         nextPreparation: [],
         proposedFamilies: [],
         codeTasks: [],
-        nextCandidates: [],
+        nextCandidates: reviewCalls === 1
+          ? [{
+              familyId: "multi-tf-regime-switch-screen",
+              thesis: "screen follow-up to unlock confirm family staging",
+              parameters: screenParameters,
+              invalidationSignals: ["screen loses edge after confirm"],
+              parentCandidateIds: ["multi-tf-regime-switch-screen-proposal-01"]
+            }]
+          : [],
         retireCandidateIds: [],
         observations: []
       };
@@ -2797,4 +2979,468 @@ test("auto research stages full regime-switch evaluation behind the screen famil
   assert.ok(evaluatedFamiliesByIteration.get(2)?.includes("multi-tf-regime-switch-screen"));
   assert.ok(evaluatedFamiliesByIteration.get(2)?.includes("multi-tf-regime-switch"));
   assert.ok(!evaluatedFamiliesByIteration.get(1)?.includes("multi-tf-regime-switch"));
+});
+
+test("auto research warm-starts iteration one with external artifact seeds", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-seeded-"));
+  const artifactPath = path.join(outputDir, "seed-report.json");
+  const family = getStrategyFamilies(["relative-momentum-pullback"])[0];
+
+  assert.ok(family);
+
+  const midpoint = Object.fromEntries(
+    family.parameterSpecs.map((spec) => [spec.name, Number(((spec.min + spec.max) / 2).toFixed(4))])
+  );
+  const lowEdge = Object.fromEntries(
+    family.parameterSpecs.map((spec) => [spec.name, Number((spec.min + (spec.max - spec.min) * 0.2).toFixed(4))])
+  );
+  const highEdge = Object.fromEntries(
+    family.parameterSpecs.map((spec) => [spec.name, Number((spec.min + (spec.max - spec.min) * 0.8).toFixed(4))])
+  );
+  const partialHighEdge = Object.fromEntries(Object.entries(highEdge).slice(0, 2));
+  const partialLowEdge = Object.fromEntries(Object.entries(lowEdge).slice(0, 2));
+
+  await writeFile(
+    artifactPath,
+    `${JSON.stringify({
+      familyId: family.familyId,
+      walkForwardTop: [
+        {
+          candidateId: "artifact-top-01",
+          familyId: family.familyId,
+          parameters: partialHighEdge,
+          netReturn: 0.04,
+          maxDrawdown: 0.02,
+          tradeCount: 18,
+          positiveWindowRatio: 1
+        },
+        {
+          candidateId: "artifact-top-02",
+          familyId: family.familyId,
+          parameters: partialLowEdge,
+          netReturn: 0.03,
+          maxDrawdown: 0.025,
+          tradeCount: 14,
+          positiveWindowRatio: 0.67
+        }
+      ]
+    }, null, 2)}\n`
+  );
+
+  const evaluatedOrigins: Array<string | undefined> = [];
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "one llm candidate",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "llm-only-01",
+            familyId: family.familyId,
+            thesis: "LLM midpoint candidate",
+            parameters: midpoint,
+            invalidationSignals: ["edge is weak"]
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      return {
+        summary: "stop after seeded iteration",
+        verdict: "stop_no_edge",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      evaluatedOrigins.push(candidate.origin);
+      return buildEvaluation(candidate, candidate.origin === "artifact_seed" ? 0.03 : 0.01);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  await orchestrator.run({
+    strategyFamilyIds: [family.familyId],
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 3,
+    limit: 2000,
+    holdoutDays: 30,
+    trainingDays: 90,
+    stepDays: 30,
+    iterations: 1,
+    candidatesPerIteration: 3,
+    parallelism: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false,
+    seedArtifactPaths: [artifactPath],
+    seedCandidatesPerIteration: 2
+  });
+
+  assert.equal(evaluatedOrigins.length, 3);
+  assert.ok(evaluatedOrigins.includes("artifact_seed"));
+});
+
+test("auto research diversification prefers distant candidates within the same family", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-diverse-"));
+  const evaluatedCandidateIds: string[] = [];
+  const family = getStrategyFamilies(["relative-momentum-pullback"])[0];
+
+  assert.ok(family);
+
+  const specsByName = Object.fromEntries(family.parameterSpecs.map((spec) => [spec.name, spec]));
+  const anchor = Object.fromEntries(
+    family.parameterSpecs.map((spec) => [spec.name, Number((spec.min + (spec.max - spec.min) * 0.2).toFixed(4))])
+  );
+  const near = {
+    ...anchor,
+    [family.parameterSpecs[0]!.name]: Number(
+      (
+        anchor[family.parameterSpecs[0]!.name] +
+        (specsByName[family.parameterSpecs[0]!.name]!.max - specsByName[family.parameterSpecs[0]!.name]!.min) * 0.02
+      ).toFixed(4)
+    )
+  };
+  const far = Object.fromEntries(
+    family.parameterSpecs.map((spec) => [spec.name, Number((spec.min + (spec.max - spec.min) * 0.85).toFixed(4))])
+  );
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "same family, varied distances",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "candidate-a",
+            familyId: family.familyId,
+            thesis: "anchor candidate",
+            parameters: anchor,
+            invalidationSignals: ["none"]
+          },
+          {
+            candidateId: "candidate-b",
+            familyId: family.familyId,
+            thesis: "near duplicate candidate",
+            parameters: near,
+            invalidationSignals: ["none"]
+          },
+          {
+            candidateId: "candidate-c",
+            familyId: family.familyId,
+            thesis: "far candidate",
+            parameters: far,
+            invalidationSignals: ["none"]
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      return {
+        summary: "stop after one pass",
+        verdict: "stop_no_edge",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      evaluatedCandidateIds.push(candidate.candidateId);
+      return buildEvaluation(candidate, 0.01);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  await orchestrator.run({
+    strategyFamilyIds: [family.familyId],
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 3,
+    limit: 2000,
+    holdoutDays: 30,
+    trainingDays: 90,
+    stepDays: 30,
+    iterations: 1,
+    candidatesPerIteration: 2,
+    parallelism: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false,
+    candidateDiversificationMinDistance: 0.2
+  });
+
+  assert.deepEqual(evaluatedCandidateIds, ["candidate-a", "candidate-c"]);
+});
+
+test("auto research v2 survives review failure with objective governance and persists lineage", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-v2-review-fail-"));
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "v2 proposal",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "v2-candidate-01",
+            familyId: "relative-momentum-pullback",
+            thesis: "base candidate",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.9,
+              trailAtrMult: 2.1
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      throw new Error("review transport failed");
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, 0.01);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  const report = await orchestrator.run({
+    strategyFamilyIds: ["relative-momentum-pullback"],
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 3,
+    limit: 2000,
+    holdoutDays: 30,
+    trainingDays: 90,
+    stepDays: 30,
+    iterations: 1,
+    candidatesPerIteration: 2,
+    parallelism: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false,
+    loopVersion: "v2",
+    minNetReturnForPromotion: 0.5
+  });
+
+  assert.equal(report.outcome, "completed");
+  assert.ok(report.lineage);
+  assert.equal(report.iterations.length, 1);
+  assert.match(report.iterations[0]?.review.summary ?? "", /Objective governance/i);
+
+  const lineageSnapshot = await loadLineageSnapshot(outputDir);
+  assert.ok(lineageSnapshot);
+  assert.equal(lineageSnapshot?.latestIteration, 1);
+
+  const lineageEventsRaw = await readFile(path.join(outputDir, "research-lineage-events.jsonl"), "utf8");
+  assert.match(lineageEventsRaw, /proposal_recorded/);
+  assert.match(lineageEventsRaw, /iteration_reviewed/);
+});
+
+test("auto research v2 survives proposal failure with objective seed continuity", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-v2-proposal-fail-"));
+
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      throw new Error("proposal transport failed");
+    },
+    async reviewIteration() {
+      return {
+        summary: "stop after objective seed pass",
+        verdict: "stop_no_edge",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, 0.0125);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  const report = await orchestrator.run({
+    strategyFamilyIds: ["relative-momentum-pullback"],
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 3,
+    limit: 2000,
+    holdoutDays: 30,
+    trainingDays: 90,
+    stepDays: 30,
+    iterations: 1,
+    candidatesPerIteration: 2,
+    parallelism: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false,
+    loopVersion: "v2"
+  });
+
+  assert.equal(report.outcome, "completed");
+  assert.equal(report.iterations.length, 1);
+  assert.ok(
+    report.iterations[0]?.proposal.candidates.every(
+      (candidate) => candidate.origin === "engine_seed" || candidate.origin === "artifact_seed"
+    )
+  );
+  const lineageSnapshot = await loadLineageSnapshot(outputDir);
+  assert.ok(lineageSnapshot);
+});
+
+test("auto research v2 repairs empty keep_searching batches with deterministic continuation", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-v2-empty-next-"));
+
+  let reviewCalls = 0;
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "v2 keep searching",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "v2-keep-searching-01",
+            familyId: "relative-momentum-pullback",
+            thesis: "base candidate",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.95,
+              trailAtrMult: 2.3
+            },
+            invalidationSignals: []
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      reviewCalls += 1;
+      return {
+        summary: "keep searching with no explicit next batch",
+        verdict: "keep_searching",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      return buildEvaluation(candidate, 0.015);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  const report = await orchestrator.run({
+    strategyFamilyIds: ["relative-momentum-pullback"],
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 3,
+    limit: 2000,
+    holdoutDays: 30,
+    trainingDays: 90,
+    stepDays: 30,
+    iterations: 2,
+    candidatesPerIteration: 2,
+    parallelism: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false,
+    loopVersion: "v2",
+    minNetReturnForPromotion: 0.5
+  });
+
+  assert.equal(reviewCalls, 2);
+  assert.equal(report.iterations.length, 2);
+  assert.ok(
+    report.iterations.some((iteration) =>
+      iteration.review.observations.some((observation) => /Objective compiler supplied a deterministic next batch/i.test(observation))
+    )
+  );
 });

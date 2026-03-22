@@ -9,15 +9,12 @@ export function createDefaultUniverseSnapshotBuilderConfig(): UniverseSnapshotBu
   };
 }
 
-function sumQuoteVolume(candles: FullGridCandleSet["candlesByMarket"][string], start: number, end: number): number {
-  let total = 0;
-
-  for (let index = start; index <= end; index += 1) {
-    const candle = candles[index];
-    total += candle?.quoteVolume ?? ((candle?.closePrice ?? 0) * (candle?.volume ?? 0));
+function getQuoteVolume(candle: FullGridCandleSet["candlesByMarket"][string][number] | undefined): number {
+  if (!candle) {
+    return 0;
   }
 
-  return total;
+  return candle.quoteVolume ?? (candle.closePrice * candle.volume);
 }
 
 export function buildUniverseSnapshots(params: {
@@ -32,10 +29,20 @@ export function buildUniverseSnapshots(params: {
   const markets = Object.keys(params.candleSet.candlesByMarket).sort((left, right) =>
     left.localeCompare(right)
   );
+  const rollingMetricByMarket = Object.fromEntries(markets.map((market) => [market, 0]));
   let latest: UniverseSnapshot | undefined;
 
   for (let index = 0; index < params.candleSet.timeline.length; index += 1) {
     const asOf = params.candleSet.timeline[index];
+    const expiredIndex = index - config.lookbackBars;
+
+    for (const market of markets) {
+      const candles = params.candleSet.candlesByMarket[market] ?? [];
+      rollingMetricByMarket[market] += getQuoteVolume(candles[index]);
+      if (expiredIndex >= 0) {
+        rollingMetricByMarket[market] -= getQuoteVolume(candles[expiredIndex]);
+      }
+    }
 
     if (index + 1 < config.lookbackBars) {
       continue;
@@ -45,11 +52,10 @@ export function buildUniverseSnapshots(params: {
       !latest || (index - (config.lookbackBars - 1)) % config.refreshEveryBars === 0;
 
     if (shouldRefresh) {
-      const start = index - config.lookbackBars + 1;
       const ranked = markets
         .map((market) => ({
           market,
-          metric: sumQuoteVolume(params.candleSet.candlesByMarket[market], start, index)
+          metric: rollingMetricByMarket[market] ?? 0
         }))
         .filter((item) => item.metric > 0)
         .sort((left, right) => {

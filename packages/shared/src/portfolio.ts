@@ -36,4 +36,8 @@ export type PortfolioDecision = {
   ts: number;
   intents: PositionIntent[];
   blockedSignals: BlockedSignal[];
+  diagnostics: {
+    consideredBuys: number;
+    eligibleBuys: number;
+  };
 };

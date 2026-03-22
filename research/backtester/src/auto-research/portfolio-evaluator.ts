@@ -1,8 +1,10 @@
-import type { StrategyTimeframe } from "../../../../packages/shared/src/index.js";
+import type { StrategyTimeframe, UniverseSnapshot } from "../../../../packages/shared/src/index.js";
 import { loadCandlesForMarkets } from "../db.js";
 import {
+  buildUniverseSnapshots,
   normalizeToFullGrid,
   runMultiStrategyBacktest,
+  type FullGridCandleSet,
   type MultiStrategyBacktestResult
 } from "../multi-strategy/index.js";
 import type { Candle } from "../types.js";
@@ -14,10 +16,13 @@ import { repairWalkForwardConfig, summarizeReferenceCandleSpan } from "./walk-fo
 
 type CandleMap = Record<string, Candle[]>;
 type PortfolioCandleLoader = typeof loadCandlesForMarkets;
+type PortfolioRuntime = ReturnType<typeof buildPortfolioCandidateRuntime>;
 
 type PortfolioCandleData = {
   decisionCandles: Partial<Record<StrategyTimeframe, CandleMap>>;
   executionCandles: Partial<Record<StrategyTimeframe, CandleMap>>;
+  normalizedDecisionSets: Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
+  normalizedExecutionSets: Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
   referenceCandles: Candle[];
 };
 
@@ -99,26 +104,12 @@ function aggregate5mCandlesTo15m(candlesByMarket: CandleMap): CandleMap {
   );
 }
 
-function filterCandlesByRange(
-  candlesByMarket: CandleMap,
-  range: { start: Date; end: Date }
-): CandleMap {
-  return Object.fromEntries(
-    Object.entries(candlesByMarket).map(([marketCode, candles]) => [
-      marketCode,
-      candles.filter(
-        (candle) => candle.candleTimeUtc >= range.start && candle.candleTimeUtc <= range.end
-      )
-    ])
-  );
-}
+function chooseReferenceCandles(candleSet: FullGridCandleSet | undefined): Candle[] {
+  if (!candleSet) {
+    return [];
+  }
 
-function chooseReferenceCandles(candlesByMarket: CandleMap, timeframe: StrategyTimeframe): Candle[] {
-  const normalized = normalizeToFullGrid({
-    timeframe,
-    candlesByMarket
-  });
-  const bestMarket = Object.entries(normalized.candlesByMarket)
+  const bestMarket = Object.entries(candleSet.candlesByMarket)
     .sort(([leftMarket, leftCandles], [rightMarket, rightCandles]) => {
       if (rightCandles.length !== leftCandles.length) {
         return rightCandles.length - leftCandles.length;
@@ -127,7 +118,126 @@ function chooseReferenceCandles(candlesByMarket: CandleMap, timeframe: StrategyT
       return leftMarket.localeCompare(rightMarket);
     })[0]?.[0];
 
-  return bestMarket ? normalized.candlesByMarket[bestMarket] ?? [] : [];
+  return bestMarket ? candleSet.candlesByMarket[bestMarket] ?? [] : [];
+}
+
+function normalizeCandleSets(
+  candlesByTimeframe: Partial<Record<StrategyTimeframe, CandleMap>>
+): Partial<Record<StrategyTimeframe, FullGridCandleSet>> {
+  return Object.fromEntries(
+    Object.entries(candlesByTimeframe)
+      .filter(([, candlesByMarket]) => Object.keys(candlesByMarket ?? {}).length > 0)
+      .map(([timeframe, candlesByMarket]) => [
+        timeframe,
+        normalizeToFullGrid({
+          timeframe: timeframe as StrategyTimeframe,
+          candlesByMarket: candlesByMarket ?? {}
+        })
+      ])
+  ) as Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
+}
+
+function buildPortfolioUniverseSnapshots(params: {
+  config: AutoResearchRunConfig;
+  runtime: PortfolioRuntime;
+  normalizedDecisionSets: Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
+}): Partial<Record<StrategyTimeframe, Map<string, UniverseSnapshot>>> {
+  return Object.fromEntries(
+    Object.entries(params.normalizedDecisionSets).map(([timeframe, candleSet]) => [
+      timeframe,
+      buildUniverseSnapshots({
+        candleSet,
+        config: {
+          topN: Math.min(
+            params.runtime.universeTopN,
+            params.config.marketLimit,
+            Object.keys(candleSet.candlesByMarket).length || params.runtime.universeTopN
+          ),
+          lookbackBars: params.runtime.universeLookbackBars,
+          refreshEveryBars: params.runtime.refreshEveryBars
+        }
+      })
+    ])
+  ) as Partial<Record<StrategyTimeframe, Map<string, UniverseSnapshot>>>;
+}
+
+function findFirstTimeIndexAtOrAfter(timeline: Date[], targetMs: number): number {
+  let left = 0;
+  let right = timeline.length - 1;
+  let result = -1;
+
+  while (left <= right) {
+    const middle = Math.floor((left + right) / 2);
+    const currentMs = timeline[middle]?.getTime() ?? Number.POSITIVE_INFINITY;
+
+    if (currentMs >= targetMs) {
+      result = middle;
+      right = middle - 1;
+      continue;
+    }
+
+    left = middle + 1;
+  }
+
+  return result;
+}
+
+function findLastTimeIndexAtOrBefore(timeline: Date[], targetMs: number): number {
+  let left = 0;
+  let right = timeline.length - 1;
+  let result = -1;
+
+  while (left <= right) {
+    const middle = Math.floor((left + right) / 2);
+    const currentMs = timeline[middle]?.getTime() ?? Number.NEGATIVE_INFINITY;
+
+    if (currentMs <= targetMs) {
+      result = middle;
+      left = middle + 1;
+      continue;
+    }
+
+    right = middle - 1;
+  }
+
+  return result;
+}
+
+function sliceFullGridCandleSetByRange(
+  candleSet: FullGridCandleSet,
+  range: { start: Date; end: Date }
+): FullGridCandleSet {
+  const startIndex = findFirstTimeIndexAtOrAfter(candleSet.timeline, range.start.getTime());
+  const endIndex = findLastTimeIndexAtOrBefore(candleSet.timeline, range.end.getTime());
+
+  if (
+    startIndex === -1 ||
+    endIndex === -1 ||
+    startIndex > endIndex
+  ) {
+    return {
+      timeframe: candleSet.timeframe,
+      timeline: [],
+      candlesByMarket: Object.fromEntries(
+        Object.keys(candleSet.candlesByMarket).map((marketCode) => [marketCode, []])
+      )
+    };
+  }
+
+  if (startIndex === 0 && endIndex === candleSet.timeline.length - 1) {
+    return candleSet;
+  }
+
+  return {
+    timeframe: candleSet.timeframe,
+    timeline: candleSet.timeline.slice(startIndex, endIndex + 1),
+    candlesByMarket: Object.fromEntries(
+      Object.entries(candleSet.candlesByMarket).map(([marketCode, candles]) => [
+        marketCode,
+        candles.slice(startIndex, endIndex + 1)
+      ])
+    )
+  };
 }
 
 function selectReferenceTimeframe(requiredTimeframes: StrategyTimeframe[]): StrategyTimeframe {
@@ -145,6 +255,7 @@ function selectReferenceTimeframe(requiredTimeframes: StrategyTimeframe[]): Stra
 
 async function loadPortfolioCandles(params: {
   config: AutoResearchRunConfig;
+  runtime: PortfolioRuntime;
   marketCodes: string[];
   requiredTimeframes: StrategyTimeframe[];
   loadCandles?: PortfolioCandleLoader;
@@ -189,72 +300,127 @@ async function loadPortfolioCandles(params: {
   ]);
 
   const candles15m = needs15m ? aggregate5mCandlesTo15m(candles5m) : {};
+  const decisionCandles = {
+    "1h": candles1h as CandleMap,
+    "15m": candles15m,
+    "5m": candles5m as CandleMap,
+    "1m": candles1m as CandleMap
+  } satisfies Partial<Record<StrategyTimeframe, CandleMap>>;
+  const executionCandles = {
+    "5m": candles5m as CandleMap,
+    "1m": candles1m as CandleMap
+  } satisfies Partial<Record<StrategyTimeframe, CandleMap>>;
+  const normalizedDecisionSets = normalizeCandleSets(decisionCandles);
+  const normalizedExecutionSets = Object.fromEntries(
+    Object.entries(executionCandles)
+      .map(([timeframe, candlesByMarket]) => {
+        const normalized =
+          normalizedDecisionSets[timeframe as StrategyTimeframe] ??
+          (Object.keys(candlesByMarket ?? {}).length > 0
+            ? normalizeToFullGrid({
+                timeframe: timeframe as StrategyTimeframe,
+                candlesByMarket: candlesByMarket ?? {}
+              })
+            : undefined);
+
+        return normalized ? ([timeframe, normalized] as const) : undefined;
+      })
+      .filter((entry): entry is readonly [string, FullGridCandleSet] => entry !== undefined)
+  ) as Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
   const referenceTimeframe = selectReferenceTimeframe(params.requiredTimeframes);
-  const referenceCandles = chooseReferenceCandles(
-    referenceTimeframe === "1h"
-      ? (candles1h as CandleMap)
-      : referenceTimeframe === "15m"
-        ? candles15m
-        : referenceTimeframe === "5m"
-          ? (candles5m as CandleMap)
-          : (candles1m as CandleMap),
-    referenceTimeframe
-  );
+  const referenceCandles = chooseReferenceCandles(normalizedDecisionSets[referenceTimeframe]);
 
   if (referenceCandles.length === 0) {
     throw new Error("No normalized portfolio reference candles available");
   }
 
   return {
-    decisionCandles: {
-      "1h": candles1h as CandleMap,
-      "15m": candles15m,
-      "5m": candles5m as CandleMap,
-      "1m": candles1m as CandleMap
-    },
-    executionCandles: {
-      "5m": candles5m as CandleMap,
-      "1m": candles1m as CandleMap
-    },
+    decisionCandles,
+    executionCandles,
+    normalizedDecisionSets,
+    normalizedExecutionSets,
     referenceCandles
   };
 }
 
 function runPortfolioRangeBacktest(params: {
   config: AutoResearchRunConfig;
+  runtime: PortfolioRuntime;
   candleData: PortfolioCandleData;
   range: { start: Date; end: Date };
   candidate: NormalizedCandidateProposal;
   blockCatalog?: ValidatedBlockCatalog;
 }): MultiStrategyBacktestResult {
-  const runtime = buildPortfolioCandidateRuntime(params.candidate, params.blockCatalog);
+  const slicedSetCache = new Map<FullGridCandleSet, FullGridCandleSet>();
+  const getSlicedSet = (candleSet: FullGridCandleSet | undefined): FullGridCandleSet | undefined => {
+    if (!candleSet) {
+      return undefined;
+    }
+
+    const cached = slicedSetCache.get(candleSet);
+    if (cached) {
+      return cached;
+    }
+
+    const sliced = sliceFullGridCandleSetByRange(candleSet, params.range);
+    slicedSetCache.set(candleSet, sliced);
+    return sliced;
+  };
+  const decisionSets = Object.fromEntries(
+    Object.entries(params.candleData.normalizedDecisionSets)
+      .map(([timeframe, candleSet]) => {
+        const sliced = getSlicedSet(candleSet);
+        return sliced ? ([timeframe, sliced] as const) : undefined;
+      })
+      .filter((entry): entry is readonly [string, FullGridCandleSet] => entry !== undefined)
+  ) as Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
+  const executionSets = Object.fromEntries(
+    Object.entries(params.candleData.normalizedExecutionSets)
+      .map(([timeframe, candleSet]) => {
+        const sliced = getSlicedSet(candleSet);
+        return sliced ? ([timeframe, sliced] as const) : undefined;
+      })
+      .filter((entry): entry is readonly [string, FullGridCandleSet] => entry !== undefined)
+  ) as Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
+  const referenceMarketCount =
+    Object.keys(
+      params.candleData.normalizedDecisionSets["1h"]?.candlesByMarket ??
+      params.candleData.normalizedDecisionSets["15m"]?.candlesByMarket ??
+      params.candleData.normalizedDecisionSets["5m"]?.candlesByMarket ??
+      params.candleData.normalizedDecisionSets["1m"]?.candlesByMarket ??
+      {}
+    ).length || params.runtime.universeTopN;
+  const universeSnapshotsByTf = buildPortfolioUniverseSnapshots({
+    config: params.config,
+    runtime: params.runtime,
+    normalizedDecisionSets: decisionSets
+  });
 
   return runMultiStrategyBacktest({
     universeName: params.config.universeName,
     initialCapital: 1_000_000,
-    sleeves: runtime.sleeves,
-    strategies: runtime.strategies,
+    sleeves: params.runtime.sleeves,
+    strategies: params.runtime.strategies,
     decisionCandles: Object.fromEntries(
-      Object.entries(params.candleData.decisionCandles).map(([timeframe, candlesByMarket]) => [
-        timeframe,
-        filterCandlesByRange(candlesByMarket ?? {}, params.range)
-      ])
+      Object.entries(decisionSets).map(([timeframe, candleSet]) => [timeframe, candleSet.candlesByMarket])
     ),
     executionCandles: Object.fromEntries(
-      Object.entries(params.candleData.executionCandles).map(([timeframe, candlesByMarket]) => [
-        timeframe,
-        filterCandlesByRange(candlesByMarket ?? {}, params.range)
-      ])
+      Object.entries(executionSets).map(([timeframe, candleSet]) => [timeframe, candleSet.candlesByMarket])
     ),
+    preNormalizedDecisionSets: decisionSets,
+    preNormalizedExecutionSets: executionSets,
+    precomputedUniverseSnapshotsByTf: universeSnapshotsByTf,
+    captureTraceArtifacts: false,
+    captureUniverseSnapshots: false,
     universeConfig: {
-      topN: Math.min(runtime.universeTopN, params.config.marketLimit, Object.keys((params.candleData.decisionCandles["1h"] ?? params.candleData.decisionCandles["15m"] ?? params.candleData.decisionCandles["5m"] ?? {})).length || runtime.universeTopN),
-      lookbackBars: runtime.universeLookbackBars,
-      refreshEveryBars: runtime.refreshEveryBars
+      topN: Math.min(params.runtime.universeTopN, params.config.marketLimit, referenceMarketCount),
+      lookbackBars: params.runtime.universeLookbackBars,
+      refreshEveryBars: params.runtime.refreshEveryBars
     },
-    maxOpenPositions: runtime.maxOpenPositions,
-    maxCapitalUsagePct: runtime.maxCapitalUsagePct,
-    cooldownBarsAfterLoss: runtime.cooldownBarsAfterLoss,
-    minBarsBetweenEntries: runtime.minBarsBetweenEntries
+    maxOpenPositions: params.runtime.maxOpenPositions,
+    maxCapitalUsagePct: params.runtime.maxCapitalUsagePct,
+    cooldownBarsAfterLoss: params.runtime.cooldownBarsAfterLoss,
+    minBarsBetweenEntries: params.runtime.minBarsBetweenEntries
   });
 }
 
@@ -266,12 +432,30 @@ function universeSizeSummary(result: MultiStrategyBacktestResult): {
   avg: number;
   min: number;
   max: number;
+  observationCount: number;
 } {
-  const sizes = result.universeSnapshots.map((snapshot) => snapshot.markets.length);
+  if (result.universeCoverageSummary.observationCount > 0) {
+    return result.universeCoverageSummary;
+  }
+
+  let total = 0;
+  let min = Number.POSITIVE_INFINITY;
+  let max = 0;
+  let observationCount = 0;
+
+  for (const snapshot of result.universeSnapshots) {
+    const size = snapshot.markets.length;
+    total += size;
+    min = Math.min(min, size);
+    max = Math.max(max, size);
+    observationCount += 1;
+  }
+
   return {
-    avg: sizes.length === 0 ? 0 : sizes.reduce((sum, value) => sum + value, 0) / sizes.length,
-    min: sizes.length === 0 ? 0 : Math.min(...sizes),
-    max: sizes.length === 0 ? 0 : Math.max(...sizes)
+    avg: observationCount === 0 ? 0 : total / observationCount,
+    min: Number.isFinite(min) ? min : 0,
+    max: observationCount === 0 ? 0 : max,
+    observationCount
   };
 }
 
@@ -343,7 +527,6 @@ function buildHoldoutEvaluation(params: {
   availableSpan: ReturnType<typeof summarizeReferenceCandleSpan>;
   trainRange: { start: Date; end: Date };
   testRange: { start: Date; end: Date };
-  trainResult: MultiStrategyBacktestResult;
   testResult: MultiStrategyBacktestResult;
   crossChecks?: CandidateBacktestEvaluation["diagnostics"]["crossChecks"];
   crossCheckWindows?: Partial<CandidateBacktestEvaluation["diagnostics"]["windows"]>;
@@ -351,10 +534,7 @@ function buildHoldoutEvaluation(params: {
   const testUniverse = universeSizeSummary(params.testResult);
   const signalCount = params.testResult.metrics.signalCount;
   const ghostSignalCount = toGhostSignalCount(params.testResult);
-  const buySignals = Object.values(params.testResult.strategyMetrics).reduce(
-    (sum, item) => sum + item.buySignals,
-    0
-  );
+  const decisionCoverage = params.testResult.decisionCoverageSummary;
 
   return {
     candidate: params.candidate,
@@ -383,17 +563,14 @@ function buildHoldoutEvaluation(params: {
         ghostSignalCount,
         rejectedOrdersCount: params.testResult.metrics.rejectedOrdersCount,
         cooldownSkipsCount: params.testResult.metrics.cooldownSkipsCount,
-        rawBuySignals: buySignals,
-        rawSellSignals: Object.values(params.testResult.strategyMetrics).reduce(
-          (sum, item) => sum + item.sellSignals,
-          0
-        ),
-        rawHoldSignals: Math.max(0, signalCount - buySignals),
+        rawBuySignals: decisionCoverage.rawBuySignals,
+        rawSellSignals: decisionCoverage.rawSellSignals,
+        rawHoldSignals: decisionCoverage.rawHoldSignals,
         avgUniverseSize: testUniverse.avg,
         minUniverseSize: testUniverse.min,
         maxUniverseSize: testUniverse.max,
-        avgConsideredBuys: signalCount === 0 ? 0 : buySignals / Math.max(params.testResult.universeSnapshots.length, 1),
-        avgEligibleBuys: signalCount === 0 ? 0 : buySignals / Math.max(params.testResult.universeSnapshots.length, 1)
+        avgConsideredBuys: decisionCoverage.avgConsideredBuys,
+        avgEligibleBuys: decisionCoverage.avgEligibleBuys
       },
       reasons: {
         strategy: flattenFunnel(params.testResult),
@@ -441,6 +618,7 @@ function buildHoldoutEvaluation(params: {
 function buildPortfolioWalkForwardEvaluation(params: {
   config: AutoResearchRunConfig;
   candidate: NormalizedCandidateProposal;
+  runtime: PortfolioRuntime;
   candleData: PortfolioCandleData;
   availableSpan: ReturnType<typeof summarizeReferenceCandleSpan>;
   blockCatalog?: ValidatedBlockCatalog;
@@ -461,15 +639,9 @@ function buildPortfolioWalkForwardEvaluation(params: {
   const results = windows.map((window) => ({
     trainRange: window.trainRange,
     testRange: window.testRange,
-    train: runPortfolioRangeBacktest({
-      config: params.config,
-      candleData: params.candleData,
-      range: window.trainRange,
-      candidate: params.candidate,
-      blockCatalog: params.blockCatalog
-    }),
     test: runPortfolioRangeBacktest({
       config: params.config,
+      runtime: params.runtime,
       candleData: params.candleData,
       range: window.testRange,
       candidate: params.candidate,
@@ -493,17 +665,62 @@ function buildPortfolioWalkForwardEvaluation(params: {
   );
   const feePaid = results.reduce((sum, window) => sum + window.test.metrics.feePaid, 0);
   const slippagePaid = results.reduce((sum, window) => sum + window.test.metrics.slippagePaid, 0);
-  const universeStats = results.map((window) => universeSizeSummary(window.test));
-  const avgUniverseSize =
-    universeStats.reduce((sum, window) => sum + window.avg, 0) / Math.max(results.length, 1);
-  const minUniverseSize = Math.min(...universeStats.map((window) => window.min));
-  const maxUniverseSize = Math.max(...universeStats.map((window) => window.max));
-  const buySignals = results.reduce(
-    (sum, window) =>
-      sum +
-      Object.values(window.test.strategyMetrics).reduce((inner, item) => inner + item.buySignals, 0),
+  const totalDecisionObservations = results.reduce(
+    (sum, window) => sum + window.test.decisionCoverageSummary.observationCount,
     0
   );
+  const universeStats = results.map((window) => universeSizeSummary(window.test));
+  const totalUniverseObservations = universeStats.reduce(
+    (sum, window) => sum + window.observationCount,
+    0
+  );
+  const avgUniverseSize = totalUniverseObservations === 0
+    ? 0
+    : universeStats.reduce(
+      (sum, window) => sum + (window.avg * window.observationCount),
+      0
+    ) / totalUniverseObservations;
+  let minUniverseSize = Number.POSITIVE_INFINITY;
+  let maxUniverseSize = 0;
+
+  for (const window of universeStats) {
+    if (window.observationCount === 0) {
+      continue;
+    }
+
+    minUniverseSize = Math.min(minUniverseSize, window.min);
+    maxUniverseSize = Math.max(maxUniverseSize, window.max);
+  }
+  const rawBuySignals = results.reduce(
+    (sum, window) => sum + window.test.decisionCoverageSummary.rawBuySignals,
+    0
+  );
+  const rawSellSignals = results.reduce(
+    (sum, window) => sum + window.test.decisionCoverageSummary.rawSellSignals,
+    0
+  );
+  const rawHoldSignals = results.reduce(
+    (sum, window) => sum + window.test.decisionCoverageSummary.rawHoldSignals,
+    0
+  );
+  const avgConsideredBuys = totalDecisionObservations === 0
+    ? 0
+    : results.reduce(
+      (sum, window) =>
+        sum +
+        (window.test.decisionCoverageSummary.avgConsideredBuys *
+          window.test.decisionCoverageSummary.observationCount),
+      0
+    ) / totalDecisionObservations;
+  const avgEligibleBuys = totalDecisionObservations === 0
+    ? 0
+    : results.reduce(
+      (sum, window) =>
+        sum +
+        (window.test.decisionCoverageSummary.avgEligibleBuys *
+          window.test.decisionCoverageSummary.observationCount),
+      0
+    ) / totalDecisionObservations;
 
   return {
     candidate: params.candidate,
@@ -535,19 +752,14 @@ function buildPortfolioWalkForwardEvaluation(params: {
         ghostSignalCount,
         rejectedOrdersCount,
         cooldownSkipsCount,
-        rawBuySignals: buySignals,
-        rawSellSignals: results.reduce(
-          (sum, window) =>
-            sum +
-            Object.values(window.test.strategyMetrics).reduce((inner, item) => inner + item.sellSignals, 0),
-          0
-        ),
-        rawHoldSignals: Math.max(0, signalCount - buySignals),
+        rawBuySignals,
+        rawSellSignals,
+        rawHoldSignals,
         avgUniverseSize,
         minUniverseSize: Number.isFinite(minUniverseSize) ? minUniverseSize : 0,
         maxUniverseSize: Number.isFinite(maxUniverseSize) ? maxUniverseSize : 0,
-        avgConsideredBuys: buySignals / Math.max(signalCount, 1),
-        avgEligibleBuys: buySignals / Math.max(signalCount, 1)
+        avgConsideredBuys,
+        avgEligibleBuys
       },
       reasons: {
         strategy: results.reduce(
@@ -605,7 +817,7 @@ export async function evaluatePortfolioCandidate(params: {
   loadCandles?: PortfolioCandleLoader;
   blockCatalog?: ValidatedBlockCatalog;
 }): Promise<CandidateBacktestEvaluation> {
-  const runtime = buildPortfolioCandidateRuntime(params.candidate, params.blockCatalog);
+  const runtime = buildPortfolioCandidateRuntime(params.candidate);
   const evaluationMarketCodes = selectPortfolioEvaluationMarkets({
     marketCodes: params.marketCodes,
     requiredTimeframes: runtime.requiredTimeframes,
@@ -613,6 +825,7 @@ export async function evaluatePortfolioCandidate(params: {
   });
   const candleData = await loadPortfolioCandles({
     config: params.config,
+    runtime,
     marketCodes: evaluationMarketCodes,
     requiredTimeframes: runtime.requiredTimeframes,
     loadCandles: params.loadCandles
@@ -624,15 +837,9 @@ export async function evaluatePortfolioCandidate(params: {
       candleData.referenceCandles,
       params.config.holdoutDays
     );
-    const trainResult = runPortfolioRangeBacktest({
-      config: params.config,
-      candleData,
-      range: trainRange,
-      candidate: params.candidate,
-      blockCatalog: params.blockCatalog
-    });
     const testResult = runPortfolioRangeBacktest({
       config: params.config,
+      runtime,
       candleData,
       range: testRange,
       candidate: params.candidate,
@@ -673,6 +880,7 @@ export async function evaluatePortfolioCandidate(params: {
           const walkForwardCrossCheck = buildPortfolioWalkForwardEvaluation({
             config: walkForwardResolution.config,
             candidate: params.candidate,
+            runtime,
             candleData,
             availableSpan,
             blockCatalog: params.blockCatalog
@@ -723,7 +931,6 @@ export async function evaluatePortfolioCandidate(params: {
       availableSpan,
       trainRange,
       testRange,
-      trainResult,
       testResult,
       crossChecks,
       crossCheckWindows
@@ -733,6 +940,7 @@ export async function evaluatePortfolioCandidate(params: {
   return buildPortfolioWalkForwardEvaluation({
     config: params.config,
     candidate: params.candidate,
+    runtime,
     candleData,
     availableSpan,
     blockCatalog: params.blockCatalog

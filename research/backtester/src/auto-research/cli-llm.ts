@@ -434,6 +434,7 @@ export async function spawnLlm(prompt: string, options: CliLlmOptions = {}): Pro
   child.stderr.on("data", (chunk) => {
     const value = chunk.toString();
     stderr += value;
+    resetIdleTimer();
     options.onStderr?.(value);
   });
 

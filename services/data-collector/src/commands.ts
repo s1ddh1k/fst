@@ -6,6 +6,7 @@ import {
 } from "./config.js";
 import {
   closeDb,
+  getEarliestCandleTime,
   getSelectedUniverseMarkets,
   insertSystemLog,
   replaceMarketUniverse,
@@ -53,6 +54,17 @@ function parseTimeframes(value: string | undefined): Timeframe[] {
 async function resolveDefaultMarkets(): Promise<string[]> {
   const selectedUniverseMarkets = await getSelectedUniverseMarkets(DEFAULT_UNIVERSE_NAME);
   return selectedUniverseMarkets.length > 0 ? selectedUniverseMarkets : DEFAULT_MARKETS;
+}
+
+async function resolveMarketsForBatch(args: string[]): Promise<string[]> {
+  const directMarkets = parseMarkets(getOption(args, "--markets"));
+  if (directMarkets.length > 0) {
+    return directMarkets;
+  }
+
+  const universeName = getOption(args, "--universe") ?? DEFAULT_UNIVERSE_NAME;
+  const universeMarkets = await getSelectedUniverseMarkets(universeName);
+  return universeMarkets.length > 0 ? universeMarkets : DEFAULT_MARKETS;
 }
 
 export async function syncMarkets(): Promise<void> {
@@ -174,16 +186,15 @@ export async function backfill(args: string[]): Promise<void> {
 }
 
 export async function backfillBatch(args: string[]): Promise<void> {
-  const marketsValue = getOption(args, "--markets");
   const timeframesValue = getOption(args, "--timeframes");
   const pagesValue = getOption(args, "--pages");
 
-  const markets = parseMarkets(marketsValue);
+  const markets = await resolveMarketsForBatch(args);
   const timeframes = parseTimeframes(timeframesValue);
   const pages = pagesValue ? Number.parseInt(pagesValue, 10) : 1;
 
   if (markets.length === 0) {
-    throw new Error("Missing required option: --markets");
+    throw new Error("No markets available for backfill batch");
   }
 
   if (timeframes.length === 0 || !timeframes.every(isTimeframe)) {
@@ -201,6 +212,132 @@ export async function backfillBatch(args: string[]): Promise<void> {
     }
 
     console.log(JSON.stringify(results, null, 2));
+  } finally {
+    await closeDb();
+  }
+}
+
+export async function backfillUntil(args: string[]): Promise<void> {
+  const targetValue = getOption(args, "--target");
+  const timeframesValue = getOption(args, "--timeframes");
+  const batchPagesValue = getOption(args, "--batch-pages");
+  const maxBatchesValue = getOption(args, "--max-batches-per-market");
+  const batchPages = batchPagesValue ? Number.parseInt(batchPagesValue, 10) : 25;
+  const maxBatchesPerMarket = maxBatchesValue ? Number.parseInt(maxBatchesValue, 10) : null;
+  const markets = await resolveMarketsForBatch(args);
+  const timeframes = parseTimeframes(timeframesValue);
+
+  if (!targetValue) {
+    throw new Error("Missing required option: --target (example: 2021-01-01T00:00:00Z)");
+  }
+
+  const target = new Date(targetValue);
+  if (Number.isNaN(target.getTime())) {
+    throw new Error("Invalid option: --target must be an ISO datetime");
+  }
+
+  if (Number.isNaN(batchPages) || batchPages < 1) {
+    throw new Error("Invalid option: --batch-pages must be a positive integer");
+  }
+
+  if (
+    maxBatchesPerMarket !== null &&
+    (Number.isNaN(maxBatchesPerMarket) || maxBatchesPerMarket < 1)
+  ) {
+    throw new Error("Invalid option: --max-batches-per-market must be a positive integer");
+  }
+
+  if (markets.length === 0) {
+    throw new Error("No markets available for backfill until");
+  }
+
+  if (timeframes.length === 0 || !timeframes.every(isTimeframe)) {
+    throw new Error("Missing or invalid option: --timeframes (allowed: 1m, 5m, 15m, 1h, 1d)");
+  }
+
+  try {
+    const summary: Array<Record<string, unknown>> = [];
+
+    for (const market of markets) {
+      for (const timeframe of timeframes) {
+        let batches = 0;
+        let pages = 0;
+        let fetched = 0;
+        let saved = 0;
+        let completed = false;
+        let stoppedReason: string | null = null;
+        let earliest = await getEarliestCandleTime(market, timeframe);
+
+        while (true) {
+          if (earliest && earliest <= target) {
+            completed = true;
+            stoppedReason = "target_reached";
+            break;
+          }
+
+          if (maxBatchesPerMarket !== null && batches >= maxBatchesPerMarket) {
+            stoppedReason = "max_batches_reached";
+            break;
+          }
+
+          const beforeIso = earliest?.toISOString() ?? null;
+          const result = await backfillCandles(market, timeframe, batchPages);
+          const nextEarliest = await getEarliestCandleTime(market, timeframe);
+
+          batches += 1;
+          pages += batchPages;
+          fetched += result.fetched;
+          saved += result.saved;
+
+          console.log(
+            JSON.stringify({
+              market,
+              timeframe,
+              target: target.toISOString(),
+              batches,
+              pages,
+              fetched,
+              saved,
+              earliestBefore: beforeIso,
+              earliestAfter: nextEarliest?.toISOString() ?? null
+            })
+          );
+
+          if (result.fetched === 0) {
+            stoppedReason = "no_more_remote_candles";
+            earliest = nextEarliest;
+            break;
+          }
+
+          if (
+            earliest &&
+            nextEarliest &&
+            nextEarliest.getTime() >= earliest.getTime()
+          ) {
+            stoppedReason = "no_progress";
+            earliest = nextEarliest;
+            break;
+          }
+
+          earliest = nextEarliest;
+        }
+
+        summary.push({
+          market,
+          timeframe,
+          target: target.toISOString(),
+          completed,
+          stoppedReason,
+          batches,
+          pages,
+          fetched,
+          saved,
+          earliestCandleTimeUtc: earliest?.toISOString() ?? null
+        });
+      }
+    }
+
+    console.log(JSON.stringify(summary, null, 2));
   } finally {
     await closeDb();
   }
@@ -438,6 +575,7 @@ export function printHelp(): void {
   pnpm --filter @fst/data-collector dev sync-latest --market KRW-BTC --timeframe 1d
   pnpm --filter @fst/data-collector dev backfill --market KRW-BTC --timeframe 1d [--pages 10]
   pnpm --filter @fst/data-collector dev backfill-batch --markets KRW-BTC,KRW-ETH --timeframes 15m,1h,1d [--pages 10]
+  pnpm --filter @fst/data-collector dev backfill-until [--markets KRW-BTC,KRW-ETH | --universe krw-top] --timeframes 15m,1h,1d --target 2021-01-01T00:00:00Z [--batch-pages 25] [--max-batches-per-market 20]
   pnpm --filter @fst/data-collector dev sync-latest-batch --markets KRW-BTC,KRW-ETH --timeframes 15m,1h,1d
   pnpm --filter @fst/data-collector dev backfill-default
   pnpm --filter @fst/data-collector dev sync-latest-default

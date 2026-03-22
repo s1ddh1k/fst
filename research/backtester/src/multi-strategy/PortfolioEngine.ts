@@ -56,11 +56,29 @@ export function createPortfolioEngine(config: PortfolioEngineConfig) {
       });
       const intents: PositionIntent[] = [];
       const blockedSignals: PortfolioDecision["blockedSignals"] = [];
+      const openPositionsByKey = new Map(
+        params.state.positions.map((position) => [
+          `${position.market}:${position.strategyId}`,
+          position
+        ])
+      );
+      const heldMarkets = new Set(params.state.positions.map((position) => position.market));
+      const sellSignals: StrategySignal[] = [];
+      const buySignals: StrategySignal[] = [];
 
-      for (const signal of params.signals.filter((item) => item.signal === "SELL")) {
-        const held = params.state.positions.find(
-          (position) => position.market === signal.market && position.strategyId === signal.strategyId
-        );
+      for (const signal of params.signals) {
+        if (signal.signal === "SELL") {
+          sellSignals.push(signal);
+          continue;
+        }
+
+        if (signal.signal === "BUY") {
+          buySignals.push(signal);
+        }
+      }
+
+      for (const signal of sellSignals) {
+        const held = openPositionsByKey.get(`${signal.market}:${signal.strategyId}`);
 
         if (!held) {
           continue;
@@ -80,7 +98,6 @@ export function createPortfolioEngine(config: PortfolioEngineConfig) {
         });
       }
 
-      const buySignals = params.signals.filter((item) => item.signal === "BUY");
       const riskAccepted: StrategySignal[] = [];
       for (const signal of buySignals) {
         const risk = checkRisk({
@@ -105,7 +122,7 @@ export function createPortfolioEngine(config: PortfolioEngineConfig) {
       const resolved = resolveSignalConflicts({
         signals: riskAccepted,
         sleeveAllocations: allocations,
-        heldMarkets: new Set(params.state.positions.map((position) => position.market)),
+        heldMarkets,
         maxOpenPositionsLeft: Math.max(0, config.maxOpenPositions - params.state.positions.length)
       });
       blockedSignals.push(...resolved.blocked);
@@ -136,7 +153,11 @@ export function createPortfolioEngine(config: PortfolioEngineConfig) {
       return {
         ts: Date.now(),
         intents,
-        blockedSignals
+        blockedSignals,
+        diagnostics: {
+          consideredBuys: buySignals.length,
+          eligibleBuys: riskAccepted.length
+        }
       };
     },
 

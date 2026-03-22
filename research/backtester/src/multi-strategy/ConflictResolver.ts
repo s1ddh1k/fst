@@ -17,7 +17,6 @@ export function resolveSignalConflicts(params: {
 }): { accepted: StrategySignal[]; blocked: BlockedSignal[] } {
   const blocked: BlockedSignal[] = [];
   const candidates = params.signals
-    .filter((signal) => signal.signal === "BUY")
     .slice()
     .sort((left, right) => {
       const leftSleeve = params.sleeveAllocations[left.sleeveId];
@@ -27,6 +26,7 @@ export function resolveSignalConflicts(params: {
 
   const accepted: StrategySignal[] = [];
   const occupiedMarkets = new Set(params.heldMarkets);
+  const acceptedCountBySleeve = new Map<string, number>();
 
   for (const signal of candidates) {
     const sleeve = params.sleeveAllocations[signal.sleeveId];
@@ -45,7 +45,7 @@ export function resolveSignalConflicts(params: {
       continue;
     }
 
-    const acceptedInSleeve = accepted.filter((item) => item.sleeveId === signal.sleeveId).length;
+    const acceptedInSleeve = acceptedCountBySleeve.get(signal.sleeveId) ?? 0;
     if (acceptedInSleeve >= sleeve.maxOpenPositions) {
       blocked.push({ strategyId: signal.strategyId, market: signal.market, reason: "sleeve_capacity" });
       continue;
@@ -58,6 +58,7 @@ export function resolveSignalConflicts(params: {
 
     accepted.push(signal);
     occupiedMarkets.add(signal.market);
+    acceptedCountBySleeve.set(signal.sleeveId, acceptedInSleeve + 1);
   }
 
   return { accepted, blocked };

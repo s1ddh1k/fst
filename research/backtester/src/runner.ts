@@ -99,6 +99,7 @@ export async function executeHoldoutBacktest(params: {
           universeName: params.universeName,
           timeframe: params.timeframe,
           config: params.strategy.contextConfig,
+          benchmarkMarketCode: params.benchmarkMarketCode,
           range: candleRange
         })
       : undefined;
@@ -251,6 +252,7 @@ export async function executeWalkForwardBacktest(params: {
           universeName: params.universeName,
           timeframe: params.timeframe,
           config: params.strategy.contextConfig,
+          benchmarkMarketCode: params.benchmarkMarketCode,
           range: candleRange
         })
       : undefined;

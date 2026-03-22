@@ -367,6 +367,16 @@ test("portfolio auto-research evaluates holdout candidates on synthetic multi-ti
   assert.equal(evaluation.diagnostics.windows.mode, "holdout");
   assert.ok((evaluation.diagnostics.windows.availableDays ?? 0) >= 7);
   assert.ok(evaluation.summary.signalCount > 0);
+  assert.equal(
+    evaluation.diagnostics.coverage.rawBuySignals +
+      evaluation.diagnostics.coverage.rawSellSignals +
+      evaluation.diagnostics.coverage.rawHoldSignals,
+    evaluation.summary.signalCount
+  );
+  assert.ok(
+    evaluation.diagnostics.coverage.avgEligibleBuys <=
+      evaluation.diagnostics.coverage.avgConsideredBuys + 1e-9
+  );
   assert.ok(Object.keys(evaluation.diagnostics.reasons.strategy).length > 0);
   assert.equal(evaluation.diagnostics.crossChecks[0]?.status, "completed");
   assert.ok((evaluation.diagnostics.windows.windowCount ?? 0) >= 1);
@@ -508,6 +518,33 @@ test("portfolio auto-research skips walk-forward cross-check for weak holdout ca
   assert.match(evaluation.diagnostics.crossChecks[0]?.failureMessage ?? "", /Skipped walk-forward cross-check/i);
 });
 
+test("portfolio auto-research rebuilds universe snapshots inside each sliced holdout window", async () => {
+  const data = buildMockCandleData();
+  const evaluation = await evaluatePortfolioCandidate({
+    config: buildConfig({
+      mode: "holdout",
+      holdoutDays: 0.5
+    }),
+    candidate: buildCandidate({
+      universeLookbackBars: 60
+    }),
+    marketCodes: [...MARKET_CODES],
+    loadCandles: async ({ marketCodes, timeframe, limit }) =>
+      Object.fromEntries(
+        marketCodes.map((marketCode) => [
+          marketCode,
+          (data[timeframe as keyof MockCandleData]?.[marketCode] ?? []).slice(-limit)
+        ])
+      )
+  });
+
+  assert.equal(evaluation.status, "completed");
+  assert.equal(evaluation.mode, "holdout");
+  assert.equal(evaluation.summary.signalCount, 0);
+  assert.equal(evaluation.diagnostics.coverage.avgUniverseSize, 0);
+  assert.equal(evaluation.diagnostics.coverage.rawBuySignals, 0);
+});
+
 test("portfolio auto-research evaluates walk-forward candidates and preserves window diagnostics", async () => {
   const data = buildMockCandleData();
   const evaluation = await evaluatePortfolioCandidate({
@@ -538,5 +575,15 @@ test("portfolio auto-research evaluates walk-forward candidates and preserves wi
   assert.ok((evaluation.diagnostics.windows.windowCount ?? 0) >= 2);
   assert.ok((evaluation.diagnostics.windows.positiveWindowCount ?? 0) >= 0);
   assert.ok(evaluation.summary.signalCount > 0);
+  assert.equal(
+    evaluation.diagnostics.coverage.rawBuySignals +
+      evaluation.diagnostics.coverage.rawSellSignals +
+      evaluation.diagnostics.coverage.rawHoldSignals,
+    evaluation.summary.signalCount
+  );
+  assert.ok(
+    evaluation.diagnostics.coverage.avgEligibleBuys <=
+      evaluation.diagnostics.coverage.avgConsideredBuys + 1e-9
+  );
   assert.ok(Object.keys(evaluation.diagnostics.reasons.strategy).length > 0);
 });

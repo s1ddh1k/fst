@@ -5,6 +5,33 @@ import { buildPointInTimeUniverse } from "../src/universe/universe-selector.js";
 import { buildMarketStateContext } from "../../strategies/src/market-state.js";
 import { createHourlyCandles } from "./test-helpers.js";
 
+function buildMacroDowntrendWithLateBounce(params: {
+  marketCode: string;
+  startPrice: number;
+  troughPrice: number;
+  bouncePrice: number;
+  totalBars?: number;
+  bounceBars?: number;
+}) {
+  const totalBars = params.totalBars ?? 24 * 90;
+  const bounceBars = params.bounceBars ?? 48;
+  const downtrendBars = Math.max(2, totalBars - bounceBars);
+  const closes = Array.from({ length: totalBars }, (_, index) => {
+    if (index < downtrendBars) {
+      const progress = index / Math.max(downtrendBars - 1, 1);
+      return params.startPrice + (params.troughPrice - params.startPrice) * progress;
+    }
+
+    const progress = (index - downtrendBars) / Math.max(bounceBars - 1, 1);
+    return params.troughPrice + (params.bouncePrice - params.troughPrice) * progress;
+  });
+
+  return createHourlyCandles({
+    marketCode: params.marketCode,
+    closes
+  });
+}
+
 test("normalizeCandlesToFullGrid fills missing bars with synthetic candles", () => {
   const marketA = createHourlyCandles({
     marketCode: "KRW-A",
@@ -102,4 +129,37 @@ test("buildMarketStateContext derives liquiditySpread from rolling quote volume"
 
   assert.ok((highContext?.relativeStrength?.liquiditySpread ?? 0) > 0);
   assert.ok((lowContext?.relativeStrength?.liquiditySpread ?? 0) < 0);
+});
+
+test("buildMarketStateContext anchors regime to daily and weekly trend plus benchmark", () => {
+  const benchmarkCandles = buildMacroDowntrendWithLateBounce({
+    marketCode: "KRW-BTC",
+    startPrice: 320,
+    troughPrice: 110,
+    bouncePrice: 122
+  });
+  const altCandles = buildMacroDowntrendWithLateBounce({
+    marketCode: "KRW-ALT",
+    startPrice: 210,
+    troughPrice: 95,
+    bouncePrice: 106
+  });
+  const context = buildMarketStateContext({
+    marketCode: "KRW-ALT",
+    referenceTime: altCandles[altCandles.length - 1]!.candleTimeUtc,
+    universeName: "krw-top",
+    universeCandlesByMarket: {
+      "KRW-BTC": benchmarkCandles,
+      "KRW-ALT": altCandles
+    }
+  });
+
+  assert.equal(context?.benchmarkMarketCode, "KRW-BTC");
+  assert.equal(context?.benchmark?.regime, "trend_down");
+  assert.equal(context?.benchmark?.anchors?.daily?.regime, "trend_down");
+  assert.equal(context?.benchmark?.anchors?.weekly?.regime, "trend_down");
+  assert.equal(context?.composite?.anchors?.daily?.regime, "trend_down");
+  assert.equal(context?.composite?.anchors?.weekly?.regime, "trend_down");
+  assert.equal(context?.composite?.regime, "trend_down");
+  assert.ok((context?.composite?.trendScore ?? 0) < 0);
 });

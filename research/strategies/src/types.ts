@@ -49,6 +49,27 @@ export type RelativeStrengthContext = {
   returnPercentile: number | null;
 };
 
+export type CompositeBenchmarkRegime =
+  | "trend_up"
+  | "trend_down"
+  | "range"
+  | "volatile"
+  | "unknown";
+
+export type CompositeBenchmarkAnchorContext = {
+  timeframe: "intraday" | "1d" | "1w";
+  sampleSize: number;
+  averageChange: number | null;
+  momentum: number | null;
+  aboveTrend: boolean | null;
+  aboveTrendRatio: number;
+  historicalVolatility: number | null;
+  trendScore: number;
+  liquidityScore: number;
+  dispersionScore: number;
+  regime: CompositeBenchmarkRegime;
+};
+
 export type CompositeBenchmarkContext = {
   source: "universe_composite";
   marketCode: string;
@@ -60,7 +81,12 @@ export type CompositeBenchmarkContext = {
   trendScore: number;
   liquidityScore: number;
   dispersionScore: number;
-  regime: "trend_up" | "trend_down" | "range" | "volatile" | "unknown";
+  regime: CompositeBenchmarkRegime;
+  anchors?: {
+    intraday: CompositeBenchmarkAnchorContext;
+    daily?: CompositeBenchmarkAnchorContext;
+    weekly?: CompositeBenchmarkAnchorContext;
+  };
 };
 
 export type BenchmarkMarketContext = CompositeBenchmarkContext;

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "pnpm exec tsc -p tsconfig.json",
-    "dev": "pnpm exec tsx src/index.ts",
+    "dev": "node --import tsx src/index.ts",
+    "tune:bb": "node --import tsx src/tune-bb-blocks.ts",
     "typecheck": "pnpm exec tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/**/*.test.ts"
   },

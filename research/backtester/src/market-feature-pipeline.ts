@@ -79,6 +79,7 @@ export async function buildMarketFeaturePipeline(params: {
       marketCode: sampleMarketCode,
       referenceTime: featureTimeUtc,
       universeName: params.universeName,
+      benchmarkMarketCode: params.config?.benchmarkMarketCode,
       universeCandlesByMarket,
       config: resolvedConfig
     });
@@ -112,6 +113,7 @@ export async function buildMarketFeaturePipeline(params: {
         marketCode,
         referenceTime: featureTimeUtc,
         universeName: params.universeName,
+        benchmarkMarketCode: params.config?.benchmarkMarketCode,
         universeCandlesByMarket,
         config: resolvedConfig
       });
@@ -131,20 +133,20 @@ export async function buildMarketFeaturePipeline(params: {
   const breadthFeatureCount = await upsertMarketBreadthFeatures({
     universeName: params.universeName,
     timeframe: params.timeframe,
-    config: resolvedConfig,
+    config: params.config,
     rows: breadthRows
   });
   const relativeStrengthFeatureCount = await upsertMarketRelativeStrengthFeatures({
     universeName: params.universeName,
     timeframe: params.timeframe,
-    config: resolvedConfig,
+    config: params.config,
     rows: relativeStrengthRows
   });
 
   return {
     universeName: params.universeName,
     timeframe: params.timeframe,
-    configKey: getMarketStateConfigKey(resolvedConfig),
+    configKey: getMarketStateConfigKey(params.config),
     marketCount: marketCodes.length,
     breadthFeatureCount,
     relativeStrengthFeatureCount,

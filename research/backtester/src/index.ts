@@ -276,6 +276,10 @@ async function main(): Promise<void> {
   const autoResearchFamilies = process.argv
     .flatMap((value, index, args) => (value === "--auto-research-family" ? [args[index + 1]] : []))
     .filter((value): value is string => Boolean(value));
+  const autoResearchSeedArtifacts = process.argv
+    .flatMap((value, index, args) => (value === "--auto-research-seed-artifact" ? [args[index + 1]] : []))
+    .filter((value): value is string => Boolean(value))
+    .map((value) => resolveWorkspaceRelativePath(value, process.cwd()));
   const autoResearchMode = getOption(process.argv, "--auto-research-mode") === "holdout"
     ? "holdout"
     : "walk-forward";
@@ -286,9 +290,9 @@ async function main(): Promise<void> {
     10
   );
   const llmProvider = getOption(process.argv, "--llm-provider") ?? "codex";
-  const llmModel = getOption(process.argv, "--llm-model");
+  const llmModel = getOption(process.argv, "--llm-model") ?? (llmProvider === "codex" ? "medium" : undefined);
   const autoResearchLlmTimeoutMs = Number.parseInt(
-    getOption(process.argv, "--auto-research-llm-timeout-ms") ?? "300000",
+    getOption(process.argv, "--auto-research-llm-timeout-ms") ?? "120000",
     10
   );
   const autoResearchOutput =
@@ -334,6 +338,19 @@ async function main(): Promise<void> {
   const autoResearchMaxNoTradeIterations = autoResearchMaxNoTradeIterationsOption
     ? Number.parseInt(autoResearchMaxNoTradeIterationsOption, 10)
     : undefined;
+  const autoResearchSeedCandidatesOption = getOption(process.argv, "--auto-research-seed-candidates");
+  const autoResearchSeedCandidates = autoResearchSeedCandidatesOption
+    ? Number.parseInt(autoResearchSeedCandidatesOption, 10)
+    : undefined;
+  const autoResearchCandidateDiversificationMinDistanceOption = getOption(
+    process.argv,
+    "--auto-research-candidate-min-distance"
+  );
+  const autoResearchCandidateDiversificationMinDistance =
+    autoResearchCandidateDiversificationMinDistanceOption
+      ? Number.parseFloat(autoResearchCandidateDiversificationMinDistanceOption)
+      : undefined;
+  const autoResearchLoopVersion = getOption(process.argv, "--auto-research-loop") === "v2" ? "v2" : "v1";
   const parametersJson = getOption(process.argv, "--parameters-json");
   const benchmarkMarketCode = getOption(process.argv, "--benchmark-market");
   const maxPositions = Number.parseInt(getOption(process.argv, "--max-positions") ?? "5", 10);
@@ -420,7 +437,16 @@ async function main(): Promise<void> {
             ? Math.max(0, autoResearchMaxNoTradeIterations)
             : undefined,
         researchStage: autoResearchStage,
-        blockCatalogPath: autoResearchBlockCatalog
+        blockCatalogPath: autoResearchBlockCatalog,
+        seedArtifactPaths: autoResearchSeedArtifacts,
+        seedCandidatesPerIteration:
+          typeof autoResearchSeedCandidates === "number" ? Math.max(0, autoResearchSeedCandidates) : undefined,
+        candidateDiversificationMinDistance:
+          typeof autoResearchCandidateDiversificationMinDistance === "number" &&
+          Number.isFinite(autoResearchCandidateDiversificationMinDistance)
+            ? Math.max(0, autoResearchCandidateDiversificationMinDistance)
+            : undefined,
+        loopVersion: autoResearchLoopVersion
       });
 
       if (autoResearchStage === "auto") {
@@ -471,7 +497,16 @@ async function main(): Promise<void> {
                     ? Math.max(0, autoResearchMaxNoTradeIterations)
                     : undefined,
                 researchStage: "portfolio",
-                blockCatalogPath
+                blockCatalogPath,
+                seedArtifactPaths: autoResearchSeedArtifacts,
+                seedCandidatesPerIteration:
+                  typeof autoResearchSeedCandidates === "number" ? Math.max(0, autoResearchSeedCandidates) : undefined,
+                candidateDiversificationMinDistance:
+                  typeof autoResearchCandidateDiversificationMinDistance === "number" &&
+                  Number.isFinite(autoResearchCandidateDiversificationMinDistance)
+                    ? Math.max(0, autoResearchCandidateDiversificationMinDistance)
+                    : undefined,
+                loopVersion: autoResearchLoopVersion
               });
               console.log(JSON.stringify(portfolioReport, null, 2));
               return;

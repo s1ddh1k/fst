@@ -30,6 +30,37 @@ import { summarizeReferenceCandleSpan } from "./walk-forward-config.js";
 type CandleMap = Record<string, Candle[]>;
 type CandleLoader = typeof loadCandlesForMarkets;
 
+function universeSizeSummary(result: ReturnType<typeof runMultiStrategyBacktest>): {
+  avg: number;
+  min: number;
+  max: number;
+  observationCount: number;
+} {
+  if (result.universeCoverageSummary.observationCount > 0) {
+    return result.universeCoverageSummary;
+  }
+
+  let total = 0;
+  let min = Number.POSITIVE_INFINITY;
+  let max = 0;
+  let observationCount = 0;
+
+  for (const snapshot of result.universeSnapshots) {
+    const size = snapshot.markets.length;
+    total += size;
+    min = Math.min(min, size);
+    max = Math.max(max, size);
+    observationCount += 1;
+  }
+
+  return {
+    avg: observationCount === 0 ? 0 : total / observationCount,
+    min: Number.isFinite(min) ? min : 0,
+    max: observationCount === 0 ? 0 : max,
+    observationCount
+  };
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -42,10 +73,50 @@ function roundInt(value: number, min: number, max: number): number {
   return Math.round(clamp(value, min, max));
 }
 
+function isBbMeanReversionFamily(familyId: string): boolean {
+  return familyId.includes("bb-reversion") || familyId.includes("bb-rsi-confirmed-reversion");
+}
+
+function isBbRsiConfirmedFamily(familyId: string): boolean {
+  return familyId.includes("bb-rsi-confirmed-reversion");
+}
+
+function isBbHourlyLikeFamily(familyId: string): boolean {
+  return familyId.includes("hourly");
+}
+
+function isBbDailyLikeFamily(familyId: string): boolean {
+  return familyId.includes("daily");
+}
+
+function resolveBbPortfolioControls(familyId: string, params: Record<string, number>): {
+  cooldownBarsAfterLoss: number;
+  minBarsBetweenEntries: number;
+} {
+  if (isBbHourlyLikeFamily(familyId)) {
+    return {
+      cooldownBarsAfterLoss: roundInt(finiteOrDefault(params.cooldownBarsAfterLoss, 8), 2, 24),
+      minBarsBetweenEntries: roundInt(finiteOrDefault(params.minBarsBetweenEntries, 4), 1, 16)
+    };
+  }
+
+  if (isBbDailyLikeFamily(familyId)) {
+    return {
+      cooldownBarsAfterLoss: roundInt(finiteOrDefault(params.cooldownBarsAfterLoss, 16), 4, 72),
+      minBarsBetweenEntries: roundInt(finiteOrDefault(params.minBarsBetweenEntries, 8), 2, 48)
+    };
+  }
+
+  return {
+    cooldownBarsAfterLoss: roundInt(finiteOrDefault(params.cooldownBarsAfterLoss, 36), 8, 168),
+    minBarsBetweenEntries: roundInt(finiteOrDefault(params.minBarsBetweenEntries, 16), 4, 96)
+  };
+}
+
 function buildBlockGateConfig(familyId: string, params: Record<string, number>): RegimeGateConfig {
   const gate: RegimeGateConfig = {};
 
-  if (familyId.includes("bb-reversion")) {
+  if (isBbMeanReversionFamily(familyId)) {
     // BB mean reversion works in ALL regimes — oversold happens everywhere
     gate.allowedRegimes = ["trend_up", "trend_down", "range", "volatile"];
     gate.allowUnknownRegime = true;
@@ -122,29 +193,138 @@ function createBlockStrategy(familyId: string, candidateId: string, params: Reco
     });
   }
 
-  if (familyId.includes("bb-reversion") && familyId.includes("daily")) {
+  if (isBbMeanReversionFamily(familyId) && isBbHourlyLikeFamily(familyId)) {
+    return createBollingerMeanReversionMultiStrategy({
+      strategyId: `${candidateId}-bb-hourly`,
+      bbWindow: roundInt(finiteOrDefault(params.bbWindow, 24), 12, 36),
+      bbMultiplier: clamp(finiteOrDefault(params.bbMultiplier, 2.1), 1.6, 2.6),
+      rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 14), 8, 24),
+      entryRsiThreshold: clamp(finiteOrDefault(params.entryRsiThreshold, 30), 20, 40),
+      requireRsiConfirmation: isBbRsiConfirmedFamily(familyId),
+      requireReclaimConfirmation: true,
+      reclaimLookbackBars: roundInt(finiteOrDefault(params.reclaimLookbackBars, 4), 1, 8),
+      reclaimPercentBThreshold: clamp(finiteOrDefault(params.reclaimPercentBThreshold, 0.18), 0.06, 0.5),
+      reclaimMinCloseBouncePct: clamp(finiteOrDefault(params.reclaimMinCloseBouncePct, 0.004), 0.0005, 0.015),
+      reclaimBandWidthFactor: clamp(finiteOrDefault(params.reclaimBandWidthFactor, 0.12), 0.02, 0.6),
+      deepTouchEntryPercentB: clamp(finiteOrDefault(params.deepTouchEntryPercentB, -0.05), -0.12, -0.005),
+      deepTouchRsiThreshold: clamp(finiteOrDefault(params.deepTouchRsiThreshold, 18), 8, 28),
+      exitRsi: clamp(finiteOrDefault(params.exitRsi, 40), 34, 46),
+      stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.09), 0.04, 0.16),
+      maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 24), 12, 72),
+      entryPercentB: clamp(finiteOrDefault(params.entryPercentB, -0.02), -0.08, 0.02),
+      minBandWidth: clamp(finiteOrDefault(params.minBandWidth, 0.015), 0.003, 0.08),
+      trendUpExitRsiOffset: clamp(finiteOrDefault(params.trendUpExitRsiOffset, 6), 2, 12),
+      trendDownExitRsiOffset: clamp(finiteOrDefault(params.trendDownExitRsiOffset, -6), -12, -2),
+      rangeExitRsiOffset: clamp(finiteOrDefault(params.rangeExitRsiOffset, -3), -8, 2),
+      trendUpExitBandFraction: clamp(finiteOrDefault(params.trendUpExitBandFraction, 0.2), 0.05, 0.45),
+      trendDownExitBandFraction: clamp(finiteOrDefault(params.trendDownExitBandFraction, 0.2), 0.05, 0.55),
+      volatileExitBandFraction: clamp(finiteOrDefault(params.volatileExitBandFraction, 0.35), 0.08, 0.6),
+      profitTakePnlThreshold: clamp(finiteOrDefault(params.profitTakePnlThreshold, 0.006), 0.002, 0.02),
+      profitTakeBandWidthFactor: clamp(finiteOrDefault(params.profitTakeBandWidthFactor, 0.28), 0.08, 0.7),
+      trendDownProfitTargetScale: clamp(finiteOrDefault(params.trendDownProfitTargetScale, 0.5), 0.2, 0.8),
+      volatileProfitTargetScale: clamp(finiteOrDefault(params.volatileProfitTargetScale, 0.7), 0.25, 0.9),
+      profitTakeRsiFraction: clamp(finiteOrDefault(params.profitTakeRsiFraction, 0.78), 0.6, 0.95),
+      entryBenchmarkLeadWeight: clamp(finiteOrDefault(params.entryBenchmarkLeadWeight, 0), 0, 0.55),
+      entryBenchmarkLeadMinScore: clamp(finiteOrDefault(params.entryBenchmarkLeadMinScore, 0), 0, 0.9),
+      softExitScoreThreshold: clamp(finiteOrDefault(params.softExitScoreThreshold, 0.5), 0.3, 0.75),
+      softExitMinPnl: clamp(finiteOrDefault(params.softExitMinPnl, 0.004), 0.0005, 0.02),
+      softExitMinBandFraction: clamp(finiteOrDefault(params.softExitMinBandFraction, 0.18), 0.05, 0.75),
+      exitVolumeFadeWeight: clamp(finiteOrDefault(params.exitVolumeFadeWeight, 0.24), 0, 0.55),
+      exitReversalWeight: clamp(finiteOrDefault(params.exitReversalWeight, 0.28), 0, 0.65),
+      exitMomentumDecayWeight: clamp(finiteOrDefault(params.exitMomentumDecayWeight, 0.22), 0, 0.55),
+      exitBenchmarkWeaknessWeight: clamp(finiteOrDefault(params.exitBenchmarkWeaknessWeight, 0.12), 0, 0.45),
+      exitRelativeFragilityWeight: clamp(finiteOrDefault(params.exitRelativeFragilityWeight, 0), 0, 0.6),
+      exitTimeDecayWeight: clamp(finiteOrDefault(params.exitTimeDecayWeight, 0.14), 0, 0.45)
+    });
+  }
+
+  if (isBbMeanReversionFamily(familyId) && isBbDailyLikeFamily(familyId)) {
     return createBollingerMeanReversionMultiStrategy({
       strategyId: `${candidateId}-bb-daily`,
       bbWindow: roundInt(finiteOrDefault(params.bbWindow, 72), 48, 120),
       bbMultiplier: clamp(finiteOrDefault(params.bbMultiplier, 2.5), 2.0, 3.0),
       rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 48), 24, 72),
+      entryRsiThreshold: clamp(finiteOrDefault(params.entryRsiThreshold, 34), 20, 42),
+      requireRsiConfirmation: isBbRsiConfirmedFamily(familyId),
+      requireReclaimConfirmation: true,
+      reclaimLookbackBars: roundInt(finiteOrDefault(params.reclaimLookbackBars, 6), 2, 16),
+      reclaimPercentBThreshold: clamp(finiteOrDefault(params.reclaimPercentBThreshold, 0.16), 0.04, 0.4),
+      reclaimMinCloseBouncePct: clamp(finiteOrDefault(params.reclaimMinCloseBouncePct, 0.003), 0.001, 0.02),
+      reclaimBandWidthFactor: clamp(finiteOrDefault(params.reclaimBandWidthFactor, 0.12), 0.02, 0.45),
+      deepTouchEntryPercentB: clamp(finiteOrDefault(params.deepTouchEntryPercentB, -0.11), -0.18, -0.02),
+      deepTouchRsiThreshold: clamp(finiteOrDefault(params.deepTouchRsiThreshold, 24), 10, 32),
       exitRsi: clamp(finiteOrDefault(params.exitRsi, 45), 38, 50),
       stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.15), 0.10, 0.25),
       maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 120), 48, 240),
-      entryPercentB: clamp(finiteOrDefault(params.entryPercentB, -0.05), -0.15, 0.0)
+      entryPercentB: clamp(finiteOrDefault(params.entryPercentB, -0.05), -0.15, 0.0),
+      minBandWidth: clamp(finiteOrDefault(params.minBandWidth, 0.02), 0.005, 0.12),
+      trendUpExitRsiOffset: clamp(finiteOrDefault(params.trendUpExitRsiOffset, 10), 2, 16),
+      trendDownExitRsiOffset: clamp(finiteOrDefault(params.trendDownExitRsiOffset, -8), -16, -2),
+      rangeExitRsiOffset: clamp(finiteOrDefault(params.rangeExitRsiOffset, -4), -10, 4),
+      trendUpExitBandFraction: clamp(finiteOrDefault(params.trendUpExitBandFraction, 0.3), 0.1, 0.6),
+      trendDownExitBandFraction: clamp(finiteOrDefault(params.trendDownExitBandFraction, 0.25), 0.05, 0.65),
+      volatileExitBandFraction: clamp(finiteOrDefault(params.volatileExitBandFraction, 0.45), 0.1, 0.8),
+      profitTakePnlThreshold: clamp(finiteOrDefault(params.profitTakePnlThreshold, 0.015), 0.004, 0.06),
+      profitTakeBandWidthFactor: clamp(finiteOrDefault(params.profitTakeBandWidthFactor, 0.55), 0.15, 1.2),
+      trendDownProfitTargetScale: clamp(finiteOrDefault(params.trendDownProfitTargetScale, 0.6), 0.25, 0.9),
+      volatileProfitTargetScale: clamp(finiteOrDefault(params.volatileProfitTargetScale, 0.8), 0.3, 1.0),
+      profitTakeRsiFraction: clamp(finiteOrDefault(params.profitTakeRsiFraction, 0.85), 0.65, 1.0),
+      entryBenchmarkLeadWeight: clamp(finiteOrDefault(params.entryBenchmarkLeadWeight, 0), 0, 0.45),
+      entryBenchmarkLeadMinScore: clamp(finiteOrDefault(params.entryBenchmarkLeadMinScore, 0), 0, 0.85),
+      softExitScoreThreshold: clamp(finiteOrDefault(params.softExitScoreThreshold, 0.54), 0.35, 0.8),
+      softExitMinPnl: clamp(finiteOrDefault(params.softExitMinPnl, 0.01), 0.001, 0.06),
+      softExitMinBandFraction: clamp(finiteOrDefault(params.softExitMinBandFraction, 0.24), 0.08, 0.9),
+      exitVolumeFadeWeight: clamp(finiteOrDefault(params.exitVolumeFadeWeight, 0.22), 0, 0.5),
+      exitReversalWeight: clamp(finiteOrDefault(params.exitReversalWeight, 0.3), 0, 0.6),
+      exitMomentumDecayWeight: clamp(finiteOrDefault(params.exitMomentumDecayWeight, 0.22), 0, 0.5),
+      exitBenchmarkWeaknessWeight: clamp(finiteOrDefault(params.exitBenchmarkWeaknessWeight, 0.12), 0, 0.4),
+      exitRelativeFragilityWeight: clamp(finiteOrDefault(params.exitRelativeFragilityWeight, 0), 0, 0.5),
+      exitTimeDecayWeight: clamp(finiteOrDefault(params.exitTimeDecayWeight, 0.16), 0, 0.4)
     });
   }
 
-  if (familyId.includes("bb-reversion")) {
+  if (isBbMeanReversionFamily(familyId)) {
     return createBollingerMeanReversionMultiStrategy({
       strategyId: `${candidateId}-bb-weekly`,
       bbWindow: roundInt(finiteOrDefault(params.bbWindow, 336), 336, 504),
       bbMultiplier: clamp(finiteOrDefault(params.bbMultiplier, 3.0), 2.5, 3.5),
       rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 120), 72, 168),
+      entryRsiThreshold: clamp(finiteOrDefault(params.entryRsiThreshold, 32), 18, 40),
+      requireRsiConfirmation: isBbRsiConfirmedFamily(familyId),
+      requireReclaimConfirmation: true,
+      reclaimLookbackBars: roundInt(finiteOrDefault(params.reclaimLookbackBars, 12), 4, 48),
+      reclaimPercentBThreshold: clamp(finiteOrDefault(params.reclaimPercentBThreshold, 0.12), 0.02, 0.35),
+      reclaimMinCloseBouncePct: clamp(finiteOrDefault(params.reclaimMinCloseBouncePct, 0.006), 0.001, 0.03),
+      reclaimBandWidthFactor: clamp(finiteOrDefault(params.reclaimBandWidthFactor, 0.1), 0.02, 0.35),
+      deepTouchEntryPercentB: clamp(finiteOrDefault(params.deepTouchEntryPercentB, -0.16), -0.25, -0.02),
+      deepTouchRsiThreshold: clamp(finiteOrDefault(params.deepTouchRsiThreshold, 22), 10, 32),
       exitRsi: clamp(finiteOrDefault(params.exitRsi, 50), 45, 60),
       stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.30), 0.20, 0.35),
       maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 504), 336, 1008),
-      entryPercentB: clamp(finiteOrDefault(params.entryPercentB, -0.1), -0.2, 0.0)
+      entryPercentB: clamp(finiteOrDefault(params.entryPercentB, -0.1), -0.2, 0.0),
+      minBandWidth: clamp(finiteOrDefault(params.minBandWidth, 0.025), 0.01, 0.18),
+      trendUpExitRsiOffset: clamp(finiteOrDefault(params.trendUpExitRsiOffset, 10), 2, 18),
+      trendDownExitRsiOffset: clamp(finiteOrDefault(params.trendDownExitRsiOffset, -10), -20, -2),
+      rangeExitRsiOffset: clamp(finiteOrDefault(params.rangeExitRsiOffset, -5), -12, 4),
+      trendUpExitBandFraction: clamp(finiteOrDefault(params.trendUpExitBandFraction, 0.3), 0.1, 0.7),
+      trendDownExitBandFraction: clamp(finiteOrDefault(params.trendDownExitBandFraction, 0.2), 0.05, 0.7),
+      volatileExitBandFraction: clamp(finiteOrDefault(params.volatileExitBandFraction, 0.45), 0.1, 0.9),
+      profitTakePnlThreshold: clamp(finiteOrDefault(params.profitTakePnlThreshold, 0.025), 0.008, 0.12),
+      profitTakeBandWidthFactor: clamp(finiteOrDefault(params.profitTakeBandWidthFactor, 0.8), 0.25, 1.8),
+      trendDownProfitTargetScale: clamp(finiteOrDefault(params.trendDownProfitTargetScale, 0.55), 0.25, 1.0),
+      volatileProfitTargetScale: clamp(finiteOrDefault(params.volatileProfitTargetScale, 0.75), 0.3, 1.1),
+      profitTakeRsiFraction: clamp(finiteOrDefault(params.profitTakeRsiFraction, 0.85), 0.65, 1.0),
+      entryBenchmarkLeadWeight: clamp(finiteOrDefault(params.entryBenchmarkLeadWeight, 0), 0, 0.35),
+      entryBenchmarkLeadMinScore: clamp(finiteOrDefault(params.entryBenchmarkLeadMinScore, 0), 0, 0.85),
+      softExitScoreThreshold: clamp(finiteOrDefault(params.softExitScoreThreshold, 0.6), 0.45, 0.85),
+      softExitMinPnl: clamp(finiteOrDefault(params.softExitMinPnl, 0.02), 0.004, 0.12),
+      softExitMinBandFraction: clamp(finiteOrDefault(params.softExitMinBandFraction, 0.34), 0.1, 1.0),
+      exitVolumeFadeWeight: clamp(finiteOrDefault(params.exitVolumeFadeWeight, 0.18), 0, 0.45),
+      exitReversalWeight: clamp(finiteOrDefault(params.exitReversalWeight, 0.28), 0, 0.55),
+      exitMomentumDecayWeight: clamp(finiteOrDefault(params.exitMomentumDecayWeight, 0.18), 0, 0.45),
+      exitBenchmarkWeaknessWeight: clamp(finiteOrDefault(params.exitBenchmarkWeaknessWeight, 0.12), 0, 0.35),
+      exitRelativeFragilityWeight: clamp(finiteOrDefault(params.exitRelativeFragilityWeight, 0), 0, 0.45),
+      exitTimeDecayWeight: clamp(finiteOrDefault(params.exitTimeDecayWeight, 0.14), 0, 0.35)
     });
   }
 
@@ -287,10 +467,21 @@ export async function evaluateBlockCandidate(params: {
     : executionTimeframe === "1m" ? (candles1m as CandleMap) : null;
   let clippedReferenceCandleMap = referenceCandleMap;
   if (executionCandleMap && referenceTimeframe !== executionTimeframe) {
-    const execCandles = Object.values(executionCandleMap).flat();
-    if (execCandles.length > 0) {
-      const execStart = execCandles.reduce((min, c) => c.candleTimeUtc < min ? c.candleTimeUtc : min, execCandles[0].candleTimeUtc);
-      const execEnd = execCandles.reduce((max, c) => c.candleTimeUtc > max ? c.candleTimeUtc : max, execCandles[0].candleTimeUtc);
+    let execStart: Date | undefined;
+    let execEnd: Date | undefined;
+
+    for (const candles of Object.values(executionCandleMap)) {
+      for (const candle of candles) {
+        if (!execStart || candle.candleTimeUtc < execStart) {
+          execStart = candle.candleTimeUtc;
+        }
+        if (!execEnd || candle.candleTimeUtc > execEnd) {
+          execEnd = candle.candleTimeUtc;
+        }
+      }
+    }
+
+    if (execStart && execEnd) {
       clippedReferenceCandleMap = Object.fromEntries(
         Object.entries(referenceCandleMap).map(([market, candles]) => [
           market,
@@ -310,6 +501,9 @@ export async function evaluateBlockCandidate(params: {
   const baseStrategy = createBlockStrategy(candidate.familyId, candidate.candidateId, candidate.parameters);
   const gateConfig = buildBlockGateConfig(candidate.familyId, candidate.parameters);
   const strategy = withRegimeGate({ strategy: baseStrategy, gate: gateConfig });
+  const bbPortfolioControls = isBbMeanReversionFamily(candidate.familyId)
+    ? resolveBbPortfolioControls(candidate.familyId, candidate.parameters)
+    : null;
 
   const sleeveId: "trend" | "breakout" | "micro" = candidate.familyId.includes("reversion") ? "micro"
     : candidate.familyId.includes("micro") ? "micro"
@@ -352,17 +546,21 @@ export async function evaluateBlockCandidate(params: {
         lookbackBars: 28,
         refreshEveryBars: 4
       },
+      captureTraceArtifacts: false,
+      captureUniverseSnapshots: false,
       maxOpenPositions: 8,
       maxCapitalUsagePct: 0.95,
-      cooldownBarsAfterLoss: 0,
-      minBarsBetweenEntries: 0
+      cooldownBarsAfterLoss: bbPortfolioControls?.cooldownBarsAfterLoss ?? 0,
+      minBarsBetweenEntries: bbPortfolioControls?.minBarsBetweenEntries ?? 0
     });
 
   if (config.mode === "holdout") {
     const { trainRange, testRange } = splitTrainTestByDays(referenceCandles, config.holdoutDays);
     const testResult = runBacktest(testRange);
+    const testUniverse = universeSizeSummary(testResult);
     const signalCount = testResult.metrics.signalCount;
     const ghostSignalCount = Object.values(testResult.ghostSummary).reduce((sum, item) => sum + item.count, 0);
+    const decisionCoverage = testResult.decisionCoverageSummary;
 
     return {
       candidate,
@@ -391,20 +589,14 @@ export async function evaluateBlockCandidate(params: {
           ghostSignalCount,
           rejectedOrdersCount: testResult.metrics.rejectedOrdersCount,
           cooldownSkipsCount: testResult.metrics.cooldownSkipsCount,
-          rawBuySignals: Object.values(testResult.strategyMetrics).reduce((s, m) => s + m.buySignals, 0),
-          rawSellSignals: Object.values(testResult.strategyMetrics).reduce((s, m) => s + m.sellSignals, 0),
-          rawHoldSignals: 0,
-          avgUniverseSize: testResult.universeSnapshots.length > 0
-            ? testResult.universeSnapshots.reduce((s, snap) => s + snap.markets.length, 0) / testResult.universeSnapshots.length
-            : 0,
-          minUniverseSize: testResult.universeSnapshots.length > 0
-            ? Math.min(...testResult.universeSnapshots.map((s) => s.markets.length))
-            : 0,
-          maxUniverseSize: testResult.universeSnapshots.length > 0
-            ? Math.max(...testResult.universeSnapshots.map((s) => s.markets.length))
-            : 0,
-          avgConsideredBuys: 0,
-          avgEligibleBuys: 0
+          rawBuySignals: decisionCoverage.rawBuySignals,
+          rawSellSignals: decisionCoverage.rawSellSignals,
+          rawHoldSignals: decisionCoverage.rawHoldSignals,
+          avgUniverseSize: testUniverse.avg,
+          minUniverseSize: testUniverse.min,
+          maxUniverseSize: testUniverse.max,
+          avgConsideredBuys: decisionCoverage.avgConsideredBuys,
+          avgEligibleBuys: decisionCoverage.avgEligibleBuys
         },
         reasons: {
           strategy: Object.fromEntries(
@@ -481,6 +673,64 @@ export async function evaluateBlockCandidate(params: {
   );
   const feePaid = results.reduce((s, r) => s + r.test.metrics.feePaid, 0);
   const slippagePaid = results.reduce((s, r) => s + r.test.metrics.slippagePaid, 0);
+  const universeStats = results.map((r) => universeSizeSummary(r.test));
+  const totalUniverseObservations = universeStats.reduce(
+    (sum, window) => sum + ("observationCount" in window ? window.observationCount : 0),
+    0
+  );
+  const avgUniverseSize = totalUniverseObservations === 0
+    ? 0
+    : universeStats.reduce(
+      (sum, window) =>
+        sum + (window.avg * ("observationCount" in window ? window.observationCount : 0)),
+      0
+    ) / totalUniverseObservations;
+  let minUniverseSize = Number.POSITIVE_INFINITY;
+  let maxUniverseSize = 0;
+
+  for (const window of universeStats) {
+    const observationCount = "observationCount" in window ? window.observationCount : 0;
+    if (observationCount === 0) {
+      continue;
+    }
+
+    minUniverseSize = Math.min(minUniverseSize, window.min);
+    maxUniverseSize = Math.max(maxUniverseSize, window.max);
+  }
+  const totalDecisionObservations = results.reduce(
+    (sum, window) => sum + window.test.decisionCoverageSummary.observationCount,
+    0
+  );
+  const rawBuySignals = results.reduce(
+    (sum, window) => sum + window.test.decisionCoverageSummary.rawBuySignals,
+    0
+  );
+  const rawSellSignals = results.reduce(
+    (sum, window) => sum + window.test.decisionCoverageSummary.rawSellSignals,
+    0
+  );
+  const rawHoldSignals = results.reduce(
+    (sum, window) => sum + window.test.decisionCoverageSummary.rawHoldSignals,
+    0
+  );
+  const avgConsideredBuys = totalDecisionObservations === 0
+    ? 0
+    : results.reduce(
+      (sum, window) =>
+        sum +
+        (window.test.decisionCoverageSummary.avgConsideredBuys *
+          window.test.decisionCoverageSummary.observationCount),
+      0
+    ) / totalDecisionObservations;
+  const avgEligibleBuys = totalDecisionObservations === 0
+    ? 0
+    : results.reduce(
+      (sum, window) =>
+        sum +
+        (window.test.decisionCoverageSummary.avgEligibleBuys *
+          window.test.decisionCoverageSummary.observationCount),
+      0
+    ) / totalDecisionObservations;
 
   return {
     candidate,
@@ -509,18 +759,14 @@ export async function evaluateBlockCandidate(params: {
         ghostSignalCount,
         rejectedOrdersCount: results.reduce((s, r) => s + r.test.metrics.rejectedOrdersCount, 0),
         cooldownSkipsCount: results.reduce((s, r) => s + r.test.metrics.cooldownSkipsCount, 0),
-        rawBuySignals: results.reduce(
-          (s, r) => s + Object.values(r.test.strategyMetrics).reduce((inner, m) => inner + m.buySignals, 0), 0
-        ),
-        rawSellSignals: results.reduce(
-          (s, r) => s + Object.values(r.test.strategyMetrics).reduce((inner, m) => inner + m.sellSignals, 0), 0
-        ),
-        rawHoldSignals: 0,
-        avgUniverseSize: 0,
-        minUniverseSize: 0,
-        maxUniverseSize: 0,
-        avgConsideredBuys: 0,
-        avgEligibleBuys: 0
+        rawBuySignals,
+        rawSellSignals,
+        rawHoldSignals,
+        avgUniverseSize,
+        minUniverseSize: Number.isFinite(minUniverseSize) ? minUniverseSize : 0,
+        maxUniverseSize: Number.isFinite(maxUniverseSize) ? maxUniverseSize : 0,
+        avgConsideredBuys,
+        avgEligibleBuys
       },
       reasons: {
         strategy: results.reduce((acc, r) => {

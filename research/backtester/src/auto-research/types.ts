@@ -2,7 +2,8 @@ import type { StrategyTimeframe } from "../../../../packages/shared/src/index.js
 import type { HoldoutBacktestSummary, WalkForwardBacktestSummary } from "../types.js";
 
 export type AutoResearchMode = "holdout" | "walk-forward";
-export type AutoResearchRunOutcome = "completed" | "partial" | "aborted" | "invalid_config";
+export type AutoResearchRunOutcome = "completed" | "partial" | "aborted" | "invalid_config" | "failed";
+export type AutoResearchLoopVersion = "v1" | "v2";
 
 export type ResearchTimeframe = "1h" | "15m" | "5m" | "1m";
 export type ResearchStage = "block" | "portfolio" | "auto";
@@ -105,10 +106,9 @@ export type CandidateProposal = {
   parentCandidateIds?: string[];
   origin?:
     | "llm"
-    | "proposal_fallback"
-    | "review_fallback"
     | "novelized"
     | "resume"
+    | "artifact_seed"
     | "engine_mutation"
     | "engine_seed";
 };
@@ -117,6 +117,71 @@ export type NormalizedCandidateProposal = CandidateProposal & {
   candidateId: string;
   strategyName: string;
   composition?: ResolvedStrategyFamilyComposition;
+};
+
+export type ResearchHypothesis = {
+  hypothesisId: string;
+  stage: "parametric" | "family" | "feature" | "code";
+  title: string;
+  thesis: string;
+  targetFamilyIds: string[];
+  parentHypothesisIds: string[];
+  evidence: string[];
+  proposedSpecChanges: ProposedStrategyFamily[];
+  proposedCodeTasks: CodeMutationTask[];
+  expectedMechanism: string;
+  riskNotes: string[];
+  origin: "llm" | "engine" | "artifact_seed" | "human_seed";
+};
+
+export type ExperimentPlan = {
+  planId: string;
+  hypothesisId: string;
+  mode: "candidate_batch" | "code_mutation_smoke" | "family_validation";
+  candidates: CandidateProposal[];
+  preparation: ResearchPreparationAction[];
+  validationCommands: string[];
+  budget: {
+    candidateLimit: number;
+    marketLimit: number;
+    timeoutMs?: number;
+  };
+};
+
+export type ResearchDriftMetrics = {
+  performanceDrift: number;
+  noveltyDrift: number;
+  structureDrift: number;
+  reproducibilityDrift: number;
+  stagnationScore: number;
+};
+
+export type ResearchLineage = {
+  lineageId: string;
+  stage: ResearchStage;
+  objective: string;
+  startedAt: string;
+  updatedAt: string;
+  activeHypothesisIds: string[];
+  convergedFamilyIds: string[];
+  retiredHypothesisIds: string[];
+  drift: ResearchDriftMetrics;
+};
+
+export type ResearchLineageEvent = {
+  eventId: string;
+  lineageId: string;
+  at: string;
+  type:
+    | "lineage_started"
+    | "proposal_recorded"
+    | "plan_compiled"
+    | "code_mutation_finished"
+    | "iteration_reviewed"
+    | "iteration_completed"
+    | "run_completed"
+    | "run_failed";
+  payload: Record<string, unknown>;
 };
 
 export type StrategyCompositionMode = "weighted_vote" | "confirmatory";
@@ -331,6 +396,10 @@ export type AutoResearchRunConfig = {
   maxNoTradeIterations?: number;
   researchStage?: ResearchStage;
   blockCatalogPath?: string;
+  seedArtifactPaths?: string[];
+  seedCandidatesPerIteration?: number;
+  candidateDiversificationMinDistance?: number;
+  loopVersion?: AutoResearchLoopVersion;
 };
 
 export type AutoResearchConfigRepair = {
@@ -368,6 +437,7 @@ export type AutoResearchRunReport = {
   configRepairs: AutoResearchConfigRepair[];
   bestCandidate?: CandidateBacktestEvaluation;
   bestTradeCandidate?: CandidateBacktestEvaluation;
+  lineage?: ResearchLineage;
 };
 
 export type ValidatedBlock = {

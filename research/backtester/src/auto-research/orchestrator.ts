@@ -1,8 +1,10 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
+  getSelectedUniverseMarkets,
+  getSelectedUniverseMarketsWithMinimumCandles,
   getCandidateMarketsWithMinimumCandles,
   loadCandlesForMarkets
 } from "../db.js";
@@ -12,6 +14,9 @@ import type { StrategyTimeframe } from "../../../../packages/shared/src/index.js
 import type { Candle } from "../types.js";
 import { getStrategyFamilies, normalizeCandidateProposal } from "./catalog.js";
 import { CliCodeMutationAgent, type CodeAgent } from "./code-agent.js";
+import { executeCodeMutationInWorktree, readWorktreePatch } from "./code-worktree.js";
+import { prepareExperimentKernel } from "./experiment-kernel.js";
+import { generateHypothesisProposal } from "./hypothesis-orchestrator.js";
 import {
   applyCodeMutationResultsToCatalog,
   buildRuntimeFamilies,
@@ -40,9 +45,12 @@ import type {
   CodeMutationExecutionResult,
   CatalogEntryRecord,
   CandidateProposal,
+  ExperimentPlan,
   NormalizedCandidateProposal,
   PreparationExecutionResult,
   ProposalBatch,
+  ResearchHypothesis,
+  ResearchLineage,
   ResearchIterationRecord,
   ReviewDecision,
   StrategyFamilyDefinition,
@@ -52,6 +60,14 @@ import type {
 import type { ResearchLlmClient } from "./llm-adapter.js";
 import { executePreparationActions } from "./preparation.js";
 import { acquireRunLock, appendRunLog, loadRunState, reconcilePartialRunStatus, releaseRunLock, saveLeaderboard, saveRunState, saveRunStatus, toReport, type AutoResearchStatus } from "./run-manager.js";
+import {
+  appendLineageEvent,
+  buildLineageSnapshot,
+  loadOrCreateResearchLineage,
+  saveLineageSnapshot,
+  updateResearchLineageFromIterations
+} from "./lineage-store.js";
+import { generateIterationReview } from "./research-review.js";
 import { renderAutoResearchHtmlWithOptions } from "./report-html.js";
 import { runPostMutationValidation } from "./validation.js";
 import { discoverRuntimeScoredStrategyNames } from "./runtime-discovery.js";
@@ -85,6 +101,20 @@ const REGIME_SWITCH_CONFIRM_DEFAULT_PARAMETERS: Record<string, number> = {
   microMinRiskOnGate: 0.01,
   microMinLiquidityGate: 0.03,
   microMinVolatilityGate: 0.008
+};
+
+const DEFAULT_CANDIDATE_DIVERSIFICATION_MIN_DISTANCE = 0.08;
+
+type ArtifactSeedSnapshot = {
+  candidateId?: string;
+  familyId: string;
+  parameters: Record<string, number>;
+  netReturn?: number;
+  maxDrawdown?: number;
+  tradeCount?: number;
+  positiveWindowRatio?: number;
+  score?: number;
+  sourcePath: string;
 };
 
 function summarizeWindows(
@@ -214,6 +244,52 @@ function compareEvaluations(left: CandidateBacktestEvaluation, right: CandidateB
   return compareCandidateEvaluations(left, right);
 }
 
+async function runShellCommand(command: string, cwd: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn("bash", ["-lc", command], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ stdout, stderr, code }));
+  });
+}
+
+async function applyWorktreePatchToWorkspace(params: {
+  patchPath?: string;
+  repoRoot: string;
+}): Promise<{ status: "applied" | "skipped" | "failed"; detail: string }> {
+  const patchText = await readWorktreePatch(params.patchPath);
+  if (!patchText || patchText.trim().length === 0) {
+    return {
+      status: "skipped",
+      detail: "No patch generated from worktree execution."
+    };
+  }
+
+  const escapedPath = params.patchPath!.replace(/'/g, "'\\''");
+  const result = await runShellCommand(`git apply --index --whitespace=nowarn '${escapedPath}'`, params.repoRoot);
+  if (result.code !== 0) {
+    return {
+      status: "failed",
+      detail: result.stderr.trim() || result.stdout.trim() || "git apply failed"
+    };
+  }
+
+  return {
+    status: "applied",
+    detail: "Applied benchmarked worktree patch back to the main workspace."
+  };
+}
+
 function promotionGateConfig(config: AutoResearchRunConfig) {
   return {
     minTrades: config.minTradesForPromotion,
@@ -291,6 +367,98 @@ function resolveCandidateMarketTarget(params: {
   return Math.max(safeMarketLimit * 3, safeMarketLimit + 5);
 }
 
+function normalizeCandidateRequirementTimeframe(timeframe: StrategyTimeframe): StrategyTimeframe {
+  return timeframe === "15m" ? "5m" : timeframe;
+}
+
+function isCandidateRequirementTimeframe(value: string): value is StrategyTimeframe {
+  return value === "1m" || value === "5m" || value === "15m" || value === "1h" || value === "1d";
+}
+
+export function resolveCandidateMarketRequirements(params: {
+  config: AutoResearchRunConfig;
+  families: StrategyFamilyDefinition[];
+}): Array<{ timeframe: StrategyTimeframe; minCandles: number }> {
+  const primaryTimeframe = normalizeCandidateRequirementTimeframe(params.config.timeframe);
+  const requirementsByTimeframe = new Map<StrategyTimeframe, number>([
+    [primaryTimeframe, Math.max(250, params.config.limit)]
+  ]);
+
+  for (const family of params.families) {
+    const requiredTimeframes = (family.requiredData ?? [family.timeframe])
+      .filter(isCandidateRequirementTimeframe)
+      .map((timeframe) => normalizeCandidateRequirementTimeframe(timeframe));
+
+    for (const timeframe of requiredTimeframes) {
+      const minCandles = timeframe === primaryTimeframe
+        ? Math.max(250, params.config.limit)
+        : calculateAutoResearchMinimumLimit({
+            timeframe,
+            holdoutDays: params.config.holdoutDays,
+            trainingDays: params.config.trainingDays,
+            stepDays: params.config.stepDays,
+            mode: params.config.mode
+          });
+      const current = requirementsByTimeframe.get(timeframe) ?? 0;
+      requirementsByTimeframe.set(timeframe, Math.max(current, minCandles));
+    }
+  }
+
+  return Array.from(requirementsByTimeframe.entries()).map(([timeframe, minCandles]) => ({
+    timeframe,
+    minCandles
+  }));
+}
+
+async function resolveUniverseCandidateMarkets(params: {
+  universeName: string;
+  requirements: Array<{ timeframe: StrategyTimeframe; minCandles: number }>;
+}): Promise<string[]> {
+  const orderedMarkets = await getSelectedUniverseMarkets({ universeName: params.universeName });
+  if (orderedMarkets.length === 0) {
+    return [];
+  }
+
+  const eligibleByTimeframe = await Promise.all(
+    params.requirements.map(async (requirement) => {
+      const markets = await getSelectedUniverseMarketsWithMinimumCandles({
+        universeName: params.universeName,
+        timeframe: requirement.timeframe,
+        minCandles: requirement.minCandles
+      });
+      return new Set(markets.map((item) => item.marketCode));
+    })
+  );
+
+  return orderedMarkets.filter((marketCode) =>
+    eligibleByTimeframe.every((eligible) => eligible.has(marketCode))
+  );
+}
+
+async function resolveFallbackCandidateMarkets(params: {
+  requirements: Array<{ timeframe: StrategyTimeframe; minCandles: number }>;
+}): Promise<string[]> {
+  if (params.requirements.length === 0) {
+    return [];
+  }
+
+  const eligibleLists = await Promise.all(
+    params.requirements.map(async (requirement) =>
+      getCandidateMarketsWithMinimumCandles({
+        timeframe: requirement.timeframe,
+        minCandles: requirement.minCandles
+      })
+    )
+  );
+
+  const [primary, ...rest] = eligibleLists;
+  const fallbackSets = rest.map((items) => new Set(items.map((item) => item.marketCode)));
+
+  return primary
+    .map((item) => item.marketCode)
+    .filter((marketCode) => fallbackSets.every((eligible) => eligible.has(marketCode)));
+}
+
 function findTopPromotableEvaluation(
   evaluations: CandidateBacktestEvaluation[],
   config: AutoResearchRunConfig
@@ -329,9 +497,8 @@ function governReviewDecision(params: {
   evaluations: CandidateBacktestEvaluation[];
   config: AutoResearchRunConfig;
   iteration: number;
-  usedFallbackReview: boolean;
 }): ReviewDecision {
-  const { review, evaluations, config, iteration, usedFallbackReview } = params;
+  const { review, evaluations, config, iteration } = params;
   const isFinalIteration = iteration >= config.iterations;
   const topPromotable = findTopPromotableEvaluation(evaluations, config);
   const requestedPromoted = review.promotedCandidateId
@@ -368,16 +535,13 @@ function governReviewDecision(params: {
   if (
     topPromotable &&
     (
-      usedFallbackReview ||
       review.verdict === "stop_no_edge" ||
       (review.verdict === "keep_searching" && isFinalIteration)
     )
   ) {
-    const reason = usedFallbackReview
-      ? `LLM review fallback activated; objective governance promoted ${topPromotable.candidate.candidateId}.`
-      : review.verdict === "stop_no_edge"
-        ? `Review returned stop_no_edge, but objective governance promoted ${topPromotable.candidate.candidateId}.`
-        : `Final iteration kept searching, but objective governance promoted ${topPromotable.candidate.candidateId}.`;
+    const reason = review.verdict === "stop_no_edge"
+      ? `Review returned stop_no_edge, but objective governance promoted ${topPromotable.candidate.candidateId}.`
+      : `Final iteration kept searching, but objective governance promoted ${topPromotable.candidate.candidateId}.`;
 
     return appendReviewObservation(
       {
@@ -412,49 +576,21 @@ function governReviewDecision(params: {
 
 function ensureNextCandidatesForKeepSearching(params: {
   review: ReviewDecision;
-  evaluations: CandidateBacktestEvaluation[];
-  families: StrategyFamilyDefinition[];
   limit: number;
   iteration: number;
-  history: ResearchIterationRecord[];
 }): ReviewDecision {
   if (params.review.verdict !== "keep_searching") {
     return params.review;
   }
 
   const uniqueReviewCandidates = dedupeCandidateProposals(params.review.nextCandidates).slice(0, params.limit);
-  const usedFingerprints = new Set(
-    params.history.flatMap((record) =>
-      record.evaluations.map((evaluation) => candidateFingerprint(evaluation.candidate))
-    )
-  );
-
-  for (const candidate of uniqueReviewCandidates) {
-    usedFingerprints.add(candidateFingerprint(candidate));
+  if (uniqueReviewCandidates.length === 0) {
+    throw new Error(
+      `LLM review returned keep_searching without any unique next candidates for iteration ${params.iteration}.`
+    );
   }
 
-  const fallbackCandidates = buildFallbackNextCandidates({
-    evaluations: params.evaluations,
-    families: params.families,
-    limit: params.limit,
-    iteration: params.iteration,
-    seenFingerprints: usedFingerprints
-  });
   const nextCandidates = [...uniqueReviewCandidates];
-
-  for (const candidate of fallbackCandidates) {
-    if (nextCandidates.length >= params.limit) {
-      break;
-    }
-
-    const fingerprint = candidateFingerprint(candidate);
-    if (usedFingerprints.has(fingerprint)) {
-      continue;
-    }
-
-    nextCandidates.push(candidate);
-    usedFingerprints.add(fingerprint);
-  }
 
   const candidateListsMatch =
     nextCandidates.length === params.review.nextCandidates.length &&
@@ -479,13 +615,6 @@ function ensureNextCandidatesForKeepSearching(params: {
     );
   }
 
-  if (nextCandidates.length > uniqueReviewCandidates.length) {
-    nextReview = appendReviewObservation(
-      nextReview,
-      `Review keep_searching candidates were topped up with ${nextCandidates.length - uniqueReviewCandidates.length} diversified fallback candidates.`
-    );
-  }
-
   if (nextCandidates.length < params.review.nextCandidates.length) {
     nextReview = appendReviewObservation(
       nextReview,
@@ -501,6 +630,24 @@ function normalizeCandidates(
   familyIds: ReturnType<typeof getStrategyFamilies>
 ): NormalizedCandidateProposal[] {
   return proposals.map((proposal, index) => normalizeCandidateProposal(proposal, familyIds, index));
+}
+
+function toReviewProposalBatch(
+  proposal: ProposalBatch,
+  evaluations: CandidateBacktestEvaluation[]
+): ProposalBatch {
+  return {
+    ...proposal,
+    candidates: evaluations.map((evaluation) => ({
+      candidateId: evaluation.candidate.candidateId,
+      familyId: evaluation.candidate.familyId,
+      thesis: evaluation.candidate.thesis,
+      parameters: evaluation.candidate.parameters,
+      invalidationSignals: evaluation.candidate.invalidationSignals,
+      parentCandidateIds: evaluation.candidate.parentCandidateIds,
+      origin: evaluation.candidate.origin
+    }))
+  };
 }
 
 function dedupeCandidates(candidates: NormalizedCandidateProposal[]): NormalizedCandidateProposal[] {
@@ -548,7 +695,27 @@ async function runWithConcurrency<T, R>(items: T[], concurrency: number, worker:
 
 async function saveJson(filePath: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
+  await rename(tempPath, filePath);
+}
+
+function classifyEvaluationFailureStage(
+  message: string
+): NonNullable<CandidateBacktestEvaluation["failure"]>["stage"] {
+  if (/worker|result\.json|unexpected end of json|enoent|eperm|pipe/i.test(message)) {
+    return "worker";
+  }
+
+  if (/window|split/i.test(message)) {
+    return "split";
+  }
+
+  if (/candle|market|load/i.test(message)) {
+    return "preload";
+  }
+
+  return "backtest";
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined, label: string): Promise<T> {
@@ -635,6 +802,160 @@ function stableParametersKey(parameters: Record<string, number>): string {
 
 function candidateFingerprint(candidate: Pick<NormalizedCandidateProposal, "familyId" | "parameters">): string {
   return `${candidate.familyId}:${stableParametersKey(candidate.parameters)}`;
+}
+
+function asFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function asNumericParameters(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => typeof entry === "number" && Number.isFinite(entry))
+    .map(([key, entry]) => [key, entry as number] as const);
+
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+}
+
+function snapshotFromArtifactNode(node: unknown, sourcePath: string): ArtifactSeedSnapshot | undefined {
+  if (!node || typeof node !== "object") {
+    return undefined;
+  }
+
+  const record = node as Record<string, unknown>;
+  const directFamilyId = typeof record.familyId === "string" ? record.familyId : undefined;
+  const directParameters = asNumericParameters(record.parameters);
+
+  if (directFamilyId && directParameters) {
+    return {
+      candidateId: typeof record.candidateId === "string" ? record.candidateId : undefined,
+      familyId: directFamilyId,
+      parameters: directParameters,
+      netReturn: asFiniteNumber(record.netReturn),
+      maxDrawdown: asFiniteNumber(record.maxDrawdown),
+      tradeCount: asFiniteNumber(record.tradeCount),
+      positiveWindowRatio: asFiniteNumber(record.positiveWindowRatio),
+      score: asFiniteNumber(record.score),
+      sourcePath
+    };
+  }
+
+  const nestedCandidate = record.candidate;
+  if (!nestedCandidate || typeof nestedCandidate !== "object") {
+    return undefined;
+  }
+
+  const candidateRecord = nestedCandidate as Record<string, unknown>;
+  const familyId = typeof candidateRecord.familyId === "string" ? candidateRecord.familyId : undefined;
+  const parameters = asNumericParameters(candidateRecord.parameters);
+
+  if (!familyId || !parameters) {
+    return undefined;
+  }
+
+  const summary = record.summary && typeof record.summary === "object"
+    ? (record.summary as Record<string, unknown>)
+    : undefined;
+  const diagnostics = record.diagnostics && typeof record.diagnostics === "object"
+    ? (record.diagnostics as Record<string, unknown>)
+    : undefined;
+  const windows = diagnostics?.windows && typeof diagnostics.windows === "object"
+    ? (diagnostics.windows as Record<string, unknown>)
+    : undefined;
+
+  return {
+    candidateId: typeof candidateRecord.candidateId === "string" ? candidateRecord.candidateId : undefined,
+    familyId,
+    parameters,
+    netReturn: asFiniteNumber(summary?.netReturn),
+    maxDrawdown: asFiniteNumber(summary?.maxDrawdown),
+    tradeCount: asFiniteNumber(summary?.tradeCount),
+    positiveWindowRatio: asFiniteNumber(windows?.positiveWindowRatio),
+    score: asFiniteNumber(summary?.netReturn),
+    sourcePath
+  };
+}
+
+function collectArtifactSeedSnapshots(
+  node: unknown,
+  sourcePath: string,
+  snapshots: ArtifactSeedSnapshot[]
+): void {
+  const snapshot = snapshotFromArtifactNode(node, sourcePath);
+  if (snapshot) {
+    snapshots.push(snapshot);
+  }
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      collectArtifactSeedSnapshots(item, sourcePath, snapshots);
+    }
+    return;
+  }
+
+  if (!node || typeof node !== "object") {
+    return;
+  }
+
+  for (const value of Object.values(node as Record<string, unknown>)) {
+    collectArtifactSeedSnapshots(value, sourcePath, snapshots);
+  }
+}
+
+function scoreArtifactSeed(snapshot: ArtifactSeedSnapshot): number {
+  const baseScore = Number.isFinite(snapshot.score)
+    ? snapshot.score!
+    : (snapshot.netReturn ?? Number.NEGATIVE_INFINITY) - (snapshot.maxDrawdown ?? 0) * 0.7;
+  const tradeBoost = Math.min(snapshot.tradeCount ?? 0, 100) * 0.0002;
+  const windowBoost = Math.max(0, snapshot.positiveWindowRatio ?? 0) * 0.01;
+  return baseScore + tradeBoost + windowBoost;
+}
+
+function calculateCandidateParameterDistance(
+  left: Pick<NormalizedCandidateProposal, "familyId" | "parameters">,
+  right: Pick<NormalizedCandidateProposal, "familyId" | "parameters">,
+  familyMap: Map<string, StrategyFamilyDefinition>
+): number {
+  if (left.familyId !== right.familyId) {
+    return 1;
+  }
+
+  const family = familyMap.get(left.familyId);
+  if (!family || family.parameterSpecs.length === 0) {
+    return 0;
+  }
+
+  let totalDistance = 0;
+  let contributingSpecs = 0;
+
+  for (const spec of family.parameterSpecs) {
+    const range = spec.max - spec.min;
+    if (range <= 0) {
+      continue;
+    }
+
+    const leftValue = left.parameters[spec.name];
+    const rightValue = right.parameters[spec.name];
+    if (!Number.isFinite(leftValue) || !Number.isFinite(rightValue)) {
+      continue;
+    }
+
+    totalDistance += Math.abs(leftValue - rightValue) / range;
+    contributingSpecs += 1;
+  }
+
+  if (contributingSpecs === 0) {
+    return 0;
+  }
+
+  return totalDistance / contributingSpecs;
 }
 
 function buildLeaderboard(
@@ -1171,9 +1492,12 @@ function topUpCandidatesForEvaluation(params: {
 
 function selectDiversifiedCandidates(
   candidates: NormalizedCandidateProposal[],
-  limit: number
+  families: StrategyFamilyDefinition[],
+  limit: number,
+  minDistance = DEFAULT_CANDIDATE_DIVERSIFICATION_MIN_DISTANCE
 ): NormalizedCandidateProposal[] {
   const byFamily = new Map<string, NormalizedCandidateProposal[]>();
+  const familyMap = new Map(families.map((family) => [family.familyId, family]));
 
   for (const candidate of candidates) {
     const bucket = byFamily.get(candidate.familyId) ?? [];
@@ -1188,252 +1512,190 @@ function selectDiversifiedCandidates(
     }
   }
 
-  for (const candidate of candidates) {
-    if (selected.length >= limit) {
+  const remaining = candidates.filter((candidate) => !selected.includes(candidate));
+
+  while (selected.length < limit && remaining.length > 0) {
+    const sameFamilyPool = remaining.filter((candidate) => selected.some((picked) => picked.familyId === candidate.familyId));
+    const candidatePool = sameFamilyPool.length > 0 ? sameFamilyPool : remaining;
+    const distantPool = candidatePool.filter((candidate) => {
+      const sameFamilySelected = selected.filter((picked) => picked.familyId === candidate.familyId);
+      if (sameFamilySelected.length === 0) {
+        return true;
+      }
+
+      const closestDistance = Math.min(
+        ...sameFamilySelected.map((picked) => calculateCandidateParameterDistance(candidate, picked, familyMap))
+      );
+      return closestDistance >= minDistance;
+    });
+    const pool = distantPool.length > 0 ? distantPool : candidatePool;
+    let bestIndex = -1;
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (const candidate of pool) {
+      const position = remaining.indexOf(candidate);
+      const sameFamilySelected = selected.filter((picked) => picked.familyId === candidate.familyId);
+      const closestSameFamilyDistance = sameFamilySelected.length > 0
+        ? Math.min(
+            ...sameFamilySelected.map((picked) => calculateCandidateParameterDistance(candidate, picked, familyMap))
+          )
+        : 1;
+      const familyNoveltyBonus = sameFamilySelected.length === 0 ? 1 : 0;
+      const score = familyNoveltyBonus * 10 + closestSameFamilyDistance - position * 1e-4;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = position;
+      }
+    }
+
+    if (bestIndex < 0) {
       break;
     }
 
-    if (!selected.includes(candidate)) {
-      selected.push(candidate);
-    }
+    selected.push(remaining[bestIndex]!);
+    remaining.splice(bestIndex, 1);
   }
 
   return selected.slice(0, limit);
 }
 
-function buildFallbackNextCandidates(params: {
-  evaluations: CandidateBacktestEvaluation[];
-  families: StrategyFamilyDefinition[];
-  limit: number;
-  iteration: number;
-  seenFingerprints?: Set<string>;
-}): CandidateProposal[] {
-  const ranked = params.evaluations
-    .slice()
-    .sort((left, right) => {
-      const leftHasTrades = left.summary.tradeCount > 0 ? 1 : 0;
-      const rightHasTrades = right.summary.tradeCount > 0 ? 1 : 0;
-
-      if (rightHasTrades !== leftHasTrades) {
-        return rightHasTrades - leftHasTrades;
-      }
-
-      return compareEvaluations(left, right);
-    });
-  const byFamily = new Map<string, CandidateBacktestEvaluation[]>();
-
-  for (const evaluation of ranked) {
-    const bucket = byFamily.get(evaluation.candidate.familyId) ?? [];
-    bucket.push(evaluation);
-    byFamily.set(evaluation.candidate.familyId, bucket);
-  }
-
-  const selected: CandidateBacktestEvaluation[] = [];
-  for (const bucket of byFamily.values()) {
-    if (bucket[0]) {
-      selected.push(bucket[0]);
-    }
-  }
-
-  for (const evaluation of ranked) {
-    if (selected.length >= params.limit) {
-      break;
-    }
-
-    if (!selected.includes(evaluation)) {
-      selected.push(evaluation);
-    }
-  }
-
-  const usedFingerprints = new Set(params.seenFingerprints ?? []);
-
-  return selected.slice(0, params.limit).flatMap((evaluation, candidateIndex) => {
-    const family = params.families.find((item) => item.familyId === evaluation.candidate.familyId);
-    const parameters = { ...evaluation.candidate.parameters };
-
-    if (family && family.parameterSpecs.length > 0) {
-      const spec = family.parameterSpecs[candidateIndex % family.parameterSpecs.length];
-      const width = spec.max - spec.min;
-      const current = parameters[spec.name];
-
-      if (typeof current === "number" && Number.isFinite(current) && width > 0) {
-        const stepFrac = getStepFraction(params.iteration);
-        const step = Math.max(width * stepFrac, width / 20);
-        const direction = candidateIndex % 2 === 0 ? 1 : -1;
-        let nextValue = clamp(current + step * direction, spec.min, spec.max);
-
-        if (Math.abs(nextValue - current) < 1e-9) {
-          nextValue = clamp(current - step * direction, spec.min, spec.max);
-        }
-
-        parameters[spec.name] = quantize(nextValue);
-      }
-    }
-
-    const proposal = {
-      candidateId: `${evaluation.candidate.familyId}-fallback-${String(params.iteration).padStart(2, "0")}-${String(candidateIndex + 1).padStart(2, "0")}`,
-      familyId: evaluation.candidate.familyId,
-      thesis: `Fallback diversified from ${evaluation.candidate.candidateId} after review failure.`,
-      parameters,
-      origin: "review_fallback" as const,
-      parentCandidateIds: [
-        ...(evaluation.candidate.parentCandidateIds ?? []),
-        evaluation.candidate.candidateId
-      ].slice(-8),
-      invalidationSignals: [
-        "repeat candidate without new edge",
-        "trade count collapses",
-        "net return falls below prior fallback source"
-      ]
-    };
-    let fingerprint = candidateFingerprint(proposal);
-
-    if (usedFingerprints.has(fingerprint)) {
-      const familyDefinition = params.families.find((item) => item.familyId === proposal.familyId);
-      const mutated = mutateCandidateToNovelVariant({
-        candidate: {
-          ...evaluation.candidate,
-          candidateId: proposal.candidateId,
-          parameters: proposal.parameters,
-          thesis: proposal.thesis
-        },
-        family: familyDefinition,
-        usedFingerprints,
-        seed: params.iteration + candidateIndex,
-        suffix: `fallback-novel-${String(params.iteration).padStart(2, "0")}`
-      });
-
-      if (mutated) {
-        fingerprint = candidateFingerprint(mutated);
-        usedFingerprints.add(fingerprint);
-        return [{
-          candidateId: mutated.candidateId,
-          familyId: mutated.familyId,
-          thesis: mutated.thesis,
-          parameters: mutated.parameters,
-          invalidationSignals: proposal.invalidationSignals
-        }];
-      }
-    }
-
-    usedFingerprints.add(fingerprint);
-    return [proposal];
-  });
-}
-
-function buildFallbackProposalBatch(params: {
+async function buildArtifactSeedCandidates(params: {
   config: AutoResearchRunConfig;
   families: StrategyFamilyDefinition[];
-  history: ResearchIterationRecord[];
-}): ProposalBatch {
-  const historicalEvaluations = params.history
-    .flatMap((iteration) => iteration.evaluations)
-    .filter((evaluation) => evaluation.status === "completed")
-    .sort(compareEvaluations);
+  hiddenFamilyIds: Set<string>;
+  usedFingerprints: Set<string>;
+  iteration: number;
+}): Promise<CandidateProposal[]> {
+  const seedPaths = (params.config.seedArtifactPaths ?? []).filter(Boolean);
+  if (seedPaths.length === 0) {
+    return [];
+  }
 
-  const seenFamilies = new Set<string>();
-  const seenFingerprints = new Set<string>();
-  const candidates: CandidateProposal[] = [];
+  const seedBudget = Math.min(
+    params.config.candidatesPerIteration,
+    Math.max(1, params.config.seedCandidatesPerIteration ?? Math.ceil(params.config.candidatesPerIteration / 2))
+  );
+  if (seedBudget <= 0) {
+    return [];
+  }
 
-  for (const evaluation of historicalEvaluations) {
-    if (candidates.length >= params.config.candidatesPerIteration) {
-      break;
-    }
+  const eligibleFamilies = params.families.filter((family) => !params.hiddenFamilyIds.has(family.familyId));
+  const eligibleFamilyIds = new Set(eligibleFamilies.map((family) => family.familyId));
+  if (eligibleFamilyIds.size === 0) {
+    return [];
+  }
 
-    const family = params.families.find((item) => item.familyId === evaluation.candidate.familyId);
-    if (!family || seenFamilies.has(family.familyId)) {
+  const rankedByFingerprint = new Map<string, {
+    candidate: NormalizedCandidateProposal;
+    score: number;
+    sourcePath: string;
+  }>();
+
+  for (const seedPath of seedPaths) {
+    let parsed: unknown;
+
+    try {
+      parsed = JSON.parse(await readFile(seedPath, "utf8"));
+    } catch {
       continue;
     }
 
-    const mutated = mutateCandidateToNovelVariant({
-      candidate: evaluation.candidate,
-      family,
-      usedFingerprints: seenFingerprints,
-      seed: candidates.length + params.history.length + 1,
-      suffix: `proposal-fallback`
-    });
+    const snapshots: ArtifactSeedSnapshot[] = [];
+    collectArtifactSeedSnapshots(parsed, seedPath, snapshots);
 
-    const baseCandidate = mutated ?? {
-      ...evaluation.candidate,
-      candidateId: `${family.familyId}-proposal-fallback-${String(candidates.length + 1).padStart(2, "0")}`,
-      thesis: `Fallback continuation from ${evaluation.candidate.candidateId}.`,
-      origin: "proposal_fallback" as const,
-      parentCandidateIds: [
-        ...(evaluation.candidate.parentCandidateIds ?? []),
-        evaluation.candidate.candidateId
-      ].slice(-8)
-    };
+    for (const [index, snapshot] of snapshots.entries()) {
+      if (!eligibleFamilyIds.has(snapshot.familyId)) {
+        continue;
+      }
 
-    seenFamilies.add(family.familyId);
-    seenFingerprints.add(candidateFingerprint(baseCandidate));
-    candidates.push({
-      candidateId: baseCandidate.candidateId,
-      familyId: baseCandidate.familyId,
-      thesis: baseCandidate.thesis,
-      parameters: baseCandidate.parameters,
-      origin: "proposal_fallback",
-      parentCandidateIds: baseCandidate.parentCandidateIds,
-      invalidationSignals: [
-        "fallback candidate still produces zero trades",
-        "window robustness degrades",
-        "worst window turns sharply negative"
-      ]
-    });
+      const family = eligibleFamilies.find((item) => item.familyId === snapshot.familyId);
+      if (!family) {
+        continue;
+      }
+
+      const artifactSlug = path.basename(snapshot.sourcePath).replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "seed";
+      const proposal: CandidateProposal = {
+        candidateId: `${snapshot.familyId}-${artifactSlug}-artifact-seed-${String(params.iteration).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`,
+        familyId: snapshot.familyId,
+        thesis: `Artifact seed from ${path.basename(snapshot.sourcePath)} with prior measured edge.`,
+        parameters: {
+          ...midpointParameters(family),
+          ...snapshot.parameters
+        },
+        origin: "artifact_seed",
+        parentCandidateIds: snapshot.candidateId ? [snapshot.candidateId] : [],
+        invalidationSignals: [
+          "prior measured edge does not reproduce under the current walk-forward split",
+          "edge collapses once candidate is evaluated on the current market set",
+          "trade adequacy or drawdown degrades versus the source artifact"
+        ]
+      };
+
+      let normalized: NormalizedCandidateProposal;
+      try {
+        normalized = normalizeCandidateProposal(proposal, eligibleFamilies, index);
+      } catch {
+        continue;
+      }
+
+      const fingerprint = candidateFingerprint(normalized);
+      if (params.usedFingerprints.has(fingerprint)) {
+        continue;
+      }
+
+      const score = scoreArtifactSeed(snapshot);
+      const existing = rankedByFingerprint.get(fingerprint);
+      if (!existing || score > existing.score) {
+        rankedByFingerprint.set(fingerprint, {
+          candidate: normalized,
+          score,
+          sourcePath: snapshot.sourcePath
+        });
+      }
+    }
   }
 
-  for (const family of params.families) {
-    if (candidates.length >= params.config.candidatesPerIteration) {
-      break;
-    }
+  const rankedCandidates = [...rankedByFingerprint.values()]
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
 
-    if (seenFamilies.has(family.familyId)) {
-      continue;
-    }
+      return left.sourcePath.localeCompare(right.sourcePath);
+    })
+    .map((item) => item.candidate);
+  const diversified = selectDiversifiedCandidates(
+    rankedCandidates,
+    eligibleFamilies,
+    seedBudget,
+    params.config.candidateDiversificationMinDistance ?? DEFAULT_CANDIDATE_DIVERSIFICATION_MIN_DISTANCE
+  );
 
-    candidates.push({
-      candidateId: `${family.familyId}-proposal-fallback-${String(candidates.length + 1).padStart(2, "0")}`,
-      familyId: family.familyId,
-      thesis: `Bootstrap fallback candidate for ${family.familyId} using midpoint parameters.`,
-      parameters: midpointParameters(family),
-      origin: "proposal_fallback",
-      invalidationSignals: [
-        "still no trades after bootstrap fallback",
-        "window robustness remains weak"
-      ]
-    });
+  for (const candidate of diversified) {
+    params.usedFingerprints.add(candidateFingerprint(candidate));
   }
 
-  return {
-    researchSummary: "Proposal fallback built from historical best candidates and diversified family midpoints.",
-    preparation: [],
-    proposedFamilies: [],
-    codeTasks: [],
-    candidates
-  };
+  return diversified.map((candidate) => ({
+    candidateId: candidate.candidateId,
+    familyId: candidate.familyId,
+    thesis: candidate.thesis,
+    parameters: candidate.parameters,
+    origin: "artifact_seed",
+    parentCandidateIds: candidate.parentCandidateIds,
+    invalidationSignals: candidate.invalidationSignals
+  }));
 }
 
-function buildEngineAugmentedCandidates(params: {
+async function buildEngineAugmentedCandidates(params: {
   proposal: ProposalBatch;
   config: AutoResearchRunConfig;
   families: StrategyFamilyDefinition[];
   history: ResearchIterationRecord[];
   iteration: number;
   hiddenFamilyIds: Set<string>;
-}): CandidateProposal[] {
-  if (params.history.length === 0) {
-    return [];
-  }
-
+}): Promise<CandidateProposal[]> {
   const representedFamilies = new Set(params.proposal.candidates.map((candidate) => candidate.familyId));
-  const diversityTarget = Math.min(params.config.candidatesPerIteration, params.families.length);
-  const shouldAugment =
-    params.proposal.candidates.length < params.config.candidatesPerIteration ||
-    representedFamilies.size < diversityTarget;
-
-  if (!shouldAugment) {
-    return [];
-  }
-
   const historicalEvaluations = params.history
     .flatMap((iteration) => iteration.evaluations)
     .filter((evaluation) => evaluation.status === "completed")
@@ -1442,7 +1704,34 @@ function buildEngineAugmentedCandidates(params: {
     ...params.proposal.candidates.map((candidate) => candidateFingerprint(candidate)),
     ...historicalEvaluations.map((evaluation) => candidateFingerprint(evaluation.candidate))
   ]);
-  const engineCandidates: CandidateProposal[] = [];
+  const artifactSeedCandidates = await buildArtifactSeedCandidates({
+    config: params.config,
+    families: params.families,
+    hiddenFamilyIds: params.hiddenFamilyIds,
+    usedFingerprints,
+    iteration: params.iteration
+  });
+  const engineCandidates: CandidateProposal[] = [...artifactSeedCandidates];
+
+  for (const candidate of artifactSeedCandidates) {
+    representedFamilies.add(candidate.familyId);
+  }
+
+  if (params.history.length === 0) {
+    return engineCandidates;
+  }
+
+  const diversityTarget = Math.min(params.config.candidatesPerIteration, params.families.length);
+  const shouldAugment =
+    engineCandidates.length < params.config.candidatesPerIteration &&
+    (
+      params.proposal.candidates.length < params.config.candidatesPerIteration ||
+      representedFamilies.size < diversityTarget
+    );
+
+  if (!shouldAugment) {
+    return engineCandidates;
+  }
   const stagedConfirmFamilies = new Set<string>();
   const addMutationCandidate = (evaluation: CandidateBacktestEvaluation, seed: number) => {
     if (engineCandidates.length >= params.config.candidatesPerIteration) {
@@ -1569,27 +1858,30 @@ function buildEngineAugmentedCandidates(params: {
   return engineCandidates;
 }
 
-function augmentProposalBatchWithEngineCandidates(params: {
+async function augmentProposalBatchWithEngineCandidates(params: {
   proposal: ProposalBatch;
   config: AutoResearchRunConfig;
   families: StrategyFamilyDefinition[];
   history: ResearchIterationRecord[];
   iteration: number;
   hiddenFamilyIds: Set<string>;
-}): ProposalBatch {
-  const engineCandidates = buildEngineAugmentedCandidates(params);
+}): Promise<ProposalBatch> {
+  const engineCandidates = await buildEngineAugmentedCandidates(params);
 
   if (engineCandidates.length === 0) {
     return params.proposal;
   }
 
+  const artifactSeedCount = engineCandidates.filter((candidate) => candidate.origin === "artifact_seed").length;
   const mutationCount = engineCandidates.filter((candidate) => candidate.origin === "engine_mutation").length;
   const seedCount = engineCandidates.filter((candidate) => candidate.origin === "engine_seed").length;
+  const artifactSeeds = engineCandidates.filter((candidate) => candidate.origin === "artifact_seed");
+  const runtimeSeeds = engineCandidates.filter((candidate) => candidate.origin !== "artifact_seed");
 
   return {
     ...params.proposal,
-    researchSummary: `${params.proposal.researchSummary} Engine augmentation added ${engineCandidates.length} candidates (${mutationCount} mutations, ${seedCount} seeds).`,
-    candidates: [...params.proposal.candidates, ...engineCandidates]
+    researchSummary: `${params.proposal.researchSummary} Engine augmentation added ${engineCandidates.length} candidates (${artifactSeedCount} artifact seeds, ${mutationCount} mutations, ${seedCount} seeds).`,
+    candidates: [...artifactSeeds, ...params.proposal.candidates, ...runtimeSeeds]
   };
 }
 
@@ -1607,6 +1899,7 @@ async function persistRunArtifacts(params: {
   bestCandidate?: CandidateBacktestEvaluation;
   pendingProposal?: ProposalBatch;
   noTradeIterations: number;
+  lineage?: ResearchLineage;
   status?: AutoResearchStatus;
   liveEvaluations?: CandidateBacktestEvaluation[];
 }): Promise<AutoResearchRunReport> {
@@ -1622,7 +1915,8 @@ async function persistRunArtifacts(params: {
     configRepairs: params.configRepairs,
     bestCandidate: params.bestCandidate,
     pendingProposal: params.pendingProposal,
-    noTradeIterations: params.noTradeIterations
+    noTradeIterations: params.noTradeIterations,
+    lineage: params.lineage
   };
   const report = toReport(state);
   const rawLeaderboard = buildLeaderboard(params.iterations, params.liveEvaluations);
@@ -1639,9 +1933,22 @@ async function persistRunArtifacts(params: {
   await saveJson(path.join(params.outputDir, "candidate-genealogy.json"), candidateGenealogy);
   await saveJson(path.join(params.outputDir, "config-repairs.json"), params.configRepairs);
   await saveJson(path.join(params.outputDir, "report.json"), report);
-  await writeFile(path.join(params.outputDir, "report.md"), summarizeMarkdown(report));
+  if (params.lineage) {
+    const snapshot = buildLineageSnapshot({
+      iterations: params.iterations,
+      config: params.config,
+      savedAt: params.generatedAt
+    });
+    await saveLineageSnapshot(params.outputDir, snapshot);
+  }
+  const reportMarkdownPath = path.join(params.outputDir, "report.md");
+  const reportHtmlPath = path.join(params.outputDir, "report.html");
+  const reportMarkdownTempPath = `${reportMarkdownPath}.${process.pid}.${Date.now()}.tmp`;
+  const reportHtmlTempPath = `${reportHtmlPath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(reportMarkdownTempPath, summarizeMarkdown(report));
+  await rename(reportMarkdownTempPath, reportMarkdownPath);
   await writeFile(
-    path.join(params.outputDir, "report.html"),
+    reportHtmlTempPath,
     renderAutoResearchHtmlWithOptions(report, {
       status: params.status,
       leaderboard,
@@ -1651,6 +1958,7 @@ async function persistRunArtifacts(params: {
       candidateGenealogy
     })
   );
+  await rename(reportHtmlTempPath, reportHtmlPath);
 
   if (params.status) {
     await saveRunStatus(params.outputDir, params.status);
@@ -1683,6 +1991,9 @@ export function createAutoResearchOrchestrator(deps: {
     timeframe: AutoResearchRunConfig["timeframe"];
     minCandles: number;
     marketLimit: number;
+    universeName: string;
+    families: StrategyFamilyDefinition[];
+    config: AutoResearchRunConfig;
   }) => Promise<string[]>;
   preloadReferenceCandles?: (params: {
     config: AutoResearchRunConfig;
@@ -1692,50 +2003,66 @@ export function createAutoResearchOrchestrator(deps: {
   const evaluateCandidate = deps.evaluateCandidate ?? (async ({ config, candidate, marketCodes, outputDir }) => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-worker-"));
     const payloadPath = path.join(tempDir, "payload.json");
-    await writeFile(
-      payloadPath,
-      `${JSON.stringify({ config, candidate, marketCodes }, null, 2)}\n`
-    );
+    const workerPath = path.resolve(process.cwd(), "src/auto-research/evaluate-worker.ts");
+    const resultPath = path.join(tempDir, "result.json");
 
-    const stdout = await new Promise<string>((resolve, reject) => {
-      const child = spawn(
-        "pnpm",
-        [
-          "--filter",
-          "@fst/backtester",
-          "exec",
-          "tsx",
-          "src/auto-research/evaluate-worker.ts",
-          "--payload",
-          payloadPath
-        ],
-        {
-          cwd: process.cwd(),
-          stdio: ["ignore", "pipe", "pipe"]
-        }
+    try {
+      await writeFile(
+        payloadPath,
+        `${JSON.stringify({ config, candidate, marketCodes }, null, 2)}\n`
       );
-      let out = "";
-      let err = "";
-      child.stdout.on("data", (chunk) => {
-        out += String(chunk);
-      });
-      child.stderr.on("data", (chunk) => {
-        err += String(chunk);
-      });
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code === 0) {
-          resolve(out);
-          return;
-        }
 
-        reject(new Error(err.trim() || out.trim() || `evaluate-worker failed with code ${code}`));
-      });
-    });
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [
+            "--import",
+            "tsx",
+            workerPath,
+            "--payload",
+            payloadPath,
+            "--output",
+            resultPath
+          ],
+          {
+            cwd: process.cwd(),
+            stdio: ["ignore", "ignore", "pipe"]
+          }
+        );
+        let err = "";
+        child.stderr.on("data", (chunk) => {
+          err += String(chunk);
+        });
+        child.on("error", reject);
+        child.on("close", (code) => {
+          if (code === 0) {
+            resolve();
+            return;
+          }
 
-    const evaluation = JSON.parse(stdout) as CandidateBacktestEvaluation;
-    await saveJson(path.join(outputDir, `${candidate.candidateId}.json`), evaluation);
-    return evaluation;
+          reject(new Error(err.trim() || `evaluate-worker failed with code ${code}`));
+        });
+      });
+
+      let stdout: string;
+      try {
+        stdout = await readFile(resultPath, "utf8");
+      } catch (error) {
+        throw new Error(`worker output unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      let evaluation: CandidateBacktestEvaluation;
+      try {
+        evaluation = JSON.parse(stdout) as CandidateBacktestEvaluation;
+      } catch (error) {
+        throw new Error(`worker output invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      await saveJson(path.join(outputDir, `${candidate.candidateId}.json`), evaluation);
+      return evaluation;
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
   // Block stage: in-process evaluation with lazy candle loading per timeframe group.
   // Candidates are grouped by required timeframes so each group loads only the data
@@ -1789,7 +2116,7 @@ export function createAutoResearchOrchestrator(deps: {
     const needs1m = params.timeframes.includes("1m");
 
     const loadOrCache = async (tf: StrategyTimeframe, marketCodes: string[], limit: number): Promise<CandleMap> => {
-      const cacheKey = `${tf}:${limit}:${marketCodes.length}`;
+      const cacheKey = `${tf}:${limit}:${marketCodes.slice().sort().join(",")}`;
       const cached = candleCache.get(cacheKey);
       if (cached) return cached;
       const data = await loadCandlesForMarkets({ marketCodes, timeframe: tf, limit }) as CandleMap;
@@ -1823,7 +2150,10 @@ export function createAutoResearchOrchestrator(deps: {
         for (const code of params.marketCodes) {
           if (cached[code]) result[code] = cached[code];
         }
-        return result;
+
+        if (Object.keys(result).length === params.marketCodes.length) {
+          return result;
+        }
       }
       return loadCandlesForMarkets(params);
     };
@@ -1895,7 +2225,7 @@ export function createAutoResearchOrchestrator(deps: {
       mode: config.mode,
       status: "failed",
       failure: {
-        stage: /window|split/i.test(message) ? "split" : /candle|market|load/i.test(message) ? "preload" : "backtest",
+        stage: classifyEvaluationFailureStage(message),
         message
       },
       summary: {
@@ -1923,15 +2253,22 @@ export function createAutoResearchOrchestrator(deps: {
   const discoverRuntimeStrategies = deps.discoverRuntimeScoredStrategies ?? discoverRuntimeScoredStrategyNames;
   const resolveCandidateMarkets =
     deps.resolveCandidateMarkets ??
-    (async ({ timeframe, minCandles, marketLimit }) =>
-      (
-        await getCandidateMarketsWithMinimumCandles({
-          timeframe,
-          minCandles
-        })
-      )
-        .map((item) => item.marketCode)
-        .slice(0, Math.max(marketLimit * 3, marketLimit + 5)));
+    (async ({ universeName, families, config }) => {
+      const requirements = resolveCandidateMarketRequirements({
+        config,
+        families
+      });
+      const universeMarkets = await resolveUniverseCandidateMarkets({
+        universeName,
+        requirements
+      });
+
+      if (universeMarkets.length > 0) {
+        return universeMarkets;
+      }
+
+      return resolveFallbackCandidateMarkets({ requirements });
+    });
   const preloadReferenceCandles =
     deps.preloadReferenceCandles ??
     (async ({ config, marketCodes }) => {
@@ -1975,9 +2312,20 @@ export function createAutoResearchOrchestrator(deps: {
             requireBootstrapSignificanceForPromotion:
               inputConfig.requireBootstrapSignificanceForPromotion ??
               restored.config.requireBootstrapSignificanceForPromotion,
-            maxNoTradeIterations: inputConfig.maxNoTradeIterations ?? restored.config.maxNoTradeIterations
+            maxNoTradeIterations: inputConfig.maxNoTradeIterations ?? restored.config.maxNoTradeIterations,
+            seedArtifactPaths: inputConfig.seedArtifactPaths ?? restored.config.seedArtifactPaths,
+            seedCandidatesPerIteration:
+              inputConfig.seedCandidatesPerIteration ?? restored.config.seedCandidatesPerIteration,
+            candidateDiversificationMinDistance:
+              inputConfig.candidateDiversificationMinDistance ??
+              restored.config.candidateDiversificationMinDistance,
+            loopVersion: inputConfig.loopVersion ?? restored.config.loopVersion
           }
         : inputConfig;
+      config = {
+        ...config,
+        loopVersion: config.loopVersion ?? "v1"
+      };
       const originalStage = config.researchStage;
       if (config.researchStage === "auto") {
         config = { ...config, researchStage: "block" };
@@ -2032,6 +2380,7 @@ export function createAutoResearchOrchestrator(deps: {
       await acquireRunLock(config.outputDir);
 
       try {
+        candleCache.clear();
         await reconcilePartialRunStatus(config.outputDir);
         const limitResolution = repairAutoResearchLimit(config);
         config = limitResolution.config;
@@ -2044,7 +2393,10 @@ export function createAutoResearchOrchestrator(deps: {
         const marketCodes = (await resolveCandidateMarkets({
           timeframe: config.timeframe,
           minCandles,
-          marketLimit: config.marketLimit
+          marketLimit: config.marketLimit,
+          universeName: config.universeName,
+          families: runtimeFamilies,
+          config
         })).slice(0, candidateMarketTarget);
 
         if (marketCodes.length === 0) {
@@ -2069,6 +2421,62 @@ export function createAutoResearchOrchestrator(deps: {
         const log = async (message: string) => {
           console.error(message);
           await appendRunLog(config.outputDir, message);
+        };
+        let lineage = await loadOrCreateResearchLineage({
+          outputDir: config.outputDir,
+          stage: config.researchStage ?? "auto",
+          objective: `Auto research ${config.researchStage ?? "auto"} ${config.universeName} ${config.timeframe} ${config.mode}`,
+          lineageId: restored?.lineage?.lineageId
+        });
+        let artifactWriteQueue = Promise.resolve<void>(undefined);
+        const queueArtifactWrite = async <T>(task: () => Promise<T>): Promise<T> => {
+          const next = artifactWriteQueue.catch(() => undefined).then(task);
+          artifactWriteQueue = next.then(() => undefined, () => undefined);
+          return next;
+        };
+        const failRun = async (message: string, pendingProposal?: ProposalBatch): Promise<never> => {
+          outcome = "failed";
+          outcomeReason = message;
+          await log(`[auto-research] failed ${message}`);
+          if (config.loopVersion === "v2") {
+            await appendLineageEvent({
+              outputDir: config.outputDir,
+              event: {
+                eventId: `${lineage.lineageId}-failed-${Date.now()}`,
+                lineageId: lineage.lineageId,
+                at: new Date().toISOString(),
+                type: "run_failed",
+                payload: {
+                  iteration: iterations.length,
+                  message
+                }
+              }
+            });
+          }
+          await queueArtifactWrite(() => persistRunArtifacts({
+            outputDir: config.outputDir,
+            generatedAt: new Date().toISOString(),
+            config,
+            families: runtimeFamilies,
+            catalog,
+            marketCodes,
+            iterations,
+            outcome,
+            outcomeReason,
+            configRepairs,
+            bestCandidate,
+            pendingProposal,
+            noTradeIterations,
+            lineage,
+            status: {
+              updatedAt: new Date().toISOString(),
+              phase: "failed",
+              iteration: iterations.length,
+              totalIterations: config.iterations,
+              message
+            }
+          }));
+          throw new Error(message);
         };
         process.once("SIGINT", handleAbort);
         process.once("SIGTERM", handleAbort);
@@ -2121,6 +2529,7 @@ export function createAutoResearchOrchestrator(deps: {
               bestCandidate,
               pendingProposal: nextProposal,
               noTradeIterations,
+              lineage,
               status: invalidStatus
             });
             return report;
@@ -2151,6 +2560,7 @@ export function createAutoResearchOrchestrator(deps: {
           bestCandidate,
           pendingProposal: nextProposal,
           noTradeIterations,
+          lineage,
           status: startingStatus
         });
 
@@ -2179,63 +2589,125 @@ export function createAutoResearchOrchestrator(deps: {
             message: "Waiting for LLM proposal."
           };
           await saveRunStatus(config.outputDir, proposalStatus);
-          let proposal: ProposalBatch;
-          if (nextProposal) {
-            proposal = nextProposal;
-          } else {
-            try {
-              proposal = await withTimeout(
-                deps.llmClient.proposeCandidates({
-                  config,
-                  families: proposalFamiliesForLlm,
-                  marketCodes,
-                  history: iterations,
-                  blockCatalog
-                }),
-                config.llmTimeoutMs,
-                "auto-research proposal"
-              );
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              await log(`[auto-research] proposal-fallback ${message}`);
-              proposal = buildFallbackProposalBatch({
-                config,
-                families: proposalFamiliesForLlm,
-                history: iterations
-              });
-            }
+          let proposalResult: Awaited<ReturnType<typeof generateHypothesisProposal>>;
+          try {
+            proposalResult = await generateHypothesisProposal({
+              llmClient: deps.llmClient,
+              config,
+              families: proposalFamiliesForLlm,
+              marketCodes,
+              history: iterations,
+              iteration,
+              nextProposal,
+              blockCatalog,
+              hiddenFamilyIds
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await failRun(`LLM proposal failed: ${message}`, nextProposal);
+          }
+
+          let proposal = proposalResult!.proposal;
+          if (proposalResult!.source !== "llm") {
+            await log(
+              `[auto-research] proposal source=${proposalResult!.source}${proposalResult!.note ? ` detail=${proposalResult!.note}` : ""}`
+            );
           }
         catalog = mergeProposedFamilies(catalog, proposal.proposedFamilies);
         runtimeFamilies = mergeStrategyFamilies(buildRuntimeFamilies(catalog), configuredFamilies);
         await saveCatalogArtifact(config.outputDir, catalog);
-        proposal = augmentProposalBatchWithEngineCandidates({
-          proposal,
-          config,
-          families: runtimeFamilies,
-          history: iterations,
-          iteration,
-          hiddenFamilyIds
-        });
-        const baseCandidates = dedupeCandidates(normalizeCandidates(proposal.candidates, runtimeFamilies));
-        const novelCandidates = ensureNovelCandidates({
-          candidates: baseCandidates,
-          families: runtimeFamilies,
-          iterations,
-          iteration
-        });
-        const normalizedCandidates = topUpCandidatesForEvaluation({
-          candidates: novelCandidates.length > 0 ? novelCandidates : baseCandidates,
-          families: runtimeFamilies,
-          iterations,
-          iteration,
-          limit: config.candidatesPerIteration
-        });
-        const diversifiedCandidates = selectDiversifiedCandidates(
-          skippedFamilyIds.size > 0
-            ? normalizedCandidates.filter((c) => !skippedFamilyIds.has(c.familyId))
-            : normalizedCandidates,
-          config.candidatesPerIteration
-        );
+        let hypotheses: ResearchHypothesis[] = [];
+        if (config.loopVersion === "v2") {
+          hypotheses = proposalResult!.hypotheses;
+          await appendLineageEvent({
+            outputDir: config.outputDir,
+            event: {
+              eventId: `${lineage.lineageId}-proposal-${iteration}`,
+              lineageId: lineage.lineageId,
+              at: new Date().toISOString(),
+              type: "proposal_recorded",
+              payload: {
+                iteration,
+                hypothesisCount: hypotheses.length,
+                candidateCount: proposal.candidates.length,
+                codeTaskCount: proposal.codeTasks.length,
+                familyCount: proposal.proposedFamilies.length
+              }
+            }
+          });
+        }
+
+        let experimentPlan: ExperimentPlan | undefined;
+        let normalizedCandidates: NormalizedCandidateProposal[];
+        let diversifiedCandidates: NormalizedCandidateProposal[];
+
+        if (config.loopVersion === "v2") {
+          const preparedKernel = await prepareExperimentKernel({
+            config,
+            proposal,
+            families: runtimeFamilies,
+            history: iterations,
+            iteration,
+            hiddenFamilyIds,
+            hypotheses
+          });
+          proposal = preparedKernel.proposal;
+          experimentPlan = preparedKernel.experimentPlan;
+          normalizedCandidates = preparedKernel.normalizedCandidates;
+          diversifiedCandidates = preparedKernel.diversifiedCandidates;
+        } else {
+          proposal = await augmentProposalBatchWithEngineCandidates({
+            proposal,
+            config,
+            families: runtimeFamilies,
+            history: iterations,
+            iteration,
+            hiddenFamilyIds
+          });
+          normalizedCandidates = topUpCandidatesForEvaluation({
+            candidates: (() => {
+              const baseCandidates = dedupeCandidates(normalizeCandidates(proposal.candidates, runtimeFamilies));
+              const novelCandidates = ensureNovelCandidates({
+                candidates: baseCandidates,
+                families: runtimeFamilies,
+                iterations,
+                iteration
+              });
+              return novelCandidates.length > 0 ? novelCandidates : baseCandidates;
+            })(),
+            families: runtimeFamilies,
+            iterations,
+            iteration,
+            limit: config.candidatesPerIteration
+          });
+          diversifiedCandidates = selectDiversifiedCandidates(
+            skippedFamilyIds.size > 0
+              ? normalizedCandidates.filter((c) => !skippedFamilyIds.has(c.familyId))
+              : normalizedCandidates,
+            runtimeFamilies,
+            config.candidatesPerIteration,
+            config.candidateDiversificationMinDistance ?? DEFAULT_CANDIDATE_DIVERSIFICATION_MIN_DISTANCE
+          );
+        }
+
+        if (experimentPlan && config.loopVersion === "v2") {
+          await appendLineageEvent({
+            outputDir: config.outputDir,
+            event: {
+              eventId: `${lineage.lineageId}-plan-${iteration}`,
+              lineageId: lineage.lineageId,
+              at: new Date().toISOString(),
+              type: "plan_compiled",
+              payload: {
+                iteration,
+                planId: experimentPlan.planId,
+                hypothesisId: experimentPlan.hypothesisId,
+                mode: experimentPlan.mode,
+                candidateCount: experimentPlan.candidates.length
+              }
+            }
+          });
+        }
         await log(
           `[auto-research] iteration ${iteration}/${config.iterations} candidates=${diversifiedCandidates.length} families=${Array.from(new Set(diversifiedCandidates.map((candidate) => candidate.familyId))).join(",") || "none"}`
         );
@@ -2271,19 +2743,64 @@ export function createAutoResearchOrchestrator(deps: {
             preparationResults.filter((result) => result.status === "failed").length
           }`
         );
-        const codeMutationResults = await codeAgent.execute({
-          tasks: proposal.codeTasks,
-          outputDir: path.join(
-            config.outputDir,
-            `iteration-${String(iteration).padStart(2, "0")}`,
-            "code-agent"
-          ),
-          allowCodeMutation: config.allowCodeMutation,
-          cwd: process.cwd(),
-          provider: config.llmProvider,
-          model: config.llmModel
-        });
-        const normalizedCodeMutationResults: CodeMutationExecutionResult[] = codeMutationResults.map((item) => ({
+        const codeMutationResults = config.loopVersion === "v2"
+          ? await Promise.all(proposal.codeTasks.map(async (task, taskIndex) => {
+              const taskId = task.taskId ?? `code-task-${String(taskIndex + 1).padStart(2, "0")}`;
+              const worktreeResult = await executeCodeMutationInWorktree({
+                repoRoot: process.cwd(),
+                outputDir: path.join(
+                  config.outputDir,
+                  `iteration-${String(iteration).padStart(2, "0")}`,
+                  "code-worktrees",
+                  taskId
+                ),
+                task: {
+                  ...task,
+                  taskId
+                },
+                allowCodeMutation: config.allowCodeMutation,
+                provider: config.llmProvider,
+                model: config.llmModel
+              });
+              const applyResult = worktreeResult.mergeRecommendation === "merge"
+                ? await applyWorktreePatchToWorkspace({
+                    patchPath: worktreeResult.patchPath,
+                    repoRoot: process.cwd()
+                  })
+                : {
+                    status: "skipped" as const,
+                    detail: "Worktree benchmark did not recommend applying the patch."
+                  };
+
+              return {
+                task,
+                status:
+                  worktreeResult.codeAgentStatus === "executed" && applyResult.status === "applied"
+                    ? "executed" as const
+                    : worktreeResult.codeAgentStatus === "failed" || applyResult.status === "failed"
+                      ? "failed" as const
+                      : "skipped" as const,
+                detail: [
+                  `worktree=${worktreeResult.worktreePath}`,
+                  `benchmarks=${worktreeResult.benchmarkResults.map((result) => `${result.status}:${result.command}`).join(" | ") || "none"}`,
+                  `apply=${applyResult.status}:${applyResult.detail}`,
+                  worktreeResult.codeAgentDetail
+                ].join("\n")
+              };
+            }))
+          : await codeAgent.execute({
+              tasks: proposal.codeTasks,
+              outputDir: path.join(
+                config.outputDir,
+                `iteration-${String(iteration).padStart(2, "0")}`,
+                "code-agent"
+              ),
+              allowCodeMutation: config.allowCodeMutation,
+              cwd: process.cwd(),
+              provider: config.llmProvider,
+              model: config.llmModel
+            });
+        const normalizedCodeMutationResults: CodeMutationExecutionResult[] = codeMutationResults.map((item): CodeMutationExecutionResult => ({
           taskId: item.task.taskId ?? item.task.title,
           familyId: item.task.familyId,
           strategyName: item.task.strategyName,
@@ -2291,6 +2808,26 @@ export function createAutoResearchOrchestrator(deps: {
           status: item.status,
           detail: item.detail
         }));
+        if (config.loopVersion === "v2" && normalizedCodeMutationResults.length > 0) {
+          await appendLineageEvent({
+            outputDir: config.outputDir,
+            event: {
+              eventId: `${lineage.lineageId}-code-${iteration}`,
+              lineageId: lineage.lineageId,
+              at: new Date().toISOString(),
+              type: "code_mutation_finished",
+              payload: {
+                iteration,
+                results: normalizedCodeMutationResults.map((result) => ({
+                  taskId: result.taskId,
+                  status: result.status,
+                  familyId: result.familyId,
+                  strategyName: result.strategyName
+                }))
+              }
+            }
+          });
+        }
         const validationResults: ValidationCommandResult[] = await runPostMutationValidation({
           outputDir: path.join(
             config.outputDir,
@@ -2347,7 +2884,7 @@ export function createAutoResearchOrchestrator(deps: {
             bestCandidateId: liveEvaluations[0]?.candidate.candidateId ?? bestCandidate?.candidate.candidateId,
             bestNetReturn: liveEvaluations[0]?.summary.netReturn ?? bestCandidate?.summary.netReturn
           };
-          await persistRunArtifacts({
+          await queueArtifactWrite(() => persistRunArtifacts({
             outputDir: config.outputDir,
             generatedAt: new Date().toISOString(),
             config,
@@ -2358,12 +2895,13 @@ export function createAutoResearchOrchestrator(deps: {
             bestCandidate,
             pendingProposal: proposal,
             noTradeIterations,
+            lineage,
             outcome,
             outcomeReason,
             configRepairs,
             status: progressStatus,
-            liveEvaluations
-          });
+            liveEvaluations: liveEvaluations.slice()
+          }));
           await log(
             `[auto-research] iteration ${iteration}/${config.iterations} done ${evaluation.candidate.candidateId} net=${evaluation.summary.netReturn} trades=${evaluation.summary.tradeCount}`
           );
@@ -2484,72 +3022,53 @@ export function createAutoResearchOrchestrator(deps: {
           message: "Waiting for LLM review."
         };
         await saveRunStatus(config.outputDir, reviewStatus);
-        let review: ReviewDecision;
-        let usedFallbackReview = false;
         const reviewFamiliesForLlm = runtimeFamilies.filter((family) => !hiddenFamilyIds.has(family.familyId));
+        let reviewResult: Awaited<ReturnType<typeof generateIterationReview>>;
         try {
-          review = await withTimeout(
-            deps.llmClient.reviewIteration({
-              config,
-              families: reviewFamiliesForLlm,
-              history: iterations,
-              latestProposal: proposal,
-              preparationResults,
-              codeMutationResults: normalizedCodeMutationResults,
-              validationResults,
-              evaluations,
-              blockCatalog
-            }),
-            config.llmTimeoutMs,
-            "auto-research review"
-          );
-        } catch (error) {
-          usedFallbackReview = true;
-          const message = error instanceof Error ? error.message : String(error);
-          await log(`[auto-research] review-fallback ${message}`);
-          const fallbackCandidates = buildFallbackNextCandidates({
+          reviewResult = await generateIterationReview({
+            llmClient: deps.llmClient,
+            config,
+            families: reviewFamiliesForLlm,
+            history: iterations,
+            proposal,
             evaluations,
-            families: runtimeFamilies,
-            limit: config.candidatesPerIteration,
+            preparationResults,
+            codeMutationResults: normalizedCodeMutationResults,
+            validationResults,
             iteration,
-            seenFingerprints: new Set(
-              iterations.flatMap((record) =>
-                record.evaluations.map((evaluation) => candidateFingerprint(evaluation.candidate))
-              )
-            )
+            blockCatalog
           });
-          review = {
-            summary: `Fallback review after LLM failure: ${message}`,
-            verdict: "keep_searching" as const,
-            nextPreparation: [],
-            proposedFamilies: proposal.proposedFamilies,
-            codeTasks: [],
-            nextCandidates:
-              fallbackCandidates.length > 0
-                ? fallbackCandidates
-                : proposal.candidates.slice(0, config.candidatesPerIteration),
-            retireCandidateIds: [],
-            observations: [
-              "LLM review unavailable; built diversified fallback candidates from current evaluations.",
-              message
-            ]
-          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("timed out") || message.includes("transport") || message.includes("review")) {
+            await failRun(`LLM review failed: ${message}`, proposal);
+          }
+          await failRun(`Invalid review decision: ${message}`, proposal);
         }
-        review = governReviewDecision({
-          review,
-          evaluations,
-          config,
-          iteration,
-          usedFallbackReview
-        });
-        review = ensureNextCandidatesForKeepSearching({
-          review,
-          evaluations,
-          families: runtimeFamilies,
-          limit: config.candidatesPerIteration,
-          iteration,
-          history: iterations
-        });
+        const review = reviewResult!.review;
+        if (reviewResult!.reviewFailureMessage && config.loopVersion === "v2") {
+          await log(`[auto-research] review degraded to objective governance: ${reviewResult!.reviewFailureMessage}`);
+        }
+        if (reviewResult!.usedObjectiveGovernance && !reviewResult!.reviewFailureMessage) {
+          await log("[auto-research] review continued under objective governance.");
+        }
+        if (config.loopVersion === "v2") {
+          await appendLineageEvent({
+            outputDir: config.outputDir,
+            event: {
+              eventId: `${lineage.lineageId}-review-${iteration}`,
+              lineageId: lineage.lineageId,
+              at: new Date().toISOString(),
+              type: "iteration_reviewed",
+              payload: {
+                iteration,
+                verdict: review.verdict,
+                promotedCandidateId: review.promotedCandidateId,
+                nextCandidateCount: review.nextCandidates.length
+              }
+            }
+          });
+        }
         catalog = mergeProposedFamilies(catalog, review.proposedFamilies);
         catalog = refreshCatalogImplementations(catalog);
         runtimeFamilies = mergeStrategyFamilies(buildRuntimeFamilies(catalog), configuredFamilies);
@@ -2602,6 +3121,13 @@ export function createAutoResearchOrchestrator(deps: {
           path.join(config.outputDir, `iteration-${String(iteration).padStart(2, "0")}.json`),
           record
         );
+        if (config.loopVersion === "v2") {
+          lineage = await updateResearchLineageFromIterations({
+            outputDir: config.outputDir,
+            lineage,
+            iterations
+          });
+        }
         await log(
           `[auto-research] iteration ${iteration}/${config.iterations} verdict=${review.verdict} best=${JSON.stringify(
             evaluations[0] ? summarizeEvaluationRanking(evaluations[0]) : {}
@@ -2616,7 +3142,7 @@ export function createAutoResearchOrchestrator(deps: {
               codeTasks: review.codeTasks,
               candidates: review.nextCandidates
             };
-        await persistRunArtifacts({
+        await queueArtifactWrite(() => persistRunArtifacts({
           outputDir: config.outputDir,
           generatedAt: new Date().toISOString(),
           config,
@@ -2630,9 +3156,13 @@ export function createAutoResearchOrchestrator(deps: {
           bestCandidate,
           pendingProposal,
           noTradeIterations,
+          lineage,
           status: {
             updatedAt: new Date().toISOString(),
-            phase: review.verdict === "promote_candidate" || review.verdict === "stop_no_edge" ? "completed" : "review",
+            phase:
+              review.verdict === "promote_candidate" || review.verdict === "stop_no_edge"
+                ? (config.researchStage === "block" ? "review" : "completed")
+                : "review",
             iteration,
             totalIterations: config.iterations,
             message:
@@ -2640,7 +3170,7 @@ export function createAutoResearchOrchestrator(deps: {
                 ? `Run stopped with verdict ${review.verdict}.`
                 : `Iteration ${iteration} completed.`
           }
-        });
+        }));
 
         if (review.verdict === "promote_candidate" || review.verdict === "stop_no_edge") {
           if (review.promotedCandidateId) {
@@ -2763,10 +3293,28 @@ export function createAutoResearchOrchestrator(deps: {
           configRepairs,
           bestCandidate,
           pendingProposal: undefined,
-          noTradeIterations
+          noTradeIterations,
+          lineage
         });
+        if (config.loopVersion === "v2") {
+          await appendLineageEvent({
+            outputDir: config.outputDir,
+            event: {
+              eventId: `${lineage.lineageId}-completed-${Date.now()}`,
+              lineageId: lineage.lineageId,
+              at: new Date().toISOString(),
+              type: outcome === "failed" ? "run_failed" : "run_completed",
+              payload: {
+                outcome,
+                outcomeReason,
+                iterations: iterations.length,
+                bestCandidateId: bestCandidate?.candidate.candidateId
+              }
+            }
+          });
+        }
 
-        await persistRunArtifacts({
+        await queueArtifactWrite(() => persistRunArtifacts({
           outputDir: config.outputDir,
           generatedAt: report.generatedAt,
           config,
@@ -2778,8 +3326,9 @@ export function createAutoResearchOrchestrator(deps: {
           outcomeReason,
           configRepairs,
           bestCandidate,
-          pendingProposal: nextProposal,
+          pendingProposal: outcome === "invalid_config" ? undefined : nextProposal,
           noTradeIterations,
+          lineage,
           status: {
             updatedAt: new Date().toISOString(),
             phase: outcome,
@@ -2787,7 +3336,7 @@ export function createAutoResearchOrchestrator(deps: {
             totalIterations: config.iterations,
             message: outcomeReason ?? "Auto research run completed."
           }
-        });
+        }));
         await saveRunStatus(config.outputDir, {
           updatedAt: new Date().toISOString(),
           phase: outcome,

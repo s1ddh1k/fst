@@ -78,6 +78,11 @@ export type MultiStrategyBacktestConfig = {
   sleeves: StrategySleeveConfig[];
   decisionCandles: TimeframeCandleMap;
   executionCandles: TimeframeCandleMap;
+  preNormalizedDecisionSets?: Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
+  preNormalizedExecutionSets?: Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
+  precomputedUniverseSnapshotsByTf?: Partial<Record<StrategyTimeframe, Map<string, UniverseSnapshot>>>;
+  captureTraceArtifacts?: boolean;
+  captureUniverseSnapshots?: boolean;
   universeConfig?: Partial<UniverseSnapshotBuilderConfig>;
   maxOpenPositions?: number;
   maxCapitalUsagePct?: number;
@@ -153,6 +158,20 @@ export type MultiStrategyBacktestResult = {
   >;
   funnel: Record<string, Record<string, number>>;
   ghostSummary: Record<string, { count: number; avgForwardReturn: number }>;
+  decisionCoverageSummary: {
+    observationCount: number;
+    rawBuySignals: number;
+    rawSellSignals: number;
+    rawHoldSignals: number;
+    avgConsideredBuys: number;
+    avgEligibleBuys: number;
+  };
+  universeCoverageSummary: {
+    avg: number;
+    min: number;
+    max: number;
+    observationCount: number;
+  };
   finalAccount: AccountView;
   finalPositions: PositionView[];
   rawSignals: StrategySignal[];

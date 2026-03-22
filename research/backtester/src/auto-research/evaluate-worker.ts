@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { executeScoredHoldoutBacktest, executeScoredWalkForwardBacktest, preloadMarketData } from "../scored-runner.js";
 import { instantiateCandidateStrategy } from "./catalog.js";
 import { loadValidatedBlockCatalogFromFile } from "./block-catalog.js";
@@ -11,6 +11,20 @@ import type { AutoResearchRunConfig, CandidateBacktestEvaluation, NormalizedCand
 function getOption(args: string[], key: string): string | undefined {
   const index = args.indexOf(key);
   return index === -1 ? undefined : args[index + 1];
+}
+
+async function emitEvaluation(
+  evaluation: CandidateBacktestEvaluation,
+  outputPath?: string
+): Promise<void> {
+  const content = `${JSON.stringify(evaluation, null, 2)}\n`;
+
+  if (outputPath) {
+    await writeFile(outputPath, content);
+    return;
+  }
+
+  console.log(content);
 }
 
 type WorkerPayload = {
@@ -109,6 +123,7 @@ function buildEmptyEvaluation(params: {
 
 async function main(): Promise<void> {
   const payloadPath = getOption(process.argv, "--payload");
+  const outputPath = getOption(process.argv, "--output");
 
   if (!payloadPath) {
     throw new Error("Missing required option: --payload");
@@ -123,21 +138,18 @@ async function main(): Promise<void> {
         candidate: payload.candidate,
         marketCodes: payload.marketCodes
       });
-      console.log(JSON.stringify(evaluation, null, 2));
+      await emitEvaluation(evaluation, outputPath);
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.log(
-        JSON.stringify(
-          buildEmptyEvaluation({
-            config: payload.config,
-            candidate: payload.candidate,
-            stage: /window|split/i.test(message) ? "split" : /candle|market|load/i.test(message) ? "preload" : "backtest",
-            message
-          }),
-          null,
-          2
-        )
+      await emitEvaluation(
+        buildEmptyEvaluation({
+          config: payload.config,
+          candidate: payload.candidate,
+          stage: /window|split/i.test(message) ? "split" : /candle|market|load/i.test(message) ? "preload" : "backtest",
+          message
+        }),
+        outputPath
       );
       return;
     }
@@ -159,21 +171,18 @@ async function main(): Promise<void> {
         marketCodes: payload.marketCodes,
         blockCatalog: workerBlockCatalog
       });
-      console.log(JSON.stringify(evaluation, null, 2));
+      await emitEvaluation(evaluation, outputPath);
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.log(
-        JSON.stringify(
-          buildEmptyEvaluation({
-            config: payload.config,
-            candidate: payload.candidate,
-            stage: /window|split/i.test(message) ? "split" : /candle|market|load/i.test(message) ? "preload" : "backtest",
-            message
-          }),
-          null,
-          2
-        )
+      await emitEvaluation(
+        buildEmptyEvaluation({
+          config: payload.config,
+          candidate: payload.candidate,
+          stage: /window|split/i.test(message) ? "split" : /candle|market|load/i.test(message) ? "preload" : "backtest",
+          message
+        }),
+        outputPath
       );
       return;
     }
@@ -195,17 +204,14 @@ async function main(): Promise<void> {
       universeMarketCodes: payload.marketCodes
     });
   } catch (error) {
-    console.log(
-      JSON.stringify(
-        buildEmptyEvaluation({
-          config: payload.config,
-          candidate: payload.candidate,
-          stage: "preload",
-          message: error instanceof Error ? error.message : String(error)
-        }),
-        null,
-        2
-      )
+    await emitEvaluation(
+      buildEmptyEvaluation({
+        config: payload.config,
+        candidate: payload.candidate,
+        stage: "preload",
+        message: error instanceof Error ? error.message : String(error)
+      }),
+      outputPath
     );
     return;
   }
@@ -507,7 +513,7 @@ async function main(): Promise<void> {
     evaluation.diagnostics.windows.stepDays = resolved.stepDays;
   }
 
-  console.log(JSON.stringify(evaluation, null, 2));
+  await emitEvaluation(evaluation, outputPath);
 }
 
 main().catch((error: unknown) => {

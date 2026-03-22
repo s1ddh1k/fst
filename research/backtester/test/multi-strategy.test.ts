@@ -190,6 +190,16 @@ test("Phase 1-4: multi-strategy backtest enforces duplicate-market blocking and 
   });
 
   assert.ok(result.metrics.signalCount > 0);
+  assert.equal(
+    result.decisionCoverageSummary.rawBuySignals +
+      result.decisionCoverageSummary.rawSellSignals +
+      result.decisionCoverageSummary.rawHoldSignals,
+    result.metrics.signalCount
+  );
+  assert.ok(
+    result.decisionCoverageSummary.avgEligibleBuys <=
+      result.decisionCoverageSummary.avgConsideredBuys + 1e-9
+  );
   assert.ok(result.metrics.blockedSignalCount >= 0);
   assert.ok(Object.keys(result.strategyMetrics).length > 0);
   assert.ok(Object.keys(result.sleeveMetrics).length > 0);
@@ -318,4 +328,167 @@ test("multi-strategy backtest skips orders outside execution coverage instead of
 
   assert.equal(result.metrics.rejectedOrdersCount, 0);
   assert.ok(result.events.some((event) => event.kind === "blocked_signal"));
+});
+
+test("multi-strategy backtest merges partial precomputed inputs with raw timeframe data", () => {
+  const alwaysBuy: Strategy = {
+    id: "partial-precompute-buy",
+    sleeveId: "trend",
+    family: "trend",
+    decisionTimeframe: "5m",
+    executionTimeframe: "5m",
+    parameters: {},
+    generateSignal(context) {
+      return {
+        strategyId: "partial-precompute-buy",
+        sleeveId: "trend",
+        family: "trend",
+        market: context.market,
+        signal: "BUY",
+        conviction: 0.9,
+        decisionTime: context.decisionTime,
+        decisionTimeframe: "5m",
+        executionTimeframe: "5m",
+        reason: "partial_precompute_merge",
+        stages: {
+          universe_eligible: true,
+          trigger_pass: true
+        }
+      };
+    }
+  };
+
+  const hourlyCandles = createCandles({
+    marketCode: "KRW-A",
+    timeframe: "1h",
+    closes: [100, 101, 102, 103],
+    startTime: "2024-01-01T00:00:00.000Z"
+  });
+  const intradayCandles = createCandles({
+    marketCode: "KRW-A",
+    timeframe: "5m",
+    closes: [100, 101, 102, 103, 104, 105],
+    startTime: "2024-01-01T00:00:00.000Z"
+  });
+  const preNormalizedHourly = normalizeToFullGrid({
+    timeframe: "1h",
+    candlesByMarket: {
+      "KRW-A": hourlyCandles
+    }
+  });
+
+  const result = runMultiStrategyBacktest({
+    universeName: "krw-top",
+    initialCapital: 100_000,
+    exchangeAdapter: createUpbitKrwExchangeAdapter({
+      minOrderNotional: 5_000,
+      takerFeeRate: 0
+    }),
+    sleeves: [
+      { sleeveId: "trend", capitalBudgetPct: 0.8, maxOpenPositions: 1, maxSinglePositionPct: 1, priority: 9 },
+      { sleeveId: "breakout", capitalBudgetPct: 0, maxOpenPositions: 0, maxSinglePositionPct: 0, priority: 1 },
+      { sleeveId: "micro", capitalBudgetPct: 0, maxOpenPositions: 0, maxSinglePositionPct: 0, priority: 1 }
+    ],
+    strategies: [alwaysBuy],
+    decisionCandles: {
+      "1h": {
+        "KRW-A": hourlyCandles
+      },
+      "5m": {
+        "KRW-A": intradayCandles
+      }
+    },
+    executionCandles: {
+      "5m": {
+        "KRW-A": intradayCandles
+      }
+    },
+    preNormalizedDecisionSets: {
+      "1h": preNormalizedHourly
+    },
+    precomputedUniverseSnapshotsByTf: {
+      "1h": buildUniverseSnapshots({
+        candleSet: preNormalizedHourly,
+        config: {
+          topN: 1,
+          lookbackBars: 1,
+          refreshEveryBars: 1
+        }
+      })
+    },
+    universeConfig: {
+      topN: 1,
+      lookbackBars: 1,
+      refreshEveryBars: 1
+    }
+  });
+
+  assert.ok(result.metrics.signalCount > 0);
+  assert.ok(result.decisionCoverageSummary.rawBuySignals > 0);
+  assert.equal(result.decisionCoverageSummary.rawHoldSignals, 0);
+  assert.ok(result.universeCoverageSummary.observationCount > 0);
+});
+
+test("multi-strategy backtest fails fast when a required timeframe is missing", () => {
+  const missingExecution: Strategy = {
+    id: "missing-execution",
+    sleeveId: "trend",
+    family: "trend",
+    decisionTimeframe: "1h",
+    executionTimeframe: "5m",
+    parameters: {},
+    generateSignal(context) {
+      return {
+        strategyId: "missing-execution",
+        sleeveId: "trend",
+        family: "trend",
+        market: context.market,
+        signal: "BUY",
+        conviction: 0.8,
+        decisionTime: context.decisionTime,
+        decisionTimeframe: "1h",
+        executionTimeframe: "5m",
+        reason: "missing_execution_timeframe",
+        stages: {
+          universe_eligible: true,
+          trigger_pass: true
+        }
+      };
+    }
+  };
+
+  assert.throws(
+    () =>
+      runMultiStrategyBacktest({
+        universeName: "krw-top",
+        initialCapital: 100_000,
+        exchangeAdapter: createUpbitKrwExchangeAdapter({
+          minOrderNotional: 5_000,
+          takerFeeRate: 0
+        }),
+        sleeves: [
+          { sleeveId: "trend", capitalBudgetPct: 1, maxOpenPositions: 1, maxSinglePositionPct: 1, priority: 9 },
+          { sleeveId: "breakout", capitalBudgetPct: 0, maxOpenPositions: 0, maxSinglePositionPct: 0, priority: 1 },
+          { sleeveId: "micro", capitalBudgetPct: 0, maxOpenPositions: 0, maxSinglePositionPct: 0, priority: 1 }
+        ],
+        strategies: [missingExecution],
+        decisionCandles: {
+          "1h": {
+            "KRW-A": createCandles({
+              marketCode: "KRW-A",
+              timeframe: "1h",
+              closes: [100, 101, 102],
+              startTime: "2024-01-01T00:00:00.000Z"
+            })
+          }
+        },
+        executionCandles: {},
+        universeConfig: {
+          topN: 1,
+          lookbackBars: 1,
+          refreshEveryBars: 1
+        }
+      }),
+    /Missing execution candle coverage/
+  );
 });

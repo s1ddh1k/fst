@@ -224,7 +224,7 @@ export async function upsertMarketBreadthFeatures(params: {
 
   const db = getDb();
   const resolvedConfig = resolveMarketStateConfig(params.config);
-  const configKey = getMarketStateConfigKey(resolvedConfig);
+  const configKey = getMarketStateConfigKey(params.config);
   const configJson = JSON.stringify(resolvedConfig);
 
   const trx = db.transaction(() => {
@@ -339,7 +339,7 @@ export async function upsertMarketRelativeStrengthFeatures(params: {
 
   const db = getDb();
   const resolvedConfig = resolveMarketStateConfig(params.config);
-  const configKey = getMarketStateConfigKey(resolvedConfig);
+  const configKey = getMarketStateConfigKey(params.config);
   const configJson = JSON.stringify(resolvedConfig);
 
   const trx = db.transaction(() => {
@@ -422,12 +422,13 @@ export async function loadMarketStateFeatureSeries(params: {
   universeName: string;
   timeframe: string;
   config?: MarketStateConfig;
+  benchmarkMarketCode?: string;
   range?: PeriodRange;
 }): Promise<Record<string, MarketStateContext>> {
   const db = getDb();
   const hasRange = Boolean(params.range);
   const resolvedConfig = resolveMarketStateConfig(params.config);
-  const configKey = getMarketStateConfigKey(resolvedConfig);
+  const configKey = getMarketStateConfigKey(params.config, params.benchmarkMarketCode);
   const rows = db.prepare(
     `
       SELECT
@@ -498,13 +499,14 @@ export async function loadMarketStateFeatureSeries(params: {
     const compositeRegime =
       toOptionalBenchmarkRegime(row.composite_regime) ??
       toOptionalBenchmarkRegime(row.benchmark_regime);
+    const benchmarkRegime = toOptionalBenchmarkRegime(row.benchmark_regime);
     const benchmarkMarketCode =
       row.benchmark_market_code === null || row.benchmark_market_code === undefined
         ? undefined
         : String(row.benchmark_market_code);
     const composite = {
       source: "universe_composite" as const,
-      marketCode: benchmarkMarketCode ?? "__COMPOSITE__",
+      marketCode: "__COMPOSITE__",
       averageChange: toOptionalNumber(row.composite_change),
       momentum:
         toOptionalNumber(row.composite_momentum) ?? toOptionalNumber(row.benchmark_momentum),
@@ -521,6 +523,25 @@ export async function loadMarketStateFeatureSeries(params: {
         toOptionalNumber(row.dispersion_score) ?? 0,
       regime: compositeRegime ?? "unknown"
     };
+    const benchmark =
+      benchmarkMarketCode
+        ? {
+            source: "universe_composite" as const,
+            marketCode: benchmarkMarketCode,
+            averageChange: toOptionalNumber(row.composite_change),
+            momentum: toOptionalNumber(row.benchmark_momentum),
+            aboveTrend: toOptionalBoolean(row.benchmark_above_trend),
+            aboveTrendRatio: Number(row.above_trend_ratio),
+            historicalVolatility: toOptionalNumber(row.benchmark_historical_volatility),
+            trendScore:
+              toOptionalNumber(row.composite_trend_score) ?? Number(row.risk_on_score),
+            liquidityScore:
+              toOptionalNumber(row.liquidity_score) ?? 0,
+            dispersionScore:
+              toOptionalNumber(row.dispersion_score) ?? 0,
+            regime: benchmarkRegime ?? compositeRegime ?? "unknown"
+          }
+        : composite;
     const hasRelativeStrength = [
       row.momentum_spread,
       row.z_score_spread,
@@ -544,7 +565,7 @@ export async function loadMarketStateFeatureSeries(params: {
 
     featureSeries[referenceTime.toISOString()] = {
       universeName: String(row.universe_name),
-      benchmarkMarketCode: composite.marketCode,
+      benchmarkMarketCode: benchmark?.marketCode ?? composite.marketCode,
       referenceTime,
       sampleSize: Number(row.sample_size),
       breadth: {
@@ -578,7 +599,7 @@ export async function loadMarketStateFeatureSeries(params: {
           }
         : undefined,
       composite,
-      benchmark: composite
+      benchmark
     };
   }
 

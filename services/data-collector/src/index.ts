@@ -2,6 +2,7 @@ import { DEFAULT_MARKETS, DEFAULT_TIMEFRAMES } from "./config.js";
 import {
   backfill,
   backfillBatch,
+  backfillUntil,
   backfillDefault,
   fetchCandles,
   printHelp,
@@ -58,6 +59,11 @@ async function main(): Promise<void> {
 
   if (command === "backfill-batch") {
     await backfillBatch(args);
+    return;
+  }
+
+  if (command === "backfill-until") {
+    await backfillUntil(args);
     return;
   }
 

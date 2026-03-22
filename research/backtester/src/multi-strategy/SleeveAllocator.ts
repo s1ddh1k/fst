@@ -8,12 +8,16 @@ export function allocateSleeves(params: {
   positions: PositionView[];
 }): Record<string, SleeveAllocation> {
   const allocations: Record<string, SleeveAllocation> = {};
+  const inUseBySleeve: Record<string, number> = {};
+
+  for (const position of params.positions) {
+    inUseBySleeve[position.sleeveId] =
+      (inUseBySleeve[position.sleeveId] ?? 0) + position.quantity * position.entryPrice;
+  }
 
   for (const sleeve of params.sleeves) {
     const budgetNotional = params.equity * sleeve.capitalBudgetPct;
-    const inUse = params.positions
-      .filter((position) => position.sleeveId === sleeve.sleeveId)
-      .reduce((sum, position) => sum + position.quantity * position.entryPrice, 0);
+    const inUse = inUseBySleeve[sleeve.sleeveId] ?? 0;
 
     allocations[sleeve.sleeveId] = {
       sleeveId: sleeve.sleeveId,

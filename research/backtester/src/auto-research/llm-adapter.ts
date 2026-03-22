@@ -1,12 +1,22 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import {
   buildProposalPrompt,
   buildReviewPrompt,
   buildBlockProposalPrompt,
   buildBlockReviewPrompt,
   buildPortfolioCompositionProposalPrompt,
-  buildPortfolioCompositionReviewPrompt
+  buildPortfolioCompositionReviewPrompt,
+  compactCandidateGenealogy,
+  compactCandidateLedger,
+  compactCodeMutationResults,
+  compactEvaluation,
+  compactFamilies,
+  compactFamilyPerformance,
+  compactPreparationResults,
+  compactRecentHistory
 } from "./prompt-builder.js";
-import { llmJson } from "./cli-llm.js";
+import { extractJson, llmJson, llmText } from "./cli-llm.js";
 import type {
   AutoResearchRunConfig,
   CandidateBacktestEvaluation,
@@ -50,6 +60,53 @@ export interface ResearchLlmClient {
     evaluations: CandidateBacktestEvaluation[];
     blockCatalog?: ValidatedBlockCatalog;
   }): Promise<ReviewDecision>;
+}
+
+function describeRecordKeys(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return Array.isArray(value) ? `array(length=${value.length})` : typeof value;
+  }
+
+  const keys = Object.keys(value as Record<string, unknown>);
+  return keys.length > 0 ? keys.slice(0, 12).join(", ") : "(none)";
+}
+
+function previewValue(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value);
+    if (typeof serialized === "string" && serialized.length > 0) {
+      return serialized.length > 240 ? `${serialized.slice(0, 240)}...` : serialized;
+    }
+  } catch {
+    // fall through
+  }
+
+  return String(value);
+}
+
+function unwrapEnvelopeRecord(
+  value: unknown,
+  envelopeKeys: string[],
+  predicate: (record: Record<string, unknown>) => boolean
+): Record<string, unknown> {
+  const record = asRecord(value);
+  if (predicate(record)) {
+    return record;
+  }
+
+  for (const key of envelopeKeys) {
+    const nested = record[key];
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) {
+      continue;
+    }
+
+    const nestedRecord = asRecord(nested);
+    if (predicate(nestedRecord)) {
+      return nestedRecord;
+    }
+  }
+
+  return record;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -152,9 +209,12 @@ function parsePreparation(raw: unknown): ProposalBatch["preparation"] {
   return actions;
 }
 
-function parseCandidates(raw: unknown): ProposalBatch["candidates"] {
+function parseCandidates(raw: unknown, context?: unknown): ProposalBatch["candidates"] {
   if (!Array.isArray(raw)) {
-    throw new Error("LLM response missing candidates array");
+    const contextSummary = context === undefined
+      ? ""
+      : ` (top-level keys: ${describeRecordKeys(context)}; preview: ${previewValue(context)})`;
+    throw new Error(`LLM response missing candidates array${contextSummary}`);
   }
 
   return raw.map((item) => {
@@ -167,10 +227,9 @@ function parseCandidates(raw: unknown): ProposalBatch["candidates"] {
     );
     const origin: ProposalBatch["candidates"][number]["origin"] =
       record.origin === "llm" ||
-      record.origin === "proposal_fallback" ||
-      record.origin === "review_fallback" ||
       record.origin === "novelized" ||
       record.origin === "resume" ||
+      record.origin === "artifact_seed" ||
       record.origin === "engine_mutation" ||
       record.origin === "engine_seed"
         ? record.origin
@@ -190,6 +249,157 @@ function parseCandidates(raw: unknown): ProposalBatch["candidates"] {
         : []
     };
   });
+}
+
+function buildKeepSearchingRepairPrompt(params: {
+  originalPrompt: string;
+  invalidResponse: Record<string, unknown>;
+  candidatesPerIteration: number;
+}): string {
+  return `${params.originalPrompt}
+
+Correction task:
+- Provide 1 to ${params.candidatesPerIteration} concrete, unique nextCandidates when you keep verdict="keep_searching".
+- Choose verdict="stop_no_edge" when you do not want to provide a next candidate batch.
+- Return corrected JSON only.
+
+Previous invalid JSON:
+${JSON.stringify(params.invalidResponse, null, 2)}
+
+Final response reminder:
+- Fill nextCandidates with unique, executable candidates when you keep searching.
+- Let verdict="stop_no_edge" be the clean ending when no next batch is ready.
+- Do not emit markdown.
+`.trim();
+}
+
+function buildJsonExtractionRepairPrompt(params: {
+  originalPrompt: string;
+  invalidResponsePath: string;
+  schemaPath: string;
+}): string {
+  return `${params.originalPrompt}
+
+Correction task:
+- Read the previous raw response at ${params.invalidResponsePath}.
+- Rewrite it as valid JSON that matches ${params.schemaPath}.
+- Return corrected JSON only.
+- Do not emit markdown.
+`.trim();
+}
+
+async function writeArtifactFile(filePath: string, content: string): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, content);
+}
+
+async function writeJsonArtifact(filePath: string, value: unknown): Promise<void> {
+  await writeArtifactFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function blockHistorySummary(history: ResearchIterationRecord[]) {
+  return {
+    familyPerformanceSummary: compactFamilyPerformance(history),
+    candidateLedgerSummary: compactCandidateLedger(history, 12),
+    candidateGenealogy: compactCandidateGenealogy(history, 12),
+    recentHistory: compactRecentHistory(history, 2)
+  };
+}
+
+function buildBlockProposalResponseSchema() {
+  return {
+    type: "object",
+    required: ["researchSummary", "preparation", "proposedFamilies", "codeTasks", "candidates"],
+    properties: {
+      researchSummary: { type: "string" },
+      preparation: { type: "array" },
+      proposedFamilies: { type: "array" },
+      codeTasks: { type: "array" },
+      candidates: { type: "array" }
+    }
+  };
+}
+
+function buildBlockReviewResponseSchema() {
+  return {
+    type: "object",
+    required: [
+      "summary",
+      "verdict",
+      "promotedCandidateId",
+      "nextPreparation",
+      "proposedFamilies",
+      "codeTasks",
+      "nextCandidates",
+      "retireCandidateIds",
+      "observations"
+    ],
+    properties: {
+      summary: { type: "string" },
+      verdict: { enum: ["keep_searching", "promote_candidate", "stop_no_edge"] },
+      promotedCandidateId: { type: ["string", "null"] },
+      nextPreparation: { type: "array" },
+      proposedFamilies: { type: "array" },
+      codeTasks: { type: "array" },
+      nextCandidates: { type: "array" },
+      retireCandidateIds: { type: "array" },
+      observations: { type: "array" }
+    }
+  };
+}
+
+function buildBlockProposalFilePrompt(params: {
+  configPath: string;
+  familiesPath: string;
+  historyPath: string;
+  schemaPath: string;
+  candidatesPerIteration: number;
+}): string {
+  return `
+You are proposing BLOCK-level crypto strategy candidates.
+
+Read these workspace files before answering:
+- run config and market facts: ${params.configPath}
+- executable family specs: ${params.familiesPath}
+- prior history summary: ${params.historyPath}
+- response schema: ${params.schemaPath}
+
+Instructions:
+- Use only the listed block families and their parameter names.
+- Return 1 to ${params.candidatesPerIteration} executable candidates.
+- Use the history summary to avoid repeated dead ends and to widen or tighten parameters when evidence supports it.
+- Return JSON only that matches the schema file exactly.
+- Do not emit markdown.
+`.trim();
+}
+
+function buildBlockReviewFilePrompt(params: {
+  configPath: string;
+  familiesPath: string;
+  proposalPath: string;
+  evaluationsPath: string;
+  historyPath: string;
+  schemaPath: string;
+  candidatesPerIteration: number;
+}): string {
+  return `
+You are reviewing a BLOCK-level crypto strategy research iteration.
+
+Read these workspace files before answering:
+- run config: ${params.configPath}
+- executable family specs: ${params.familiesPath}
+- latest proposal batch: ${params.proposalPath}
+- latest evaluation results: ${params.evaluationsPath}
+- prior history summary: ${params.historyPath}
+- response schema: ${params.schemaPath}
+
+Instructions:
+- Base the review on the files above.
+- Choose "keep_searching" only when you can provide 1 to ${params.candidatesPerIteration} unique, executable nextCandidates.
+- Choose "stop_no_edge" when you do not want to provide a next candidate batch.
+- Return JSON only that matches the schema file exactly.
+- Do not emit markdown.
+`.trim();
 }
 
 function parseParameterSpecs(raw: unknown): ProposedStrategyFamily["parameterSpecs"] {
@@ -378,8 +588,204 @@ export class CliResearchLlmClient implements ResearchLlmClient {
       provider?: string;
       model?: string;
       cwd?: string;
+      jsonRunner?: typeof llmJson;
+      textRunner?: typeof llmText;
     }
   ) {}
+
+  private buildCliLlmOptions(config: AutoResearchRunConfig) {
+    const timeoutMs = config.llmTimeoutMs;
+    const provider = this.options.provider ?? config.llmProvider;
+    const model = this.options.model ?? config.llmModel ?? (provider === "codex" ? "medium" : undefined);
+
+    return {
+      provider,
+      model,
+      cwd: this.options.cwd,
+      timeoutMs,
+      // Total wall-clock timeout matters more here than stdout-idle detection.
+      // Codex emits progress and startup details on stderr, so an idle budget can
+      // misclassify active work as a hang.
+      idleTimeoutMs: undefined,
+      hardTimeoutMs: typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs + 1_500 : undefined
+    };
+  }
+
+  private shouldUseWorkspaceFilePrompts(config: AutoResearchRunConfig): boolean {
+    const provider = this.options.provider ?? config.llmProvider ?? "codex";
+    return provider === "codex";
+  }
+
+  private async runJsonPrompt(params: {
+    prompt: string;
+    config: AutoResearchRunConfig;
+    rawResponsePath?: string;
+  }): Promise<{
+    data: unknown;
+    tokenUsage?: {
+      input: number;
+      output: number;
+    };
+  }> {
+    const options = this.buildCliLlmOptions(params.config);
+
+    if (this.options.jsonRunner) {
+      return await this.options.jsonRunner(params.prompt, options);
+    }
+
+    const { text, tokenUsage } = await (this.options.textRunner ?? llmText)(params.prompt, options);
+    if (params.rawResponsePath) {
+      await writeArtifactFile(params.rawResponsePath, `${text}\n`);
+    }
+
+    return {
+      data: extractJson(text),
+      tokenUsage
+    };
+  }
+
+  private async buildBlockProposalPromptArtifacts(params: {
+    config: AutoResearchRunConfig;
+    families: StrategyFamilyDefinition[];
+    marketCodes: string[];
+    history: ResearchIterationRecord[];
+  }): Promise<{
+    prompt: string;
+    schemaPath: string;
+    rawResponsePath: string;
+  }> {
+    const iteration = params.history.length + 1;
+    const contextDir = path.join(
+      params.config.outputDir,
+      `iteration-${String(iteration).padStart(2, "0")}`,
+      "llm-proposal"
+    );
+    const configPath = path.join(contextDir, "run-config.json");
+    const familiesPath = path.join(contextDir, "families.json");
+    const historyPath = path.join(contextDir, "history-summary.json");
+    const schemaPath = path.join(contextDir, "response-schema.json");
+    const promptPath = path.join(contextDir, "prompt.txt");
+    const rawResponsePath = path.join(contextDir, "response.raw.txt");
+
+    await writeJsonArtifact(configPath, {
+      config: {
+        universe: params.config.universeName,
+        timeframe: params.config.timeframe,
+        marketLimit: params.config.marketLimit,
+        limit: params.config.limit,
+        holdoutDays: params.config.holdoutDays,
+        trainingDays: params.config.trainingDays,
+        stepDays: params.config.stepDays,
+        mode: params.config.mode,
+        researchStage: "block",
+        candidatesPerIteration: params.config.candidatesPerIteration
+      },
+      marketCodes: params.marketCodes
+    });
+    await writeJsonArtifact(familiesPath, compactFamilies(params.families));
+    await writeJsonArtifact(historyPath, blockHistorySummary(params.history));
+    await writeJsonArtifact(schemaPath, buildBlockProposalResponseSchema());
+
+    const prompt = buildBlockProposalFilePrompt({
+      configPath,
+      familiesPath,
+      historyPath,
+      schemaPath,
+      candidatesPerIteration: params.config.candidatesPerIteration
+    });
+    await writeArtifactFile(promptPath, `${prompt}\n`);
+
+    return {
+      prompt,
+      schemaPath,
+      rawResponsePath
+    };
+  }
+
+  private async buildBlockReviewPromptArtifacts(params: {
+    config: AutoResearchRunConfig;
+    families: StrategyFamilyDefinition[];
+    history: ResearchIterationRecord[];
+    latestProposal: ProposalBatch;
+    preparationResults: PreparationExecutionResult[];
+    codeMutationResults: Array<{
+      taskId: string;
+      familyId?: string;
+      strategyName?: string;
+      title: string;
+      status: "planned" | "executed" | "failed" | "skipped";
+      detail: string;
+    }>;
+    validationResults: Array<{
+      command: string;
+      status: "passed" | "failed" | "skipped";
+      detail: string;
+    }>;
+    evaluations: CandidateBacktestEvaluation[];
+  }): Promise<{
+    prompt: string;
+    schemaPath: string;
+    rawResponsePath: string;
+  }> {
+    const iteration = params.history.length + 1;
+    const contextDir = path.join(
+      params.config.outputDir,
+      `iteration-${String(iteration).padStart(2, "0")}`,
+      "llm-review"
+    );
+    const configPath = path.join(contextDir, "run-config.json");
+    const familiesPath = path.join(contextDir, "families.json");
+    const proposalPath = path.join(contextDir, "latest-proposal.json");
+    const evaluationsPath = path.join(contextDir, "latest-evaluations.json");
+    const historyPath = path.join(contextDir, "history-summary.json");
+    const schemaPath = path.join(contextDir, "response-schema.json");
+    const promptPath = path.join(contextDir, "prompt.txt");
+    const rawResponsePath = path.join(contextDir, "response.raw.txt");
+
+    await writeJsonArtifact(configPath, {
+      config: {
+        universe: params.config.universeName,
+        timeframe: params.config.timeframe,
+        marketLimit: params.config.marketLimit,
+        limit: params.config.limit,
+        holdoutDays: params.config.holdoutDays,
+        trainingDays: params.config.trainingDays,
+        stepDays: params.config.stepDays,
+        mode: params.config.mode,
+        researchStage: "block",
+        candidatesPerIteration: params.config.candidatesPerIteration
+      },
+      latestPreparationResults: compactPreparationResults(params.preparationResults),
+      latestCodeMutationResults: compactCodeMutationResults(params.codeMutationResults),
+      latestValidationResults: params.validationResults
+    });
+    await writeJsonArtifact(familiesPath, compactFamilies(params.families));
+    await writeJsonArtifact(proposalPath, {
+      researchSummary: params.latestProposal.researchSummary,
+      preparation: params.latestProposal.preparation,
+      candidates: params.latestProposal.candidates
+    });
+    await writeJsonArtifact(evaluationsPath, params.evaluations.map(compactEvaluation));
+    await writeJsonArtifact(historyPath, blockHistorySummary(params.history));
+    await writeJsonArtifact(schemaPath, buildBlockReviewResponseSchema());
+
+    const prompt = buildBlockReviewFilePrompt({
+      configPath,
+      familiesPath,
+      proposalPath,
+      evaluationsPath,
+      historyPath,
+      schemaPath,
+      candidatesPerIteration: params.config.candidatesPerIteration
+    });
+    await writeArtifactFile(promptPath, `${prompt}\n`);
+
+    return {
+      prompt,
+      schemaPath,
+      rawResponsePath
+    };
+  }
 
   async proposeCandidates(params: {
     config: AutoResearchRunConfig;
@@ -388,21 +794,56 @@ export class CliResearchLlmClient implements ResearchLlmClient {
     history: ResearchIterationRecord[];
     blockCatalog?: ValidatedBlockCatalog;
   }): Promise<ProposalBatch> {
+    const promptArtifacts =
+      params.config.researchStage === "block" && this.shouldUseWorkspaceFilePrompts(params.config)
+        ? await this.buildBlockProposalPromptArtifacts(params)
+        : undefined;
     const prompt =
-      params.config.researchStage === "block"
+      promptArtifacts?.prompt ??
+      (params.config.researchStage === "block"
         ? buildBlockProposalPrompt(params)
         : params.config.researchStage === "portfolio" && params.blockCatalog
           ? buildPortfolioCompositionProposalPrompt({ ...params, blockCatalog: params.blockCatalog })
-          : buildProposalPrompt(params);
-    const { data } = await llmJson(prompt, this.options);
-    const response = asRecord(data);
+          : buildProposalPrompt(params));
+    let data: unknown;
+    try {
+      ({ data } = await this.runJsonPrompt({
+        prompt,
+        config: params.config,
+        rawResponsePath: promptArtifacts?.rawResponsePath
+      }));
+    } catch (error) {
+      if (
+        promptArtifacts &&
+        error instanceof Error &&
+        /Failed to extract JSON from LLM response/.test(error.message)
+      ) {
+        const repairPrompt = buildJsonExtractionRepairPrompt({
+          originalPrompt: prompt,
+          invalidResponsePath: promptArtifacts.rawResponsePath,
+          schemaPath: promptArtifacts.schemaPath
+        });
+        ({ data } = await this.runJsonPrompt({
+          prompt: repairPrompt,
+          config: params.config,
+          rawResponsePath: path.join(path.dirname(promptArtifacts.rawResponsePath), "response.repaired.raw.txt")
+        }));
+      } else {
+        throw error;
+      }
+    }
+    const response = unwrapEnvelopeRecord(
+      data,
+      ["proposal", "result", "payload", "response"],
+      (record) => Array.isArray(record.candidates)
+    );
 
     return {
       researchSummary: String(response.researchSummary ?? "").trim(),
       preparation: parsePreparation(response.preparation),
       proposedFamilies: parseProposedFamilies(response.proposedFamilies),
       codeTasks: parseCodeTasks(response.codeTasks),
-      candidates: parseCandidates(response.candidates)
+      candidates: parseCandidates(response.candidates, response)
     };
   }
 
@@ -428,39 +869,106 @@ export class CliResearchLlmClient implements ResearchLlmClient {
     evaluations: CandidateBacktestEvaluation[];
     blockCatalog?: ValidatedBlockCatalog;
   }): Promise<ReviewDecision> {
+    const promptArtifacts =
+      params.config.researchStage === "block" && this.shouldUseWorkspaceFilePrompts(params.config)
+        ? await this.buildBlockReviewPromptArtifacts(params)
+        : undefined;
     const prompt =
-      params.config.researchStage === "block"
+      promptArtifacts?.prompt ??
+      (params.config.researchStage === "block"
         ? buildBlockReviewPrompt(params)
         : params.config.researchStage === "portfolio" && params.blockCatalog
           ? buildPortfolioCompositionReviewPrompt({ ...params, blockCatalog: params.blockCatalog })
-          : buildReviewPrompt(params);
-    const { data } = await llmJson(prompt, this.options);
-    const response = asRecord(data);
-    const verdict = response.verdict;
+          : buildReviewPrompt(params));
+    const parseReview = (response: Record<string, unknown>): ReviewDecision => {
+      const verdict = response.verdict;
 
-    if (
-      verdict !== "keep_searching" &&
-      verdict !== "promote_candidate" &&
-      verdict !== "stop_no_edge"
-    ) {
-      throw new Error(`Invalid review verdict: ${String(verdict)}`);
+      if (
+        verdict !== "keep_searching" &&
+        verdict !== "promote_candidate" &&
+        verdict !== "stop_no_edge"
+      ) {
+        throw new Error(`Invalid review verdict: ${String(verdict)}`);
+      }
+
+      return {
+        summary: String(response.summary ?? "").trim(),
+        verdict,
+        promotedCandidateId:
+          typeof response.promotedCandidateId === "string" ? response.promotedCandidateId : undefined,
+        nextPreparation: parsePreparation(response.nextPreparation),
+        proposedFamilies: parseProposedFamilies(response.proposedFamilies),
+        codeTasks: parseCodeTasks(response.codeTasks),
+        nextCandidates: parseCandidates(response.nextCandidates ?? [], response),
+        retireCandidateIds: Array.isArray(response.retireCandidateIds)
+          ? response.retireCandidateIds.filter((value): value is string => typeof value === "string")
+          : [],
+        observations: Array.isArray(response.observations)
+          ? response.observations.filter((value): value is string => typeof value === "string")
+          : []
+      };
+    };
+    const unwrapReview = (data: unknown) =>
+      unwrapEnvelopeRecord(
+        data,
+        ["review", "result", "payload", "response"],
+        (record) =>
+          record.verdict === "keep_searching" ||
+          record.verdict === "promote_candidate" ||
+          record.verdict === "stop_no_edge"
+      );
+
+    let data: unknown;
+    try {
+      ({ data } = await this.runJsonPrompt({
+        prompt,
+        config: params.config,
+        rawResponsePath: promptArtifacts?.rawResponsePath
+      }));
+    } catch (error) {
+      if (
+        promptArtifacts &&
+        error instanceof Error &&
+        /Failed to extract JSON from LLM response/.test(error.message)
+      ) {
+        const repairPrompt = buildJsonExtractionRepairPrompt({
+          originalPrompt: prompt,
+          invalidResponsePath: promptArtifacts.rawResponsePath,
+          schemaPath: promptArtifacts.schemaPath
+        });
+        ({ data } = await this.runJsonPrompt({
+          prompt: repairPrompt,
+          config: params.config,
+          rawResponsePath: path.join(path.dirname(promptArtifacts.rawResponsePath), "response.repaired.raw.txt")
+        }));
+      } else {
+        throw error;
+      }
+    }
+    let response = unwrapReview(data);
+    let review = parseReview(response);
+
+    if (review.verdict === "keep_searching" && review.nextCandidates.length === 0) {
+      const repairPrompt = buildKeepSearchingRepairPrompt({
+        originalPrompt: prompt,
+        invalidResponse: response,
+        candidatesPerIteration: params.config.candidatesPerIteration
+      });
+      const repair = await this.runJsonPrompt({
+        prompt: repairPrompt,
+        config: params.config,
+        rawResponsePath: promptArtifacts
+          ? path.join(path.dirname(promptArtifacts.rawResponsePath), "keep-searching-repair.raw.txt")
+          : undefined
+      });
+      response = unwrapReview(repair.data);
+      review = parseReview(response);
+
+      if (review.verdict === "keep_searching" && review.nextCandidates.length === 0) {
+        throw new Error("Invalid review decision: keep_searching requires at least 1 next candidate");
+      }
     }
 
-    return {
-      summary: String(response.summary ?? "").trim(),
-      verdict,
-      promotedCandidateId:
-        typeof response.promotedCandidateId === "string" ? response.promotedCandidateId : undefined,
-      nextPreparation: parsePreparation(response.nextPreparation),
-      proposedFamilies: parseProposedFamilies(response.proposedFamilies),
-      codeTasks: parseCodeTasks(response.codeTasks),
-      nextCandidates: parseCandidates(response.nextCandidates ?? []),
-      retireCandidateIds: Array.isArray(response.retireCandidateIds)
-        ? response.retireCandidateIds.filter((value): value is string => typeof value === "string")
-        : [],
-      observations: Array.isArray(response.observations)
-        ? response.observations.filter((value): value is string => typeof value === "string")
-        : []
-    };
+    return review;
   }
 }
