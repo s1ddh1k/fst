@@ -99,32 +99,25 @@ export function buildImplementationPrompt(params: {
   };
   scaffoldCode: string;
 }): string {
-  return `You are implementing a trading strategy for the fst backtesting framework.
-
-Strategy: ${params.design.title}
-Logic: ${params.design.signalLogicDescription}
+  const paramList = params.design.parameterSpecs.map((p) => `p.${p.name}`).join(", ");
+  return `Write TypeScript signal logic for: ${params.design.title}
 
 Entry: ${params.design.entryLogic}
 Exit: ${params.design.exitLogic}
 
-Below is the scaffold code with a TODO section. Fill in ONLY the signal generation logic where indicated.
-Use the indicator functions listed in the imports.
+Available: candles[0..idx] (OHLCV), hasPosition (bool), parameters: ${paramList}
+Indicator functions: ${params.design.indicators.join(", ")} (imported, take candles + period args)
+Each returns a number. Example: getRsi(candles.slice(0, idx+1), 14)
 
-Available candle data: candles[0..idx] where candles[idx] is the current bar.
-Each candle has: .open, .high, .low, .close, .volume, .candleTimeUtc
+Return ONLY a TypeScript code block (no explanation) that sets signal/conviction/reason:
+- signal: "BUY" | "SELL" | "HOLD"
+- conviction: 0-1
+- reason: string
+- First check: if (idx < 30) keep HOLD
+- Use "p." prefix for parameters
 
-Key rules:
-- Always check you have enough candles before computing indicators (e.g., if (idx < 20) return HOLD)
-- Use the parameter values from "p" object (already destructured)
-- hasPosition is true when we already have a position (then consider SELL signals)
-- Set conviction between 0 and 1 (higher = more confident)
-- Set reason to a short human-readable string explaining the signal
-
-SCAFFOLD CODE:
-\`\`\`typescript
-${params.scaffoldCode}
-\`\`\`
-
-Replace the "--- YOUR SIGNAL LOGIC HERE ---" section with working TypeScript code.
-Return ONLY the complete file content, no markdown wrapping, no explanation.`;
+Example format:
+const rsi = getRsi(candles.slice(0, idx + 1), p.rsiPeriod);
+if (!hasPosition && rsi < p.oversold) { signal = "BUY"; conviction = 0.7; reason = "RSI oversold"; }
+if (hasPosition && rsi > p.overbought) { signal = "SELL"; conviction = 0.8; reason = "RSI overbought"; }`;
 }

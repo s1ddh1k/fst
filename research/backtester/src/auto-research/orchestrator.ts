@@ -2671,15 +2671,30 @@ export function createAutoResearchOrchestrator(deps: {
                       scaffoldCode: scaffold
                     });
 
-                    const { text: implementedCode } = await llmTextCall(implPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
-                    if (!implementedCode || implementedCode.length < 200) {
-                      await log(`[auto-research] idea ${idea.ideaId}: implementation too short (${implementedCode?.length ?? 0} chars)`);
+                    // Get signal logic only (short prompt, fast response)
+                    const { text: signalBody } = await llmTextCall(implPrompt, {
+                      provider: "claude",
+                      timeoutMs: 60_000,
+                      allowTools: ""
+                    });
+                    if (!signalBody || signalBody.length < 20) {
+                      await log(`[auto-research] idea ${idea.ideaId}: signal logic too short (${signalBody?.length ?? 0} chars)`);
                       continue;
                     }
 
+                    // Extract code from potential markdown wrapping
+                    const codeMatch = signalBody.match(/```(?:typescript|ts)?\s*\n([\s\S]*?)\n```/);
+                    const cleanSignalBody = codeMatch ? codeMatch[1]! : signalBody.trim();
+
+                    // Inject signal logic into scaffold
+                    const finalCode = scaffold.replace(
+                      /\/\/ --- YOUR SIGNAL LOGIC HERE ---/,
+                      cleanSignalBody
+                    );
+
                     // Step 5: Write + Validate
                     const strategyPath = path.join(generatedDir, `${safeName}.ts`);
-                    await writeFile(strategyPath, implementedCode);
+                    await writeFile(strategyPath, finalCode);
 
                     const validation = await validateGeneratedStrategy({ filePath: strategyPath, cwd: process.cwd() });
                     if (validation.ok) {
