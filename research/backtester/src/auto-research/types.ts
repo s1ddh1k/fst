@@ -445,6 +445,7 @@ export type AutoResearchRunConfig = {
   iterationTimeoutMs?: number;
   familyIterationBudget?: number;
   stagnationRetireThreshold?: number;
+  discoveryInterval?: number;
 };
 
 export type AutoResearchConfigRepair = {
@@ -511,4 +512,40 @@ export type ValidatedBlockCatalog = {
   version: number;
   blocks: ValidatedBlock[];
   updatedAt: string;
+};
+
+// === Discovery / Research types ===
+
+export type ResearchIdea = {
+  ideaId: string;
+  title: string;
+  thesis: string;
+  mechanism: string;
+  category: string;
+  dataRequirements: string[];
+  expectedEdge: string;
+  riskNotes: string[];
+  indicators: string[];
+};
+
+export type DiscoveryBatch = {
+  summary: string;
+  ideas: ResearchIdea[];
+};
+
+export type StrategyDesignResult = {
+  familyId: string;
+  strategyName: string;
+  title: string;
+  thesis: string;
+  family: "trend" | "breakout" | "micro" | "meanreversion";
+  sleeveId: string;
+  decisionTimeframe: ResearchTimeframe;
+  executionTimeframe: ResearchTimeframe;
+  parameterSpecs: ResearchParameterSpec[];
+  regimeGate: { allowedRegimes: string[] };
+  signalLogicDescription: string;
+  indicators: string[];
+  entryLogic: string;
+  exitLogic: string;
 };

@@ -23,10 +23,10 @@ function inferExecutionTimeframe(family: StrategyFamilyDefinition): ValidatedBlo
   return (execution ?? family.timeframe) as ValidatedBlock["executionTimeframe"];
 }
 
-function inferBlockMetadata(blockFamilyId: string): Pick<
+async function inferBlockMetadata(blockFamilyId: string): Promise<Pick<
   ValidatedBlock,
   "strategyType" | "family" | "sleeveId" | "regimeGate"
-> {
+>> {
   if (blockFamilyId.includes("rotation")) {
     return {
       strategyType: "rotation",
@@ -81,6 +81,22 @@ function inferBlockMetadata(blockFamilyId: string): Pick<
     };
   }
 
+  // Dynamic fallback: check if LLM-generated module has metadata
+  try {
+    const { loadDynamicStrategy } = await import("./dynamic-loader.js");
+    const dynamicModule = await loadDynamicStrategy(blockFamilyId);
+    if (dynamicModule) {
+      return {
+        strategyType: dynamicModule.metadata.family,
+        family: dynamicModule.metadata.family,
+        sleeveId: dynamicModule.metadata.sleeveId,
+        regimeGate: dynamicModule.metadata.regimeGate
+      };
+    }
+  } catch {
+    // fall through to default
+  }
+
   return {
     strategyType: "reversion",
     family: "meanreversion",
@@ -112,13 +128,13 @@ export function createEmptyBlockCatalog(): ValidatedBlockCatalog {
   };
 }
 
-export function promoteToValidatedBlock(params: {
+export async function promoteToValidatedBlock(params: {
   evaluation: CandidateBacktestEvaluation;
   familyDef: StrategyFamilyDefinition;
   blockFamilyId: string;
-}): ValidatedBlock {
+}): Promise<ValidatedBlock> {
   const { evaluation, familyDef, blockFamilyId } = params;
-  const inferred = inferBlockMetadata(blockFamilyId);
+  const inferred = await inferBlockMetadata(blockFamilyId);
 
   return {
     blockId: `${blockFamilyId}:${evaluation.candidate.candidateId}`,

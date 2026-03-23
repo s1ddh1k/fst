@@ -114,9 +114,9 @@ describe("block-catalog", () => {
     assert.ok(catalog.updatedAt);
   });
 
-  it("promotes evaluation to ValidatedBlock", () => {
+  it("promotes evaluation to ValidatedBlock", async () => {
     const evaluation = makeEvaluation();
-    const block = promoteToValidatedBlock({
+    const block = await promoteToValidatedBlock({
       evaluation,
       familyDef: makeFamilyDef(),
       blockFamilyId: "block:rotation-15m-trend-up"
@@ -131,9 +131,9 @@ describe("block-catalog", () => {
     assert.equal(block.sourceFamilyId, "block:rotation-15m-trend-up");
   });
 
-  it("appends block to catalog", () => {
+  it("appends block to catalog", async () => {
     const catalog = createEmptyBlockCatalog();
-    const block = promoteToValidatedBlock({
+    const block = await promoteToValidatedBlock({
       evaluation: makeEvaluation(),
       familyDef: makeFamilyDef(),
       blockFamilyId: "block:rotation-15m-trend-up"
@@ -143,9 +143,9 @@ describe("block-catalog", () => {
     assert.equal(updated.blocks[0]!.sourceFamilyId, "block:rotation-15m-trend-up");
   });
 
-  it("replaces block when better score found for same family", () => {
+  it("replaces block when better score found for same family", async () => {
     let catalog = createEmptyBlockCatalog();
-    const block1 = promoteToValidatedBlock({
+    const block1 = await promoteToValidatedBlock({
       evaluation: makeEvaluation(),
       familyDef: makeFamilyDef(),
       blockFamilyId: "block:rotation-15m-trend-up"
@@ -159,7 +159,7 @@ describe("block-catalog", () => {
         tradeCount: 30
       }
     });
-    const block2 = promoteToValidatedBlock({
+    const block2 = await promoteToValidatedBlock({
       evaluation: betterEval,
       familyDef: makeFamilyDef(),
       blockFamilyId: "block:rotation-15m-trend-up"
@@ -170,9 +170,9 @@ describe("block-catalog", () => {
     assert.equal(catalog.blocks[0]!.performance.netReturn, 0.15);
   });
 
-  it("serializes and deserializes catalog", () => {
+  it("serializes and deserializes catalog", async () => {
     let catalog = createEmptyBlockCatalog();
-    const block = promoteToValidatedBlock({
+    const block = await promoteToValidatedBlock({
       evaluation: makeEvaluation(),
       familyDef: makeFamilyDef(),
       blockFamilyId: "block:rotation-15m-trend-up"

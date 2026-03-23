@@ -1287,8 +1287,8 @@ export async function runDeterministicBbResearch(
       passesPromotionGate(item.evaluation, config.promotionGate)
     );
     const promotion: FamilyPromotionResult = promotionCandidate
-      ? (() => {
-          const validated = promoteToValidatedBlock({
+      ? await (async () => {
+          const validated = await promoteToValidatedBlock({
             evaluation: promotionCandidate.evaluation,
             familyDef,
             blockFamilyId: familyRun.familyId

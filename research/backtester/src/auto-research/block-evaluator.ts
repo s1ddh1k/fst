@@ -144,7 +144,7 @@ function buildBlockGateConfig(familyId: string, params: Record<string, number>):
   return gate;
 }
 
-function createBlockStrategy(familyId: string, candidateId: string, params: Record<string, number>): Strategy {
+async function createBlockStrategy(familyId: string, candidateId: string, params: Record<string, number>): Promise<Strategy> {
   if (familyId.includes("rotation")) {
     return createRelativeStrengthRotationStrategy({
       strategyId: `${candidateId}-rotation`,
@@ -348,6 +348,20 @@ function createBlockStrategy(familyId: string, candidateId: string, params: Reco
     });
   }
 
+  // Dynamic fallback: try loading LLM-generated strategy
+  try {
+    const { loadDynamicStrategy } = await import("./dynamic-loader.js");
+    const dynamicModule = await loadDynamicStrategy(familyId);
+    if (dynamicModule) {
+      return dynamicModule.createStrategy({
+        strategyId: candidateId,
+        parameters: params
+      });
+    }
+  } catch {
+    // dynamic loading failed, fall through to error
+  }
+
   throw new Error(`Cannot create block strategy for family: ${familyId}`);
 }
 
@@ -498,7 +512,7 @@ export async function evaluateBlockCandidate(params: {
   }
 
   const availableSpan = summarizeReferenceCandleSpan(referenceCandles);
-  const baseStrategy = createBlockStrategy(candidate.familyId, candidate.candidateId, candidate.parameters);
+  const baseStrategy = await createBlockStrategy(candidate.familyId, candidate.candidateId, candidate.parameters);
   const gateConfig = buildBlockGateConfig(candidate.familyId, candidate.parameters);
   const strategy = withRegimeGate({ strategy: baseStrategy, gate: gateConfig });
   const bbPortfolioControls = isBbMeanReversionFamily(candidate.familyId)

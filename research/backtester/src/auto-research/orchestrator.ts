@@ -2571,6 +2571,146 @@ export function createAutoResearchOrchestrator(deps: {
           const isIterationTimedOut = (): boolean =>
             iterationTimeoutMs > 0 && (Date.now() - iterationStartedAt) >= iterationTimeoutMs;
 
+          // Discovery cycle: every N iterations, ask LLM for new strategy ideas
+          const discoveryInterval = config.discoveryInterval ?? 5;
+          if (isContinuousMode && discoveryInterval > 0 && iteration > 1 && iteration % discoveryInterval === 0) {
+            try {
+              await log(`[auto-research] discovery cycle at iteration ${iteration}`);
+              const { buildDiscoveryPrompt, buildDesignPrompt, buildImplementationPrompt } = await import("./discovery-prompts.js");
+              const { generateStrategyScaffold } = await import("./strategy-scaffold.js");
+              const { validateGeneratedStrategy } = await import("./validation.js");
+
+              // Step 1: Discovery — ask for ideas
+              // Load journal for discovery context
+              let journalSummary: { patterns: string[]; antiPatterns: string[]; recentEntries: string[] } | undefined;
+              try {
+                const { loadJournal, buildJournalSummary } = await import("./research-journal.js");
+                const journal = await loadJournal(config.outputDir);
+                journalSummary = buildJournalSummary(journal);
+              } catch { /* journal not available yet */ }
+
+              const discoveryPrompt = buildDiscoveryPrompt({
+                config,
+                marketCodes,
+                families: runtimeFamilies,
+                history: iterations,
+                journalSummary
+              });
+              const discoveryResult = await deps.llmClient.proposeCandidates({
+                config: { ...config, candidatesPerIteration: 1 },
+                families: runtimeFamilies,
+                marketCodes,
+                history: iterations
+              }).catch(() => null);
+
+              // Try to get discovery ideas via direct LLM call
+              type DiscoveryIdea = { ideaId: string; title: string; thesis: string; mechanism: string; indicators: string[] };
+              let discoveryBatch: { ideas: DiscoveryIdea[] } | null = null;
+              try {
+                const { llmJson } = await import("./cli-llm.js");
+                const { data } = await llmJson(discoveryPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
+                if (data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).ideas)) {
+                  discoveryBatch = data as { ideas: DiscoveryIdea[] };
+                }
+              } catch (error) {
+                await log(`[auto-research] discovery LLM failed: ${error instanceof Error ? error.message : String(error)}`);
+              }
+
+              if (discoveryBatch && discoveryBatch.ideas.length > 0) {
+                const topIdea = discoveryBatch.ideas[0]!;
+                await log(`[auto-research] top idea: ${topIdea.title} — ${topIdea.thesis}`);
+
+                // Step 2: Design
+                try {
+                  const designPrompt = buildDesignPrompt({ idea: topIdea, config });
+                  const { llmJson: llmJsonDesign } = await import("./cli-llm.js");
+                  const { data: designData } = await llmJsonDesign(designPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
+
+                  if (designData && typeof designData === "object") {
+                    const design = designData as {
+                      familyId: string; strategyName: string; title: string; thesis: string;
+                      family: "trend" | "breakout" | "micro" | "meanreversion";
+                      sleeveId: string; signalLogicDescription: string;
+                      indicators: string[]; entryLogic: string; exitLogic: string;
+                      parameterSpecs: Array<{ name: string; description: string; min: number; max: number }>;
+                      regimeGate: { allowedRegimes: string[] };
+                    };
+
+                    // Step 3: Generate scaffold
+                    const scaffold = generateStrategyScaffold({
+                      familyId: design.familyId ?? `generated:${topIdea.ideaId}`,
+                      strategyName: design.strategyName ?? `generated-${topIdea.ideaId}`,
+                      title: design.title ?? topIdea.title,
+                      thesis: design.thesis ?? topIdea.thesis,
+                      family: design.family ?? "meanreversion",
+                      sleeveId: design.sleeveId ?? "reversion",
+                      decisionTimeframe: config.timeframe,
+                      executionTimeframe: "5m",
+                      parameterSpecs: Array.isArray(design.parameterSpecs) ? design.parameterSpecs : [],
+                      regimeGate: design.regimeGate ?? { allowedRegimes: ["trend_up", "range"] },
+                      signalLogicDescription: design.signalLogicDescription ?? "",
+                      indicators: Array.isArray(design.indicators) ? design.indicators : []
+                    });
+
+                    // Step 4: Ask LLM to fill in the logic
+                    const implPrompt = buildImplementationPrompt({
+                      design: {
+                        familyId: design.familyId ?? `generated:${topIdea.ideaId}`,
+                        strategyName: design.strategyName ?? `generated-${topIdea.ideaId}`,
+                        title: design.title ?? topIdea.title,
+                        thesis: design.thesis ?? topIdea.thesis,
+                        signalLogicDescription: design.signalLogicDescription ?? "",
+                        entryLogic: design.entryLogic ?? "",
+                        exitLogic: design.exitLogic ?? "",
+                        indicators: Array.isArray(design.indicators) ? design.indicators : [],
+                        parameterSpecs: Array.isArray(design.parameterSpecs) ? design.parameterSpecs : []
+                      },
+                      scaffoldCode: scaffold
+                    });
+
+                    const { llmText } = await import("./cli-llm.js");
+                    const { text: implementedCode } = await llmText(implPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
+
+                    if (implementedCode && implementedCode.length > 200) {
+                      // Write to generated-strategies directory
+                      const safeName = (design.strategyName ?? `generated-${topIdea.ideaId}`).replace(/[^a-zA-Z0-9-]/g, "-");
+                      const strategyPath = path.join(process.cwd(), "src", "generated-strategies", `${safeName}.ts`);
+                      await writeFile(strategyPath, implementedCode);
+                      await log(`[auto-research] wrote generated strategy: ${strategyPath}`);
+
+                      // Step 5: Validate
+                      const validation = await validateGeneratedStrategy({ filePath: strategyPath, cwd: process.cwd() });
+                      if (validation.ok) {
+                        await log(`[auto-research] strategy validated: ${safeName}`);
+                        // Add to runtime families for subsequent iterations
+                        const newFamilyId = design.familyId ?? `generated:${topIdea.ideaId}`;
+                        const newFamily: StrategyFamilyDefinition = {
+                          familyId: newFamilyId,
+                          strategyName: safeName,
+                          title: design.title ?? topIdea.title,
+                          thesis: design.thesis ?? topIdea.thesis,
+                          timeframe: config.timeframe as "1h" | "15m" | "5m" | "1m",
+                          parameterSpecs: Array.isArray(design.parameterSpecs) ? design.parameterSpecs : [],
+                          guardrails: []
+                        };
+                        runtimeFamilies = [...runtimeFamilies, newFamily];
+                        selectedFamilies = [...selectedFamilies, newFamily];
+                        await log(`[auto-research] added new family: ${newFamilyId} — ${design.title ?? topIdea.title}`);
+                      } else {
+                        await log(`[auto-research] strategy validation failed: ${validation.results.map((r) => `${r.step}=${r.passed}`).join(", ")}`);
+                        try { await rm(strategyPath); } catch { /* best-effort cleanup */ }
+                      }
+                    }
+                  }
+                } catch (error) {
+                  await log(`[auto-research] design/implement failed: ${error instanceof Error ? error.message : String(error)}`);
+                }
+              }
+            } catch (error) {
+              await log(`[auto-research] discovery cycle failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
+            }
+          }
+
           const proposalFamiliesForLlm = runtimeFamilies.filter((family) => !hiddenFamilyIds.has(family.familyId));
           const totalLabel = isContinuousMode ? "∞" : String(config.iterations);
           await log(`[auto-research] iteration ${iteration}/${totalLabel} proposal`);
@@ -3173,6 +3313,27 @@ export function createAutoResearchOrchestrator(deps: {
             iterations
           });
         }
+
+        // Update research journal with evaluation results
+        try {
+          const { appendJournalEntry, createEvaluationEntry } = await import("./research-journal.js");
+          const topEval = evaluations[0];
+          if (topEval) {
+            const promoted = review.verdict === "promote_candidate" &&
+              review.promotedCandidateId === topEval.candidate.candidateId;
+            const familyDef = runtimeFamilies.find((f) => f.familyId === topEval.candidate.familyId);
+            await appendJournalEntry(config.outputDir, createEvaluationEntry({
+              iteration,
+              familyId: topEval.candidate.familyId,
+              title: familyDef?.title ?? topEval.candidate.familyId,
+              thesis: familyDef?.thesis ?? topEval.candidate.thesis,
+              netReturn: topEval.summary.netReturn,
+              tradeCount: topEval.summary.tradeCount,
+              maxDrawdown: topEval.summary.maxDrawdown,
+              promoted
+            }));
+          }
+        } catch { /* journal is best-effort */ }
         await log(
           `[auto-research] iteration ${iteration}/${config.iterations} verdict=${review.verdict} best=${JSON.stringify(
             evaluations[0] ? summarizeEvaluationRanking(evaluations[0]) : {}
@@ -3233,7 +3394,7 @@ export function createAutoResearchOrchestrator(deps: {
               if (!passesPromotionGate(best, gateConfig)) continue;
               try {
                 const familyDef = getBlockFamilyById(fid);
-                const validated = promoteToValidatedBlock({
+                const validated = await promoteToValidatedBlock({
                   evaluation: best,
                   familyDef,
                   blockFamilyId: fid
@@ -3348,7 +3509,7 @@ export function createAutoResearchOrchestrator(deps: {
             if (!passesPromotionGate(best, gateConfig)) continue;
             try {
               const familyDef = getBlockFamilyById(fid);
-              const validated = promoteToValidatedBlock({
+              const validated = await promoteToValidatedBlock({
                 evaluation: best,
                 familyDef,
                 blockFamilyId: fid

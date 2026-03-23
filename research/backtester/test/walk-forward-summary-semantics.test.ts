@@ -177,7 +177,7 @@ test("ranking summaries and ordering use aggregate walk-forward semantics instea
   assert.ok(compareCandidateEvaluations(robust, fragile) < 0);
 });
 
-test("validated block catalog stores walk-forward OOS trade count and worst drawdown", () => {
+test("validated block catalog stores walk-forward OOS trade count and worst drawdown", async () => {
   const evaluation = buildWalkForwardEvaluation({
     totalClosedTrades: 14,
     averageTradeCount: 3.5,
@@ -195,7 +195,7 @@ test("validated block catalog stores walk-forward OOS trade count and worst draw
     guardrails: []
   };
 
-  const promoted = promoteToValidatedBlock({
+  const promoted = await promoteToValidatedBlock({
     evaluation,
     familyDef,
     blockFamilyId: familyDef.familyId
