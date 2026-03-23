@@ -2456,16 +2456,17 @@ export function createAutoResearchOrchestrator(deps: {
           config.researchStage === "block" ? selectedFamilies.map((f) => f.familyId) : []
         );
         const blockFamilyConsecutiveZeroTrades = new Map<string, number>();
-        const familyStagnationStreak = new Map<string, number>();
-        const familyIterationCounts = new Map<string, number>();
-        const familyBestNetReturn = new Map<string, number>(); // monotonic max for stagnation tracking
         const skippedFamilyIds = new Set<string>();
         const CONSECUTIVE_ZERO_TRADE_SKIP_THRESHOLD = 3;
-        const stagnationRetireThreshold = config.stagnationRetireThreshold ?? 8;
-        const familyIterationBudget = config.familyIterationBudget ?? 20;
         const runStartedAt = Date.now();
         const maxRunDurationMs = config.maxRunDurationMs ?? 0;
         const iterationTimeoutMs = config.iterationTimeoutMs ?? 0;
+
+        const { FamilyLifecycleTracker } = await import("./family-lifecycle.js");
+        const lifecycle = new FamilyLifecycleTracker({
+          stagnationThreshold: config.stagnationRetireThreshold,
+          iterationBudget: config.familyIterationBudget
+        });
 
         // Restore blockFamilyBestMap from prior iterations on resume
         if (iterations.length > 0 && config.researchStage === "block") {
@@ -2484,40 +2485,11 @@ export function createAutoResearchOrchestrator(deps: {
           }
         }
 
-        // Restore familyStagnationStreak and familyIterationCounts from prior iterations
-        if (iterations.length > 0 && config.researchStage === "block") {
-          const STAGNATION_RESUME_EPSILON = 1e-6;
-          for (const priorIteration of iterations) {
-            const familiesInIteration = new Set<string>();
-            for (const evaluation of priorIteration.evaluations) {
-              const fid = evaluation.candidate.familyId;
-              if (!blockFamilyIds.has(fid)) continue;
-              familiesInIteration.add(fid);
-            }
-            for (const fid of familiesInIteration) {
-              familyIterationCounts.set(fid, (familyIterationCounts.get(fid) ?? 0) + 1);
-
-              // Rebuild stagnation streak from best improvement history
-              const iterBest = priorIteration.evaluations
-                .filter((e) => e.candidate.familyId === fid)
-                .sort(compareEvaluations)[0];
-              const prevBest = familyBestNetReturn.get(fid) ?? -Infinity;
-              const currentBest = iterBest?.summary.netReturn ?? -Infinity;
-
-              if (currentBest > prevBest + STAGNATION_RESUME_EPSILON) {
-                familyStagnationStreak.set(fid, 0);
-                familyBestNetReturn.set(fid, currentBest);
-              } else {
-                familyStagnationStreak.set(fid, (familyStagnationStreak.get(fid) ?? 0) + 1);
-              }
-            }
-          }
-          if (familyStagnationStreak.size > 0) {
-            const stagnationSummary = [...familyStagnationStreak.entries()]
-              .map(([fid, streak]) => `${fid}=${streak}`)
-              .join(", ");
-            await log(`[auto-research] restored stagnation streaks: ${stagnationSummary}`);
-          }
+        // Restore lifecycle tracking from prior iterations
+        if (iterations.length > 0) {
+          lifecycle.restoreFromHistory(iterations, blockFamilyIds, compareEvaluations);
+          const summary = lifecycle.getSummary();
+          if (summary) await log(`[auto-research] restored lifecycle: ${summary}`);
         }
 
         const startIteration = iterations.length + 1;
@@ -2526,18 +2498,12 @@ export function createAutoResearchOrchestrator(deps: {
           if (abortRequested) return false;
           if (maxRunDurationMs > 0 && (Date.now() - runStartedAt) >= maxRunDurationMs) return false;
           if (isContinuousMode) {
-            // Check if all tracked families are retired (works for all stages)
-            if (skippedFamilyIds.size > 0 && familyIterationCounts.size > 0) {
-              const activeFamilies = [...familyIterationCounts.keys()].filter(
-                (fid) => !skippedFamilyIds.has(fid)
-              );
-              if (activeFamilies.length === 0) return false;
+            // Check lifecycle tracker for all-retired condition
+            if (!lifecycle.hasActiveFamily(lifecycle.getIterationCounts().keys())) {
+              if (lifecycle.getIterationCounts().size > 0) return false;
             }
             if (config.researchStage === "block") {
-              const activeFamilies = [...blockFamilyIds].filter(
-                (fid) => !skippedFamilyIds.has(fid)
-              );
-              return activeFamilies.length > 0;
+              return lifecycle.hasActiveFamily(blockFamilyIds);
             }
             return true;
           }
@@ -3023,40 +2989,11 @@ export function createAutoResearchOrchestrator(deps: {
 
         }
 
-        // Track per-family stagnation (all stages, not just block)
-        {
-          const STAGNATION_EPSILON = 1e-6;
-          const familiesEvaluatedThisIteration = new Set<string>();
-          for (const evaluation of evaluations) {
-            familiesEvaluatedThisIteration.add(evaluation.candidate.familyId);
-          }
-          for (const fid of familiesEvaluatedThisIteration) {
-            familyIterationCounts.set(fid, (familyIterationCounts.get(fid) ?? 0) + 1);
-            const prevBestReturn = familyBestNetReturn.get(fid) ?? -Infinity;
-            const iterBest = evaluations
-              .filter((e) => e.candidate.familyId === fid)
-              .sort(compareEvaluations)[0];
-            const improved = iterBest && iterBest.summary.netReturn > prevBestReturn + STAGNATION_EPSILON;
-
-            if (improved) {
-              familyStagnationStreak.set(fid, 0);
-              familyBestNetReturn.set(fid, iterBest.summary.netReturn);
-            } else {
-              const streak = (familyStagnationStreak.get(fid) ?? 0) + 1;
-              familyStagnationStreak.set(fid, streak);
-
-              if (streak >= stagnationRetireThreshold && !skippedFamilyIds.has(fid)) {
-                skippedFamilyIds.add(fid);
-                await log(`[auto-research] retiring family ${fid} after ${streak} stagnant iterations (no improvement)`);
-              }
-            }
-
-            const iterCount = familyIterationCounts.get(fid) ?? 0;
-            if (iterCount >= familyIterationBudget && !skippedFamilyIds.has(fid)) {
-              skippedFamilyIds.add(fid);
-              await log(`[auto-research] retiring family ${fid} after exhausting iteration budget (${iterCount}/${familyIterationBudget})`);
-            }
-          }
+        // Track per-family stagnation and budget (all stages)
+        const newlyRetired = lifecycle.trackIteration(evaluations, compareEvaluations);
+        for (const fid of newlyRetired) {
+          skippedFamilyIds.add(fid);
+          await log(`[auto-research] retiring family ${fid} (${lifecycle.getSummary()})`);
         }
 
         if (evaluations.every((evaluation) => evaluation.summary.tradeCount === 0)) {
@@ -3088,8 +3025,8 @@ export function createAutoResearchOrchestrator(deps: {
             validationResults,
             iteration,
             blockCatalog,
-            familyStagnationStreak,
-            familyIterationCounts
+            familyStagnationStreak: lifecycle.getStagnationStreak(),
+            familyIterationCounts: lifecycle.getIterationCounts()
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -3289,9 +3226,11 @@ export function createAutoResearchOrchestrator(deps: {
             );
             if (uncoveredFamilies.length === 0) {
               const skippedCount = skippedFamilyIds.size;
-              const stagnatedCount = [...skippedFamilyIds].filter((fid) => (familyStagnationStreak.get(fid) ?? 0) >= stagnationRetireThreshold).length;
+              const stagnationStreak = lifecycle.getStagnationStreak();
+              const iterCounts = lifecycle.getIterationCounts();
+              const stagnatedCount = [...skippedFamilyIds].filter((fid) => (stagnationStreak.get(fid) ?? 0) >= (config.stagnationRetireThreshold ?? 8)).length;
               const zeroTradeCount = [...skippedFamilyIds].filter((fid) => (blockFamilyConsecutiveZeroTrades.get(fid) ?? 0) >= CONSECUTIVE_ZERO_TRADE_SKIP_THRESHOLD).length;
-              const budgetExhaustedCount = [...skippedFamilyIds].filter((fid) => (familyIterationCounts.get(fid) ?? 0) >= familyIterationBudget).length;
+              const budgetExhaustedCount = [...skippedFamilyIds].filter((fid) => (iterCounts.get(fid) ?? 0) >= (config.familyIterationBudget ?? 20)).length;
               const blockSummary = `${promotedFamilyIds.size} block families validated, ${skippedCount} skipped`
                 + (stagnatedCount > 0 ? ` (${stagnatedCount} stagnated)` : "")
                 + (zeroTradeCount > 0 ? ` (${zeroTradeCount} 0-trade)` : "")

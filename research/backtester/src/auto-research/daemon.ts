@@ -33,6 +33,40 @@ type DaemonState = {
   lastExitSignal: string | null;
 };
 
+async function performStartupCleanup(outputDir: string, log: (msg: string) => void): Promise<void> {
+  // Kill orphaned processes from previous runs
+  try {
+    const stateContent = await readFile(path.join(outputDir, "daemon-state.json"), "utf8");
+    const prevState = JSON.parse(stateContent) as DaemonState;
+    if (prevState.pid > 0 && prevState.lastExitCode === null) {
+      try {
+        process.kill(prevState.pid, 0);
+        log(`[daemon] killing orphaned child PID ${prevState.pid}`);
+        process.kill(prevState.pid, "SIGTERM");
+        await new Promise((r) => setTimeout(r, 2000));
+        try { process.kill(prevState.pid, "SIGKILL"); } catch { /* already dead */ }
+      } catch { /* process already dead */ }
+    }
+  } catch { /* no prior state */ }
+
+  // Clean stale temp directories
+  try {
+    const entries = await readdir(outputDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.startsWith("tmp-")) {
+        await rm(path.join(outputDir, entry.name), { recursive: true, force: true });
+        log(`[daemon] cleaned stale temp dir: ${entry.name}`);
+      }
+    }
+  } catch { /* best-effort */ }
+
+  // Clean stale artifacts from previous runs
+  try {
+    const { cleanStaleRuns } = await import("./artifact-cleanup.js");
+    await cleanStaleRuns({ parentDir: path.dirname(outputDir), retentionDays: 14, log });
+  } catch { /* best-effort */ }
+}
+
 export async function runDaemon(config: DaemonConfig): Promise<void> {
   const log = config.log ?? console.log;
   const initialBackoff = config.initialBackoffMs ?? 30_000;
@@ -107,39 +141,7 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
     maxHeapMb
   });
 
-  // Kill orphaned processes from previous daemon runs
-  try {
-    const statePath = path.join(config.outputDir, "daemon-state.json");
-    const stateContent = await readFile(statePath, "utf8");
-    const prevState = JSON.parse(stateContent) as DaemonState;
-    if (prevState.pid > 0 && prevState.lastExitCode === null) {
-      try {
-        process.kill(prevState.pid, 0); // check alive
-        log(`[daemon] killing orphaned child PID ${prevState.pid}`);
-        process.kill(prevState.pid, "SIGTERM");
-        await new Promise((r) => setTimeout(r, 2000));
-        try { process.kill(prevState.pid, "SIGKILL"); } catch { /* already dead */ }
-      } catch { /* process already dead */ }
-    }
-  } catch { /* no prior state */ }
-
-  // Clean stale temp directories
-  try {
-    const entries = await readdir(config.outputDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isDirectory() && entry.name.startsWith("tmp-")) {
-        await rm(path.join(config.outputDir, entry.name), { recursive: true, force: true });
-        log(`[daemon] cleaned stale temp dir: ${entry.name}`);
-      }
-    }
-  } catch { /* best-effort */ }
-
-  // Clean stale artifacts from previous runs
-  try {
-    const { cleanStaleRuns } = await import("./artifact-cleanup.js");
-    const parentDir = path.dirname(config.outputDir);
-    await cleanStaleRuns({ parentDir, retentionDays: 14, log });
-  } catch { /* best-effort */ }
+  await performStartupCleanup(config.outputDir, log);
 
   while (!shuttingDown) {
     // Pre-flight checks

@@ -335,7 +335,7 @@ test("family iteration budget exhaustion retires the family", async () => {
     );
 
     const runLog = await readFile(path.join(outputDir, "run.log"), "utf8");
-    assert.ok(runLog.includes("budget"), "Run log should mention budget exhaustion");
+    assert.ok(runLog.includes("retiring family"), "Run log should mention family retirement");
   } finally {
     await rm(outputDir, { recursive: true, force: true });
   }
