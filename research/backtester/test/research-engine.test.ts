@@ -167,10 +167,10 @@ describe("buildImplementationPrompt", () => {
       scaffoldCode: "// scaffold placeholder"
     });
 
-    assert.ok(prompt.includes("Buy on RSI oversold"));
-    assert.ok(prompt.includes("RSI < 30"));
-    assert.ok(prompt.includes("RSI > 70"));
-    assert.ok(prompt.includes("scaffold placeholder"));
+    assert.ok(prompt.includes("RSI < 30"), "should include entry logic");
+    assert.ok(prompt.includes("RSI > 70"), "should include exit logic");
+    assert.ok(prompt.includes("p.rsiPeriod"), "should reference parameter names");
+    assert.ok(prompt.includes("getRsi"), "should list indicators");
   });
 });
 

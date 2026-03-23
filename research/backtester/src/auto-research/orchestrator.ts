@@ -516,8 +516,6 @@ function shouldStageConfirmCandidate(evaluation: CandidateBacktestEvaluation): b
   return true;
 }
 
-// Review governance functions are in research-review.ts — called via generateIterationReview()
-
 function normalizeCandidates(
   proposals: CandidateProposal[],
   familyIds: ReturnType<typeof getStrategyFamilies>
@@ -2571,157 +2569,16 @@ export function createAutoResearchOrchestrator(deps: {
           const isIterationTimedOut = (): boolean =>
             iterationTimeoutMs > 0 && (Date.now() - iterationStartedAt) >= iterationTimeoutMs;
 
-          // Discovery cycle: every N iterations, ask LLM for new strategy ideas
+          // Discovery cycle: every N iterations, explore new strategy ideas
           const discoveryInterval = config.discoveryInterval ?? 5;
           if (isContinuousMode && discoveryInterval > 0 && iteration > 1 && iteration % discoveryInterval === 0) {
             try {
               await log(`[auto-research] discovery cycle at iteration ${iteration}`);
-              const { buildDiscoveryPrompt, buildDesignPrompt, buildImplementationPrompt } = await import("./discovery-prompts.js");
-              const { generateStrategyScaffold } = await import("./strategy-scaffold.js");
-              const { validateGeneratedStrategy } = await import("./validation.js");
-
-              // Step 1: Discovery — ask for ideas
-              // Load journal for discovery context
-              let journalSummary: { patterns: string[]; antiPatterns: string[]; recentEntries: string[] } | undefined;
-              try {
-                const { loadJournal, buildJournalSummary } = await import("./research-journal.js");
-                const journal = await loadJournal(config.outputDir);
-                journalSummary = buildJournalSummary(journal);
-              } catch { /* journal not available yet */ }
-
-              const discoveryPrompt = buildDiscoveryPrompt({
-                config,
-                marketCodes,
-                families: runtimeFamilies,
-                history: iterations,
-                journalSummary
-              });
-              type DiscoveryIdea = { ideaId: string; title: string; thesis: string; mechanism: string; indicators: string[] };
-              let discoveryBatch: { ideas: DiscoveryIdea[] } | null = null;
-              try {
-                const { llmJson } = await import("./cli-llm.js");
-                const { data } = await llmJson(discoveryPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
-                if (data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).ideas)) {
-                  discoveryBatch = data as { ideas: DiscoveryIdea[] };
-                }
-              } catch (error) {
-                await log(`[auto-research] discovery LLM failed: ${error instanceof Error ? error.message : String(error)}`);
-              }
-
-              if (discoveryBatch && discoveryBatch.ideas.length > 0) {
-                await log(`[auto-research] discovered ${discoveryBatch.ideas.length} ideas`);
-                const { llmJson: llmJsonCall, llmText: llmTextCall } = await import("./cli-llm.js");
-
-                // Ensure generated-strategies directory exists
-                const generatedDir = path.join(process.cwd(), "src", "generated-strategies");
-                await mkdir(generatedDir, { recursive: true });
-
-                // Try each idea until one succeeds
-                for (const idea of discoveryBatch.ideas) {
-                  if (!idea.ideaId || !idea.title) continue;
-                  await log(`[auto-research] trying idea: ${idea.title}`);
-
-                  try {
-                    // Step 2: Design
-                    const designPrompt = buildDesignPrompt({ idea, config });
-                    const { data: designData } = await llmJsonCall(designPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
-                    if (!designData || typeof designData !== "object") continue;
-
-                    const design = designData as {
-                      familyId?: string; strategyName?: string; title?: string; thesis?: string;
-                      family?: "trend" | "breakout" | "micro" | "meanreversion";
-                      sleeveId?: string; signalLogicDescription?: string;
-                      indicators?: string[]; entryLogic?: string; exitLogic?: string;
-                      parameterSpecs?: Array<{ name: string; description: string; min: number; max: number }>;
-                      regimeGate?: { allowedRegimes: string[] };
-                    };
-
-                    const familyId = design.familyId ?? `generated:${idea.ideaId}`;
-                    const safeName = (design.strategyName ?? `generated-${idea.ideaId}`).replace(/[^a-zA-Z0-9-]/g, "-");
-
-                    // Step 3: Generate scaffold
-                    const scaffold = generateStrategyScaffold({
-                      familyId,
-                      strategyName: safeName,
-                      title: design.title ?? idea.title,
-                      thesis: design.thesis ?? idea.thesis,
-                      family: design.family ?? "meanreversion",
-                      sleeveId: design.sleeveId ?? "reversion",
-                      decisionTimeframe: config.timeframe,
-                      executionTimeframe: "5m",
-                      parameterSpecs: Array.isArray(design.parameterSpecs) ? design.parameterSpecs : [],
-                      regimeGate: design.regimeGate ?? { allowedRegimes: ["trend_up", "range"] },
-                      signalLogicDescription: design.signalLogicDescription ?? "",
-                      indicators: Array.isArray(design.indicators) ? design.indicators : []
-                    });
-
-                    // Step 4: Ask LLM to implement
-                    const implPrompt = buildImplementationPrompt({
-                      design: {
-                        familyId,
-                        strategyName: safeName,
-                        title: design.title ?? idea.title,
-                        thesis: design.thesis ?? idea.thesis,
-                        signalLogicDescription: design.signalLogicDescription ?? "",
-                        entryLogic: design.entryLogic ?? "",
-                        exitLogic: design.exitLogic ?? "",
-                        indicators: Array.isArray(design.indicators) ? design.indicators : [],
-                        parameterSpecs: Array.isArray(design.parameterSpecs) ? design.parameterSpecs : []
-                      },
-                      scaffoldCode: scaffold
-                    });
-
-                    // Get signal logic only (short prompt, fast response)
-                    const { text: signalBody } = await llmTextCall(implPrompt, {
-                      provider: "claude",
-                      timeoutMs: 60_000,
-                      allowTools: ""
-                    });
-                    if (!signalBody || signalBody.length < 20) {
-                      await log(`[auto-research] idea ${idea.ideaId}: signal logic too short (${signalBody?.length ?? 0} chars)`);
-                      continue;
-                    }
-
-                    // Extract code from potential markdown wrapping
-                    const codeMatch = signalBody.match(/```(?:typescript|ts)?\s*\n([\s\S]*?)\n```/);
-                    const cleanSignalBody = codeMatch ? codeMatch[1]! : signalBody.trim();
-
-                    // Inject signal logic into scaffold
-                    const finalCode = scaffold.replace(
-                      /\/\/ --- YOUR SIGNAL LOGIC HERE ---/,
-                      cleanSignalBody
-                    );
-
-                    // Step 5: Write + Validate
-                    const strategyPath = path.join(generatedDir, `${safeName}.ts`);
-                    await writeFile(strategyPath, finalCode);
-
-                    const validation = await validateGeneratedStrategy({ filePath: strategyPath, cwd: process.cwd() });
-                    if (validation.ok) {
-                      await log(`[auto-research] strategy validated: ${safeName}`);
-                      const newFamily: StrategyFamilyDefinition = {
-                        familyId,
-                        strategyName: safeName,
-                        title: design.title ?? idea.title,
-                        thesis: design.thesis ?? idea.thesis,
-                        timeframe: config.timeframe as "1h" | "15m" | "5m" | "1m",
-                        parameterSpecs: Array.isArray(design.parameterSpecs) ? design.parameterSpecs : [],
-                        guardrails: []
-                      };
-                      runtimeFamilies = [...runtimeFamilies, newFamily];
-                      selectedFamilies = [...selectedFamilies, newFamily];
-                      await log(`[auto-research] added new family: ${familyId}`);
-                      break; // Successfully created one strategy, move on
-                    } else {
-                      await log(`[auto-research] validation failed for ${safeName}: ${validation.results.map((r) => `${r.step}=${r.passed}`).join(", ")}`);
-                      try { await rm(strategyPath); } catch { /* cleanup */ }
-                    }
-                  } catch (error) {
-                    await log(`[auto-research] idea ${idea.ideaId} failed: ${error instanceof Error ? error.message : String(error)}`);
-                  }
-                }
-              } else {
-                await log("[auto-research] discovery returned no ideas");
+              const { runDiscoveryCycle } = await import("./discovery-cycle.js");
+              const { newFamily } = await runDiscoveryCycle({ config, marketCodes, runtimeFamilies, iterations, log });
+              if (newFamily) {
+                runtimeFamilies = [...runtimeFamilies, newFamily];
+                selectedFamilies = [...selectedFamilies, newFamily];
               }
             } catch (error) {
               await log(`[auto-research] discovery cycle failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);

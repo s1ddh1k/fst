@@ -57,8 +57,6 @@ export function createStrategyByName(
   }
 }
 
-// Dynamic strategy loading for LLM-generated strategies is handled
-// in block-evaluator.ts via dynamic-loader.ts (async context)
 
 export function listStrategyNames(): string[] {
   return [
