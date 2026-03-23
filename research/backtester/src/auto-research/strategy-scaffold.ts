@@ -58,8 +58,13 @@ import type {
 import type { Candle } from "../types.js";
 import type { GeneratedStrategyModule, GeneratedStrategyMetadata } from "../auto-research/strategy-template.js";
 
-// Available indicator functions:
-${design.indicators.map((ind) => `// - ${ind}`).join("\n")}
+// Indicator imports (all available — unused ones are tree-shaken)
+import {
+  getRsi, getZScore, getEma, getSma, getMomentum, getPriceSlope, getRateOfChange,
+  getBollingerBands, getCci, getStochasticOscillator, detectMarketRegime, matchesRegime,
+  getAdx, getDonchianChannel, getMacd, getAtr, getHistoricalVolatility, getRangeExpansionScore,
+  getAverageVolume, getVolumeSpikeRatio, getObv, getObvSlope
+} from "../../../../research/strategies/src/factors/index.js";
 
 // Parameter specifications:
 ${paramTypes}
@@ -98,11 +103,17 @@ ${paramDefaults}
       const idx = context.featureView.decisionIndex;
       const market = context.market;
       const hasPosition = context.existingPosition != null;
+      const entryPrice = context.existingPosition?.entryPrice ?? 0;
+      const barsHeld = hasPosition && context.existingPosition?.entryTime
+        ? Math.floor((context.decisionTime.getTime() - context.existingPosition.entryTime.getTime()) / (3600 * 1000))
+        : 0;
 
       // ============================================================
       // TODO: LLM fills in signal generation logic here
       // Strategy: ${design.signalLogicDescription}
       //
+      // Candle fields: .openPrice, .highPrice, .lowPrice, .closePrice, .volume
+      // Indicator usage: fn(candles, idx, period) → number|null. Always ?? defaultValue.
       // Must return signal: "BUY", "SELL", or "HOLD"
       // conviction: 0.0 to 1.0
       // ============================================================

@@ -105,16 +105,25 @@ export function buildImplementationPrompt(params: {
 Entry: ${params.design.entryLogic}
 Exit: ${params.design.exitLogic}
 
-Available: candles[0..idx] (OHLCV), hasPosition (bool), parameters: ${paramList}
-Indicator functions: ${params.design.indicators.join(", ")} (imported, take candles + period args)
-Each returns a number. Example: getRsi(candles.slice(0, idx+1), 14)
+Available variables (ONLY use these, do NOT invent new ones):
+- candles: Candle[] (OHLCV array, candles[idx] = current bar)
+- idx: number (current bar index)
+- hasPosition: boolean
+- entryPrice: number (0 if no position)
+- barsHeld: number (hours since entry, 0 if no position)
+- p.paramName: parameter values (prefixed with p.)
+Indicator functions: ${params.design.indicators.join(", ")}
+Usage: functionName(candles, idx, period) — all take (candles[], endIndex, period) and return number|null
+Example: const rsi = getRsi(candles, idx, p.rsiPeriod) ?? 50;
+Candle fields: .openPrice, .highPrice, .lowPrice, .closePrice, .volume (NOT .open/.close)
 
 Return ONLY a TypeScript code block (no explanation) that sets signal/conviction/reason:
 - signal: "BUY" | "SELL" | "HOLD"
 - conviction: 0-1
 - reason: string
 - First check: if (idx < 30) keep HOLD
-- Use "p." prefix for parameters
+- Use EXACTLY these parameter names with "p." prefix: ${paramList}
+- Do NOT invent new parameter names. Only use the ones listed above.
 
 Example format:
 const rsi = getRsi(candles.slice(0, idx + 1), p.rsiPeriod);
