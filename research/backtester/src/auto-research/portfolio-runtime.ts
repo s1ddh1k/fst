@@ -8,7 +8,8 @@ import {
   createRelativeStrengthRotationStrategy,
   withRegimeGate
 } from "../multi-strategy/index.js";
-import type { NormalizedCandidateProposal } from "./types.js";
+import type { NormalizedCandidateProposal, ValidatedBlockCatalog } from "./types.js";
+import { assemblePortfolioFromBlocks, ASSEMBLED_PORTFOLIO_PREFIX } from "./portfolio-assembler.js";
 
 export const PORTFOLIO_STRATEGY_PREFIX = "portfolio:";
 export const MULTI_TF_REGIME_CORE_PORTFOLIO = `${PORTFOLIO_STRATEGY_PREFIX}multi-tf-regime-core`;
@@ -79,7 +80,7 @@ function distributeMaxOpenPositions(
     remaining -= 1;
   }
 
-  while (remaining > 0) {
+  while (remaining > 0 && byBudget.length > 0) {
     for (const entry of byBudget) {
       if (remaining <= 0) {
         break;
@@ -419,7 +420,35 @@ export function isPortfolioStrategyName(strategyName: string): boolean {
   return strategyName.startsWith(PORTFOLIO_STRATEGY_PREFIX);
 }
 
-export function buildPortfolioCandidateRuntime(candidate: PortfolioCandidateLike): PortfolioCandidateRuntime {
+export function buildPortfolioCandidateRuntime(
+  candidate: PortfolioCandidateLike,
+  blockCatalog?: ValidatedBlockCatalog
+): PortfolioCandidateRuntime {
+  if (candidate.strategyName.startsWith(ASSEMBLED_PORTFOLIO_PREFIX) && blockCatalog) {
+    const blockIds = blockCatalog.blocks.map((b) => b.blockId);
+    const sleeveAllocations: Record<string, number> = {};
+    for (const [key, value] of Object.entries(candidate.parameters)) {
+      if (key.startsWith("sleeveAlloc_")) {
+        sleeveAllocations[key.replace("sleeveAlloc_", "")] = value;
+      }
+    }
+    return assemblePortfolioFromBlocks({
+      candidateId: candidate.candidateId,
+      blockCatalog,
+      blockIds,
+      sleeveAllocations,
+      portfolioParams: {
+        universeTopN: candidate.parameters.universeTopN ?? 9,
+        maxOpenPositions: candidate.parameters.maxOpenPositions ?? 4,
+        maxCapitalUsagePct: candidate.parameters.maxCapitalUsagePct ?? 0.72,
+        cooldownBarsAfterLoss: candidate.parameters.cooldownBarsAfterLoss ?? 8,
+        minBarsBetweenEntries: candidate.parameters.minBarsBetweenEntries ?? 2,
+        universeLookbackBars: candidate.parameters.universeLookbackBars ?? 28,
+        refreshEveryBars: candidate.parameters.refreshEveryBars ?? 4
+      }
+    });
+  }
+
   switch (candidate.strategyName) {
     case MULTI_TF_REGIME_CORE_PORTFOLIO: {
       const universeTopN = roundInt(finiteOrDefault(candidate.parameters.universeTopN, 10), 6, 18);

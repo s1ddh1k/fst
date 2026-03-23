@@ -22,6 +22,33 @@ function worstWindowNetReturn(evaluation: CandidateBacktestEvaluation): number {
   return evaluation.diagnostics.windows.worstWindowNetReturn ?? evaluation.summary.netReturn;
 }
 
+function bestWindowNetReturn(evaluation: CandidateBacktestEvaluation): number {
+  return evaluation.diagnostics.windows.bestWindowNetReturn ?? evaluation.summary.netReturn;
+}
+
+function windowConsistencyBonus(evaluation: CandidateBacktestEvaluation): number {
+  const windows = windowCount(evaluation);
+  if (windows < 2) return 0;
+  const best = bestWindowNetReturn(evaluation);
+  const worst = worstWindowNetReturn(evaluation);
+  const spread = best - worst;
+  if (spread <= 0) return 0.02;
+  const ratio = positiveWindowRatio(evaluation);
+  if (ratio >= 0.8 && spread < 0.15) return 0.04;
+  if (ratio >= 0.6 && spread < 0.25) return 0.02;
+  return 0;
+}
+
+function calmarRatioBonus(evaluation: CandidateBacktestEvaluation): number {
+  const maxDd = resolveEvaluationMaxDrawdown(evaluation);
+  if (maxDd < 1e-6) return 0;
+  const calmar = evaluation.summary.netReturn / maxDd;
+  if (calmar >= 3) return 0.06;
+  if (calmar >= 2) return 0.04;
+  if (calmar >= 1) return 0.02;
+  return 0;
+}
+
 function windowCount(evaluation: CandidateBacktestEvaluation): number {
   return evaluation.diagnostics.windows.windowCount ?? 0;
 }
@@ -86,6 +113,9 @@ export function calculateCandidateRiskAdjustedScore(
   if (percentile !== undefined) {
     score += (percentile - 0.5) * 0.12;
   }
+
+  score += windowConsistencyBonus(evaluation);
+  score += calmarRatioBonus(evaluation);
 
   return Number(score.toFixed(6));
 }
@@ -230,6 +260,8 @@ export function summarizeEvaluationRanking(evaluation: CandidateBacktestEvaluati
     windowCount: windowCount(evaluation),
     totalClosedTrades: resolveEvaluationTradeCount(evaluation),
     randomPercentile: randomPercentile(evaluation),
-    bootstrapSignificant: bootstrapSignificant(evaluation)
+    bootstrapSignificant: bootstrapSignificant(evaluation),
+    windowConsistencyBonus: windowConsistencyBonus(evaluation),
+    calmarRatioBonus: calmarRatioBonus(evaluation)
   };
 }

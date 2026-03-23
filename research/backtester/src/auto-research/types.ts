@@ -433,6 +433,18 @@ export type AutoResearchRunConfig = {
   seedCandidatesPerIteration?: number;
   candidateDiversificationMinDistance?: number;
   loopVersion?: AutoResearchLoopVersion;
+  autoPromote?: boolean;
+  autoPromoteMaxCandidates?: number;
+
+  // Data freshness
+  allowStaleData?: boolean;
+
+  // 24/7 continuous mode
+  continuousMode?: boolean;
+  maxRunDurationMs?: number;
+  iterationTimeoutMs?: number;
+  familyIterationBudget?: number;
+  stagnationRetireThreshold?: number;
 };
 
 export type AutoResearchConfigRepair = {

@@ -28,6 +28,7 @@ export { createMomentumReaccelerationStrategy } from "./momentum-reacceleration.
 export { createLeaderBreakoutRetestStrategy } from "./leader-breakout-retest.js";
 export { createCompressionBreakoutTrendStrategy } from "./compression-breakout-trend.js";
 export { createLeaderTrendContinuationStrategy } from "./leader-trend-continuation.js";
+export { createBollingerMeanReversionStrategy } from "./bollinger-mean-reversion.js";
 export {
   SCORED_DECISION_TIMEFRAME,
   assertSupportedScoredDecisionTimeframe,

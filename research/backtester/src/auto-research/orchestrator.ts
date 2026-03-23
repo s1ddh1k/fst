@@ -72,6 +72,7 @@ import {
 import { generateIterationReview } from "./research-review.js";
 import { renderAutoResearchHtmlWithOptions } from "./report-html.js";
 import { runPostMutationValidation } from "./validation.js";
+import { autoPromoteAndLog } from "./auto-promote.js";
 import { discoverRuntimeScoredStrategyNames } from "./runtime-discovery.js";
 import { repairWalkForwardConfig } from "./walk-forward-config.js";
 import { calculateAutoResearchMinimumLimit, repairAutoResearchLimit } from "./limit-resolution.js";
@@ -84,6 +85,17 @@ import {
 import {
   MULTI_TF_REGIME_SWITCH_PORTFOLIO
 } from "./portfolio-runtime.js";
+
+function createSafeAppendLineageEvent(log: (msg: string) => Promise<void>) {
+  return async (params: Parameters<typeof appendLineageEvent>[0]): Promise<void> => {
+    try {
+      await appendLineageEvent(params);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await log(`[auto-research] lineage event write failed: ${message}`);
+    }
+  };
+}
 
 const SCREEN_FAMILY_TO_CONFIRM_FAMILY = new Map<string, string>([
   ["multi-tf-regime-switch-screen", "multi-tf-regime-switch"],
@@ -504,145 +516,7 @@ function shouldStageConfirmCandidate(evaluation: CandidateBacktestEvaluation): b
   return true;
 }
 
-function appendReviewObservation(review: ReviewDecision, observation: string): ReviewDecision {
-  return {
-    ...review,
-    observations: [...review.observations, observation]
-  };
-}
-
-function governReviewDecision(params: {
-  review: ReviewDecision;
-  evaluations: CandidateBacktestEvaluation[];
-  config: AutoResearchRunConfig;
-  iteration: number;
-}): ReviewDecision {
-  const { review, evaluations, config, iteration } = params;
-  const isFinalIteration = iteration >= config.iterations;
-  const topPromotable = findTopPromotableEvaluation(evaluations, config);
-  const requestedPromoted = review.promotedCandidateId
-    ? evaluations.find((item) => item.candidate.candidateId === review.promotedCandidateId)
-    : undefined;
-  const requestedPromotedPassesGate = requestedPromoted
-    ? passesPromotionGate(requestedPromoted, promotionGateConfig(config))
-    : false;
-
-  if (review.verdict === "promote_candidate" && topPromotable) {
-    if (
-      review.promotedCandidateId === topPromotable.candidate.candidateId &&
-      requestedPromotedPassesGate
-    ) {
-      return review;
-    }
-
-    const observation =
-      review.promotedCandidateId && requestedPromoted
-        ? `Review promoted ${review.promotedCandidateId}, but objective governance selected ${topPromotable.candidate.candidateId}.`
-        : `Review promotion was incomplete; objective governance selected ${topPromotable.candidate.candidateId}.`;
-
-    return appendReviewObservation(
-      {
-        ...review,
-        verdict: "promote_candidate",
-        promotedCandidateId: topPromotable.candidate.candidateId,
-        summary: `${review.summary} Objective governance promoted ${topPromotable.candidate.candidateId}.`.trim()
-      },
-      observation
-    );
-  }
-
-  if (
-    topPromotable &&
-    (
-      review.verdict === "stop_no_edge" ||
-      (review.verdict === "keep_searching" && isFinalIteration)
-    )
-  ) {
-    const reason = review.verdict === "stop_no_edge"
-      ? `Review returned stop_no_edge, but objective governance promoted ${topPromotable.candidate.candidateId}.`
-      : `Final iteration kept searching, but objective governance promoted ${topPromotable.candidate.candidateId}.`;
-
-    return appendReviewObservation(
-      {
-        ...review,
-        verdict: "promote_candidate",
-        promotedCandidateId: topPromotable.candidate.candidateId,
-        summary: `${review.summary} ${reason}`.trim()
-      },
-      reason
-    );
-  }
-
-  if (review.verdict === "promote_candidate" && !requestedPromotedPassesGate) {
-    const nextVerdict = isFinalIteration ? "stop_no_edge" : "keep_searching";
-    const reason = review.promotedCandidateId
-      ? `Promotion gate blocked ${review.promotedCandidateId}; switching verdict to ${nextVerdict}.`
-      : `Review did not provide a valid promoted candidate; switching verdict to ${nextVerdict}.`;
-
-    return appendReviewObservation(
-      {
-        ...review,
-        verdict: nextVerdict,
-        promotedCandidateId: undefined,
-        summary: `${review.summary} ${reason}`.trim()
-      },
-      reason
-    );
-  }
-
-  return review;
-}
-
-function ensureNextCandidatesForKeepSearching(params: {
-  review: ReviewDecision;
-  limit: number;
-  iteration: number;
-}): ReviewDecision {
-  if (params.review.verdict !== "keep_searching") {
-    return params.review;
-  }
-
-  const uniqueReviewCandidates = dedupeCandidateProposals(params.review.nextCandidates).slice(0, params.limit);
-  if (uniqueReviewCandidates.length === 0) {
-    throw new Error(
-      `LLM review returned keep_searching without any unique next candidates for iteration ${params.iteration}.`
-    );
-  }
-
-  const nextCandidates = [...uniqueReviewCandidates];
-
-  const candidateListsMatch =
-    nextCandidates.length === params.review.nextCandidates.length &&
-    nextCandidates.every(
-      (candidate, index) =>
-        candidateFingerprint(candidate) === candidateFingerprint(params.review.nextCandidates[index]!)
-    );
-
-  if (candidateListsMatch) {
-    return params.review;
-  }
-
-  let nextReview: ReviewDecision = {
-    ...params.review,
-    nextCandidates
-  };
-
-  if (uniqueReviewCandidates.length < params.review.nextCandidates.length) {
-    nextReview = appendReviewObservation(
-      nextReview,
-      `Review keep_searching candidates were deduped from ${params.review.nextCandidates.length} to ${uniqueReviewCandidates.length}.`
-    );
-  }
-
-  if (nextCandidates.length < params.review.nextCandidates.length) {
-    nextReview = appendReviewObservation(
-      nextReview,
-      `Review keep_searching candidates were trimmed to the configured candidate limit of ${params.limit}.`
-    );
-  }
-
-  return nextReview;
-}
+// Review governance functions are in research-review.ts — called via generateIterationReview()
 
 function normalizeCandidates(
   proposals: CandidateProposal[],
@@ -651,42 +525,12 @@ function normalizeCandidates(
   return proposals.map((proposal, index) => normalizeCandidateProposal(proposal, familyIds, index));
 }
 
-function toReviewProposalBatch(
-  proposal: ProposalBatch,
-  evaluations: CandidateBacktestEvaluation[]
-): ProposalBatch {
-  return {
-    ...proposal,
-    candidates: evaluations.map((evaluation) => ({
-      candidateId: evaluation.candidate.candidateId,
-      familyId: evaluation.candidate.familyId,
-      thesis: evaluation.candidate.thesis,
-      parameters: evaluation.candidate.parameters,
-      invalidationSignals: evaluation.candidate.invalidationSignals,
-      parentCandidateIds: evaluation.candidate.parentCandidateIds,
-      origin: evaluation.candidate.origin
-    }))
-  };
-}
+// toReviewProposalBatch is in research-review.ts
 
 function dedupeCandidates(candidates: NormalizedCandidateProposal[]): NormalizedCandidateProposal[] {
   const seen = new Set<string>();
   return candidates.filter((candidate) => {
     const key = `${candidate.strategyName}:${JSON.stringify(candidate.parameters)}`;
-    if (seen.has(key)) {
-      return false;
-    }
-
-    seen.add(key);
-    return true;
-  });
-}
-
-function dedupeCandidateProposals(candidates: CandidateProposal[]): CandidateProposal[] {
-  const seen = new Set<string>();
-
-  return candidates.filter((candidate) => {
-    const key = candidateFingerprint(candidate);
     if (seen.has(key)) {
       return false;
     }
@@ -2441,11 +2285,15 @@ export function createAutoResearchOrchestrator(deps: {
           restored?.noTradeIterations ??
           iterations.filter((iteration) => iteration.evaluations.every((evaluation) => evaluation.summary.tradeCount === 0)).length;
 
-        const parallelism = Math.max(1, config.parallelism ?? config.candidatesPerIteration ?? 1);
+        // Cap parallelism based on available memory and CPUs
+        const totalMemMb = Math.round(os.totalmem() / 1024 / 1024);
+        const memAwareCap = totalMemMb <= 8192 ? 1 : totalMemMb <= 16384 ? 2 : Math.max(1, os.cpus().length - 1);
+        const parallelism = Math.min(memAwareCap, Math.max(1, config.parallelism ?? Math.min(config.candidatesPerIteration ?? 1, memAwareCap)));
         const log = async (message: string) => {
           console.error(message);
           await appendRunLog(config.outputDir, message);
         };
+        const safeAppendLineageEvent = createSafeAppendLineageEvent(log);
         let lineage = await loadOrCreateResearchLineage({
           outputDir: config.outputDir,
           stage: config.researchStage ?? "auto",
@@ -2463,7 +2311,7 @@ export function createAutoResearchOrchestrator(deps: {
           outcomeReason = message;
           await log(`[auto-research] failed ${message}`);
           if (config.loopVersion === "v2") {
-            await appendLineageEvent({
+            await safeAppendLineageEvent({
               outputDir: config.outputDir,
               event: {
                 eventId: `${lineage.lineageId}-failed-${Date.now()}`,
@@ -2504,6 +2352,23 @@ export function createAutoResearchOrchestrator(deps: {
         };
         process.once("SIGINT", handleAbort);
         process.once("SIGTERM", handleAbort);
+
+        // Data freshness check (only in continuous/daemon mode unless explicitly requested)
+        if (!config.allowStaleData && config.continuousMode) {
+          try {
+            const { checkDataFreshness } = await import("./data-health.js");
+            const freshness = checkDataFreshness({
+              timeframe: config.timeframe,
+              allowStaleData: false
+            });
+            if (freshness.warning) await log(`[auto-research] WARNING: ${freshness.warning}`);
+            if (!freshness.ok) await failRun(freshness.refusal ?? "Data freshness check failed");
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            if (msg.includes("Data is") || msg.includes("No candles")) throw error;
+            await log(`[auto-research] data freshness check skipped: ${msg}`);
+          }
+        }
 
         if (limitResolution.repaired) {
           await log(
@@ -2593,24 +2458,130 @@ export function createAutoResearchOrchestrator(deps: {
           config.researchStage === "block" ? selectedFamilies.map((f) => f.familyId) : []
         );
         const blockFamilyConsecutiveZeroTrades = new Map<string, number>();
+        const familyStagnationStreak = new Map<string, number>();
+        const familyIterationCounts = new Map<string, number>();
+        const familyBestNetReturn = new Map<string, number>(); // monotonic max for stagnation tracking
         const skippedFamilyIds = new Set<string>();
         const CONSECUTIVE_ZERO_TRADE_SKIP_THRESHOLD = 3;
+        const stagnationRetireThreshold = config.stagnationRetireThreshold ?? 8;
+        const familyIterationBudget = config.familyIterationBudget ?? 20;
+        const runStartedAt = Date.now();
+        const maxRunDurationMs = config.maxRunDurationMs ?? 0;
+        const iterationTimeoutMs = config.iterationTimeoutMs ?? 0;
+
+        // Restore blockFamilyBestMap from prior iterations on resume
+        if (iterations.length > 0 && config.researchStage === "block") {
+          for (const priorIteration of iterations) {
+            for (const evaluation of priorIteration.evaluations) {
+              const fid = evaluation.candidate.familyId;
+              if (!blockFamilyIds.has(fid)) continue;
+              const current = blockFamilyBestMap.get(fid);
+              if (!current || compareEvaluations(current, evaluation) > 0) {
+                blockFamilyBestMap.set(fid, evaluation);
+              }
+            }
+          }
+          if (blockFamilyBestMap.size > 0) {
+            await log(`[auto-research] restored blockFamilyBestMap from ${iterations.length} prior iterations (${blockFamilyBestMap.size} families)`);
+          }
+        }
+
+        // Restore familyStagnationStreak and familyIterationCounts from prior iterations
+        if (iterations.length > 0 && config.researchStage === "block") {
+          const STAGNATION_RESUME_EPSILON = 1e-6;
+          for (const priorIteration of iterations) {
+            const familiesInIteration = new Set<string>();
+            for (const evaluation of priorIteration.evaluations) {
+              const fid = evaluation.candidate.familyId;
+              if (!blockFamilyIds.has(fid)) continue;
+              familiesInIteration.add(fid);
+            }
+            for (const fid of familiesInIteration) {
+              familyIterationCounts.set(fid, (familyIterationCounts.get(fid) ?? 0) + 1);
+
+              // Rebuild stagnation streak from best improvement history
+              const iterBest = priorIteration.evaluations
+                .filter((e) => e.candidate.familyId === fid)
+                .sort(compareEvaluations)[0];
+              const prevBest = familyBestNetReturn.get(fid) ?? -Infinity;
+              const currentBest = iterBest?.summary.netReturn ?? -Infinity;
+
+              if (currentBest > prevBest + STAGNATION_RESUME_EPSILON) {
+                familyStagnationStreak.set(fid, 0);
+                familyBestNetReturn.set(fid, currentBest);
+              } else {
+                familyStagnationStreak.set(fid, (familyStagnationStreak.get(fid) ?? 0) + 1);
+              }
+            }
+          }
+          if (familyStagnationStreak.size > 0) {
+            const stagnationSummary = [...familyStagnationStreak.entries()]
+              .map(([fid, streak]) => `${fid}=${streak}`)
+              .join(", ");
+            await log(`[auto-research] restored stagnation streaks: ${stagnationSummary}`);
+          }
+        }
 
         const startIteration = iterations.length + 1;
-        for (let iteration = startIteration; iteration <= config.iterations; iteration += 1) {
+        const isContinuousMode = config.continuousMode === true;
+        const shouldContinueLoop = (iter: number): boolean => {
+          if (abortRequested) return false;
+          if (maxRunDurationMs > 0 && (Date.now() - runStartedAt) >= maxRunDurationMs) return false;
+          if (isContinuousMode) {
+            // Check if all tracked families are retired (works for all stages)
+            if (skippedFamilyIds.size > 0 && familyIterationCounts.size > 0) {
+              const activeFamilies = [...familyIterationCounts.keys()].filter(
+                (fid) => !skippedFamilyIds.has(fid)
+              );
+              if (activeFamilies.length === 0) return false;
+            }
+            if (config.researchStage === "block") {
+              const activeFamilies = [...blockFamilyIds].filter(
+                (fid) => !skippedFamilyIds.has(fid)
+              );
+              return activeFamilies.length > 0;
+            }
+            return true;
+          }
+          return iter <= config.iterations;
+        };
+
+        for (let iteration = startIteration; shouldContinueLoop(iteration); iteration += 1) {
           if (abortRequested) {
             outcome = "aborted";
             outcomeReason = `Received ${abortSignal ?? "termination signal"}.`;
             break;
           }
+          if (maxRunDurationMs > 0 && (Date.now() - runStartedAt) >= maxRunDurationMs) {
+            outcome = "completed";
+            outcomeReason = `Max run duration reached (${Math.round(maxRunDurationMs / 60_000)}min).`;
+            break;
+          }
+
+          // Write heartbeat for daemon watchdog
+          const iterationStartedAt = Date.now();
+          try {
+            await writeFile(
+              path.join(config.outputDir, "heartbeat.json"),
+              JSON.stringify({ pid: process.pid, iteration, updatedAt: new Date().toISOString() })
+            );
+          } catch { /* best-effort */ }
+
+          // Iteration timeout check helper
+          const isIterationTimedOut = (): boolean =>
+            iterationTimeoutMs > 0 && (Date.now() - iterationStartedAt) >= iterationTimeoutMs;
+
           const proposalFamiliesForLlm = runtimeFamilies.filter((family) => !hiddenFamilyIds.has(family.familyId));
-          await log(`[auto-research] iteration ${iteration}/${config.iterations} proposal`);
+          const totalLabel = isContinuousMode ? "∞" : String(config.iterations);
+          await log(`[auto-research] iteration ${iteration}/${totalLabel} proposal`);
           const proposalStatus: AutoResearchStatus = {
             updatedAt: new Date().toISOString(),
             phase: "proposal",
             iteration,
-            totalIterations: config.iterations,
-            message: "Waiting for LLM proposal."
+            totalIterations: isContinuousMode ? iteration : config.iterations,
+            message: isContinuousMode
+              ? `Continuous mode iteration ${iteration}. Active families: ${[...blockFamilyIds].filter((f) => !skippedFamilyIds.has(f)).length}/${blockFamilyIds.size}.`
+              : "Waiting for LLM proposal."
           };
           await saveRunStatus(config.outputDir, proposalStatus);
           let proposalResult: Awaited<ReturnType<typeof generateHypothesisProposal>>;
@@ -2631,6 +2602,11 @@ export function createAutoResearchOrchestrator(deps: {
             await failRun(`LLM proposal failed: ${message}`, nextProposal);
           }
 
+          if (isIterationTimedOut()) {
+            await log(`[auto-research] iteration ${iteration} timed out after proposal phase (${Math.round((Date.now() - iterationStartedAt) / 1000)}s)`);
+            continue;
+          }
+
           let proposal = proposalResult!.proposal;
           if (proposalResult!.source !== "llm") {
             await log(
@@ -2643,7 +2619,7 @@ export function createAutoResearchOrchestrator(deps: {
         let hypotheses: ResearchHypothesis[] = [];
         if (config.loopVersion === "v2") {
           hypotheses = proposalResult!.hypotheses;
-          await appendLineageEvent({
+          await safeAppendLineageEvent({
             outputDir: config.outputDir,
             event: {
               eventId: `${lineage.lineageId}-proposal-${iteration}`,
@@ -2715,7 +2691,7 @@ export function createAutoResearchOrchestrator(deps: {
         }
 
         if (experimentPlan && config.loopVersion === "v2") {
-          await appendLineageEvent({
+          await safeAppendLineageEvent({
             outputDir: config.outputDir,
             event: {
               eventId: `${lineage.lineageId}-plan-${iteration}`,
@@ -2833,7 +2809,7 @@ export function createAutoResearchOrchestrator(deps: {
           detail: item.detail
         }));
         if (config.loopVersion === "v2" && normalizedCodeMutationResults.length > 0) {
-          await appendLineageEvent({
+          await safeAppendLineageEvent({
             outputDir: config.outputDir,
             event: {
               eventId: `${lineage.lineageId}-code-${iteration}`,
@@ -3030,6 +3006,43 @@ export function createAutoResearchOrchestrator(deps: {
               }
             }
           }
+
+        }
+
+        // Track per-family stagnation (all stages, not just block)
+        {
+          const STAGNATION_EPSILON = 1e-6;
+          const familiesEvaluatedThisIteration = new Set<string>();
+          for (const evaluation of evaluations) {
+            familiesEvaluatedThisIteration.add(evaluation.candidate.familyId);
+          }
+          for (const fid of familiesEvaluatedThisIteration) {
+            familyIterationCounts.set(fid, (familyIterationCounts.get(fid) ?? 0) + 1);
+            const prevBestReturn = familyBestNetReturn.get(fid) ?? -Infinity;
+            const iterBest = evaluations
+              .filter((e) => e.candidate.familyId === fid)
+              .sort(compareEvaluations)[0];
+            const improved = iterBest && iterBest.summary.netReturn > prevBestReturn + STAGNATION_EPSILON;
+
+            if (improved) {
+              familyStagnationStreak.set(fid, 0);
+              familyBestNetReturn.set(fid, iterBest.summary.netReturn);
+            } else {
+              const streak = (familyStagnationStreak.get(fid) ?? 0) + 1;
+              familyStagnationStreak.set(fid, streak);
+
+              if (streak >= stagnationRetireThreshold && !skippedFamilyIds.has(fid)) {
+                skippedFamilyIds.add(fid);
+                await log(`[auto-research] retiring family ${fid} after ${streak} stagnant iterations (no improvement)`);
+              }
+            }
+
+            const iterCount = familyIterationCounts.get(fid) ?? 0;
+            if (iterCount >= familyIterationBudget && !skippedFamilyIds.has(fid)) {
+              skippedFamilyIds.add(fid);
+              await log(`[auto-research] retiring family ${fid} after exhausting iteration budget (${iterCount}/${familyIterationBudget})`);
+            }
+          }
         }
 
         if (evaluations.every((evaluation) => evaluation.summary.tradeCount === 0)) {
@@ -3060,7 +3073,9 @@ export function createAutoResearchOrchestrator(deps: {
             codeMutationResults: normalizedCodeMutationResults,
             validationResults,
             iteration,
-            blockCatalog
+            blockCatalog,
+            familyStagnationStreak,
+            familyIterationCounts
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -3077,7 +3092,7 @@ export function createAutoResearchOrchestrator(deps: {
           await log("[auto-research] review continued under objective governance.");
         }
         if (config.loopVersion === "v2") {
-          await appendLineageEvent({
+          await safeAppendLineageEvent({
             outputDir: config.outputDir,
             event: {
               eventId: `${lineage.lineageId}-review-${iteration}`,
@@ -3239,12 +3254,27 @@ export function createAutoResearchOrchestrator(deps: {
             );
             if (uncoveredFamilies.length === 0) {
               const skippedCount = skippedFamilyIds.size;
-              outcome = "completed";
-              outcomeReason = skippedCount > 0
-                ? `${promotedFamilyIds.size} block families validated, ${skippedCount} skipped (0-trade).`
-                : `All ${blockFamilyIds.size} block families validated.`;
+              const stagnatedCount = [...skippedFamilyIds].filter((fid) => (familyStagnationStreak.get(fid) ?? 0) >= stagnationRetireThreshold).length;
+              const zeroTradeCount = [...skippedFamilyIds].filter((fid) => (blockFamilyConsecutiveZeroTrades.get(fid) ?? 0) >= CONSECUTIVE_ZERO_TRADE_SKIP_THRESHOLD).length;
+              const budgetExhaustedCount = [...skippedFamilyIds].filter((fid) => (familyIterationCounts.get(fid) ?? 0) >= familyIterationBudget).length;
+              const blockSummary = `${promotedFamilyIds.size} block families validated, ${skippedCount} skipped`
+                + (stagnatedCount > 0 ? ` (${stagnatedCount} stagnated)` : "")
+                + (zeroTradeCount > 0 ? ` (${zeroTradeCount} 0-trade)` : "")
+                + (budgetExhaustedCount > 0 ? ` (${budgetExhaustedCount} budget-exhausted)` : "")
+                + `.`;
+
+              if (isContinuousMode && blockCatalog.blocks.length > 0) {
+                await log(`[auto-research] block stage completed: ${blockSummary} Transitioning to portfolio stage.`);
+                // Continuous mode: transition to portfolio stage by exiting with success
+                // The daemon will restart and index.ts auto-chaining will pick up the portfolio stage
+                outcome = "completed";
+                outcomeReason = `Block stage completed. ${blockSummary} Portfolio stage will be started by daemon.`;
+              } else {
+                outcome = "completed";
+                outcomeReason = blockSummary;
+              }
               break;
-            } else if (iteration >= config.iterations && promotedFamilyIds.size > 0) {
+            } else if (!isContinuousMode && iteration >= config.iterations && promotedFamilyIds.size > 0) {
               outcome = "completed";
               outcomeReason = `Max iterations reached. ${promotedFamilyIds.size}/${blockFamilyIds.size} families promoted. Uncovered: ${uncoveredFamilies.join(",")}.`;
               break;
@@ -3271,6 +3301,27 @@ export function createAutoResearchOrchestrator(deps: {
           outcome = "completed";
           outcomeReason = `Run stopped after ${noTradeIterations} no-trade iterations.`;
           break;
+        }
+
+        // Clean old iteration artifacts to prevent disk bloat
+        if (isContinuousMode && iteration % 5 === 0) {
+          try {
+            const { cleanIterationArtifacts } = await import("./artifact-cleanup.js");
+            await cleanIterationArtifacts({ outputDir: config.outputDir, keepDays: 3, log: (msg) => log(msg) });
+          } catch { /* best-effort */ }
+        }
+
+        // WAL checkpoint to prevent unbounded WAL growth
+        try {
+          const { walCheckpoint } = await import("../sqlite.js");
+          walCheckpoint();
+        } catch { /* best-effort */ }
+
+        // Cooldown between iterations: let GC run and CPU/memory stabilize
+        if (isContinuousMode) {
+          const iterDurationMs = Date.now() - iterationStartedAt;
+          const cooldownMs = Math.min(10_000, Math.max(2_000, Math.floor(iterDurationMs * 0.05)));
+          await new Promise((resolve) => setTimeout(resolve, cooldownMs));
         }
         }
 
@@ -3355,7 +3406,7 @@ export function createAutoResearchOrchestrator(deps: {
         }
 
         if (config.loopVersion === "v2") {
-          await appendLineageEvent({
+          await safeAppendLineageEvent({
             outputDir: config.outputDir,
             event: {
               eventId: `${lineage.lineageId}-completed-${Date.now()}`,
@@ -3371,6 +3422,23 @@ export function createAutoResearchOrchestrator(deps: {
               }
             }
           });
+        }
+
+        // Auto-promote top candidates to paper-trading DB
+        if (outcome === "completed" && config.autoPromote !== false) {
+          try {
+            const promoteResult = await autoPromoteAndLog({
+              outputDir: config.outputDir,
+              maxCandidates: config.autoPromoteMaxCandidates ?? 5,
+              log: (msg) => log(msg)
+            });
+            if (promoteResult.promoted) {
+              await log(`[auto-research] auto-promoted ${promoteResult.publishedCount} candidates to paper-trading`);
+            }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await log(`[auto-research] auto-promote failed (non-fatal): ${msg}`);
+          }
         }
 
         const finalReport = await queueArtifactWrite(() => persistRunArtifacts({

@@ -63,7 +63,8 @@ export function getDb(): Database.Database {
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 5000");
+  const busyTimeout = parseInt(process.env.FST_SQLITE_BUSY_TIMEOUT ?? "30000", 10);
+  db.pragma(`busy_timeout = ${busyTimeout}`);
 
   // Initialize schema if needed
   try {
@@ -86,4 +87,32 @@ export function closeDb(): void {
 
 export function getDbPath(): string {
   return resolveDbPath();
+}
+
+export function withDbRetry<T>(fn: () => T, maxRetries = 3): T {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return fn();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (/SQLITE_BUSY|database is locked/i.test(msg) && attempt < maxRetries) {
+        const delayMs = 1000 * 2 ** attempt + Math.floor(Math.random() * 500);
+        console.warn(`[sqlite] BUSY retry attempt=${attempt + 1}/${maxRetries} delay=${delayMs}ms`);
+        const start = Date.now();
+        while (Date.now() - start < delayMs) { /* spin-wait for sync better-sqlite3 */ }
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("withDbRetry: unreachable");
+}
+
+export function walCheckpoint(): void {
+  try {
+    const database = getDb();
+    database.pragma("wal_checkpoint(PASSIVE)");
+  } catch (error) {
+    console.warn(`[sqlite] WAL checkpoint failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

@@ -1,0 +1,30 @@
+# FST Auto-Research Daemon — systemd user service
+#
+# Installation:
+#   mkdir -p ~/.config/systemd/user
+#   cp fst-research.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable fst-research
+#   systemctl --user start fst-research
+#
+# Logs:
+#   journalctl --user -u fst-research -f
+#
+# WSL2 auto-start (add to /etc/wsl.conf):
+#   [boot]
+#   command = su - eugene -c "systemctl --user start fst-research"
+
+[Unit]
+Description=FST Auto-Research Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/eugene/git/fst/research/backtester
+ExecStart=/usr/bin/node --import tsx src/index.ts --auto-research --daemon --continuous --stage block --auto-research-loop v2
+Restart=always
+RestartSec=30
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target

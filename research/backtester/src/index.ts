@@ -1,3 +1,4 @@
+import os from "node:os";
 import {
   closeDb,
   getCandidateMarketsWithMinimumCandles,
@@ -286,7 +287,8 @@ async function main(): Promise<void> {
     ? "holdout"
     : "walk-forward";
   const autoResearchIterations = Number.parseInt(getOption(process.argv, "--auto-research-iterations") ?? "3", 10);
-  const autoResearchCandidates = Number.parseInt(getOption(process.argv, "--auto-research-candidates") ?? "3", 10);
+  const defaultCandidates = os.totalmem() <= 8 * 1024 ** 3 ? 2 : 3;
+  const autoResearchCandidates = Number.parseInt(getOption(process.argv, "--auto-research-candidates") ?? String(defaultCandidates), 10);
   const autoResearchParallelism = Number.parseInt(
     getOption(process.argv, "--auto-research-parallelism") ?? String(Math.max(1, autoResearchCandidates)),
     10
@@ -312,6 +314,7 @@ async function main(): Promise<void> {
   const autoResearchAllowDataCollection = process.argv.includes("--auto-research-allow-data-collection");
   const autoResearchAllowFeatureCache = process.argv.includes("--auto-research-allow-feature-cache");
   const autoResearchAllowCodeMutation = process.argv.includes("--auto-research-allow-code-mutation");
+  const autoResearchAllowStaleData = process.argv.includes("--allow-stale-data");
   const autoResearchMinTradesOption = getOption(process.argv, "--auto-research-min-trades");
   const autoResearchMinTrades = autoResearchMinTradesOption
     ? Number.parseInt(autoResearchMinTradesOption, 10)
@@ -358,6 +361,23 @@ async function main(): Promise<void> {
       ? Number.parseFloat(autoResearchCandidateDiversificationMinDistanceOption)
       : undefined;
   const autoResearchLoopVersion = getOption(process.argv, "--auto-research-loop") === "v2" ? "v2" : "v1";
+  const autoResearchContinuousMode = process.argv.includes("--continuous");
+  const autoResearchMaxRunDurationOption = getOption(process.argv, "--max-run-duration-ms");
+  const autoResearchMaxRunDurationMs = autoResearchMaxRunDurationOption
+    ? Number.parseInt(autoResearchMaxRunDurationOption, 10)
+    : undefined;
+  const autoResearchIterationTimeoutOption = getOption(process.argv, "--iteration-timeout-ms");
+  const autoResearchIterationTimeoutMs = autoResearchIterationTimeoutOption
+    ? Number.parseInt(autoResearchIterationTimeoutOption, 10)
+    : undefined;
+  const autoResearchFamilyBudgetOption = getOption(process.argv, "--family-iteration-budget");
+  const autoResearchFamilyIterationBudget = autoResearchFamilyBudgetOption
+    ? Number.parseInt(autoResearchFamilyBudgetOption, 10)
+    : undefined;
+  const autoResearchStagnationThresholdOption = getOption(process.argv, "--stagnation-retire-threshold");
+  const autoResearchStagnationRetireThreshold = autoResearchStagnationThresholdOption
+    ? Number.parseInt(autoResearchStagnationThresholdOption, 10)
+    : undefined;
   const parametersJson = getOption(process.argv, "--parameters-json");
   const benchmarkMarketCode = getOption(process.argv, "--benchmark-market");
   const maxPositions = Number.parseInt(getOption(process.argv, "--max-positions") ?? "5", 10);
@@ -417,7 +437,24 @@ async function main(): Promise<void> {
     );
   }
 
+  const isDaemonMode = process.argv.includes("--daemon");
+
   try {
+    if (autoResearch && isDaemonMode) {
+      const { runDaemon } = await import("./auto-research/daemon.js");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(resolvedAutoResearchOutput, { recursive: true });
+      const orchArgs = process.argv.slice(2).filter((arg) => arg !== "--daemon");
+      await runDaemon({
+        orchArgs,
+        outputDir: resolvedAutoResearchOutput,
+        heartbeatTimeoutMs: autoResearchIterationTimeoutMs
+          ? autoResearchIterationTimeoutMs * 3
+          : 30 * 60 * 1000 // default 30min — detect stuck iterations even without explicit timeout
+      });
+      return;
+    }
+
     if (autoResearch) {
       const llmClient = new CliResearchLlmClient({
         provider: llmProvider,
@@ -446,6 +483,7 @@ async function main(): Promise<void> {
         allowDataCollection: autoResearchAllowDataCollection,
         allowFeatureCacheBuild: autoResearchAllowFeatureCache,
         allowCodeMutation: autoResearchAllowCodeMutation,
+        allowStaleData: autoResearchAllowStaleData || undefined,
         minTradesForPromotion:
           typeof autoResearchMinTrades === "number" ? Math.max(0, autoResearchMinTrades) : undefined,
         minNetReturnForPromotion: autoResearchMinNetReturn,
@@ -474,7 +512,12 @@ async function main(): Promise<void> {
           Number.isFinite(autoResearchCandidateDiversificationMinDistance)
             ? Math.max(0, autoResearchCandidateDiversificationMinDistance)
             : undefined,
-        loopVersion: autoResearchLoopVersion
+        loopVersion: autoResearchLoopVersion,
+        continuousMode: autoResearchContinuousMode || undefined,
+        maxRunDurationMs: autoResearchMaxRunDurationMs,
+        iterationTimeoutMs: autoResearchIterationTimeoutMs,
+        familyIterationBudget: autoResearchFamilyIterationBudget,
+        stagnationRetireThreshold: autoResearchStagnationRetireThreshold
       });
 
       if (autoResearchStage === "auto") {
@@ -534,7 +577,12 @@ async function main(): Promise<void> {
                   Number.isFinite(autoResearchCandidateDiversificationMinDistance)
                     ? Math.max(0, autoResearchCandidateDiversificationMinDistance)
                     : undefined,
-                loopVersion: autoResearchLoopVersion
+                loopVersion: autoResearchLoopVersion,
+                continuousMode: autoResearchContinuousMode || undefined,
+                maxRunDurationMs: autoResearchMaxRunDurationMs,
+                iterationTimeoutMs: autoResearchIterationTimeoutMs,
+                familyIterationBudget: autoResearchFamilyIterationBudget,
+                stagnationRetireThreshold: autoResearchStagnationRetireThreshold
               });
               console.log(JSON.stringify(portfolioReport, null, 2));
               return;

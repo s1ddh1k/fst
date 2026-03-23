@@ -63,6 +63,15 @@ function inferBlockMetadata(blockFamilyId: string): Pick<
     };
   }
 
+  if (blockFamilyId.includes("bb-reversion") || blockFamilyId.includes("bb-rsi-confirmed-reversion")) {
+    return {
+      strategyType: "reversion",
+      family: "meanreversion",
+      sleeveId: "reversion",
+      regimeGate: { allowedRegimes: ALL_REGIMES }
+    };
+  }
+
   if (blockFamilyId.includes("rangedown")) {
     return {
       strategyType: "reversion",
@@ -89,6 +98,10 @@ function normalizeCatalog(input: unknown): ValidatedBlockCatalog {
     blocks: blocks as ValidatedBlock[],
     updatedAt: typeof parsed?.updatedAt === "string" ? parsed.updatedAt : nowIso()
   };
+}
+
+export function loadValidatedBlockCatalog(catalogJson: string): ValidatedBlockCatalog {
+  return normalizeCatalog(JSON.parse(catalogJson));
 }
 
 export function createEmptyBlockCatalog(): ValidatedBlockCatalog {

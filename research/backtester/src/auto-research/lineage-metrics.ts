@@ -270,3 +270,18 @@ export function toResearchDriftMetrics(
     )
   };
 }
+
+/**
+ * Detect overall research convergence from drift metrics.
+ * Returns true when the research is no longer making meaningful progress:
+ * - High stagnation (70%+ of iterations show no improvement)
+ * - Low novelty (families barely changing)
+ * - Performance drift near zero or negative
+ */
+export function isResearchConverged(drift: ResearchDriftMetrics): boolean {
+  return (
+    drift.stagnationScore > 0.7 &&
+    drift.noveltyDrift < 0.1 &&
+    Math.abs(drift.performanceDrift) < 0.01
+  );
+}

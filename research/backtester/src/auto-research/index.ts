@@ -31,3 +31,4 @@ export * from "./block-evaluator.js";
 export * from "./block-catalog.js";
 export * from "./portfolio-assembler.js";
 export * from "./portfolio-composition-families.js";
+export * from "./auto-promote.js";

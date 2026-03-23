@@ -78,9 +78,64 @@ export function governReviewDecision(params: {
   evaluations: CandidateBacktestEvaluation[];
   config: AutoResearchRunConfig;
   iteration: number;
+  familyStagnationStreak?: Map<string, number>;
+  familyIterationCounts?: Map<string, number>;
 }): ReviewDecision {
   const { review, evaluations, config, iteration } = params;
-  const isFinalIteration = iteration >= config.iterations;
+  const isContinuousMode = config.continuousMode === true;
+  const isFinalIteration = !isContinuousMode && iteration >= config.iterations;
+
+  // Anti self-bias: force stop when stagnation is severe and no candidate passes gate
+  if (
+    review.verdict === "keep_searching" &&
+    params.familyStagnationStreak &&
+    params.familyStagnationStreak.size > 0
+  ) {
+    const stagnationThreshold = config.stagnationRetireThreshold ?? 8;
+    const evaluatedFamilies = new Set(evaluations.map((e) => e.candidate.familyId));
+    const allStagnant = [...evaluatedFamilies].every(
+      (fid) => (params.familyStagnationStreak!.get(fid) ?? 0) >= stagnationThreshold
+    );
+    const topPromotable = findTopPromotableEvaluation(evaluations, config);
+
+    if (allStagnant && !topPromotable) {
+      return appendReviewObservation(
+        {
+          ...review,
+          verdict: "stop_no_edge",
+          promotedCandidateId: undefined,
+          nextCandidates: [],
+          summary: `${review.summary} Anti self-bias: all evaluated families stagnant for ${stagnationThreshold}+ iterations with no promotable candidate.`.trim()
+        },
+        `Anti self-bias override: forced stop_no_edge due to universal stagnation across ${evaluatedFamilies.size} families.`
+      );
+    }
+
+    // Force stop on families with negative returns after half their budget
+    if (params.familyIterationCounts) {
+      const budget = config.familyIterationBudget ?? 20;
+      const halfBudget = Math.floor(budget / 2);
+      for (const fid of evaluatedFamilies) {
+        const iterCount = params.familyIterationCounts.get(fid) ?? 0;
+        if (iterCount >= halfBudget) {
+          const familyEvals = evaluations.filter((e) => e.candidate.familyId === fid);
+          const bestReturn = Math.max(...familyEvals.map((e) => e.summary.netReturn));
+          if (bestReturn < 0) {
+            return appendReviewObservation(
+              {
+                ...review,
+                verdict: "stop_no_edge",
+                promotedCandidateId: undefined,
+                nextCandidates: [],
+                summary: `${review.summary} Anti self-bias: family ${fid} negative after half budget.`.trim()
+              },
+              `Anti self-bias override: family ${fid} still negative (best=${(bestReturn * 100).toFixed(2)}%) after ${iterCount} iterations (half-budget=${halfBudget}). Forced stop.`
+            );
+          }
+        }
+      }
+    }
+  }
   const topPromotable = findTopPromotableEvaluation(evaluations, config);
   const requestedPromoted = review.promotedCandidateId
     ? evaluations.find((item) => item.candidate.candidateId === review.promotedCandidateId)
@@ -255,17 +310,17 @@ function buildObjectiveReview(params: {
     summary: params.summary
   });
 
+  const isContinuousMode = params.config.continuousMode === true;
+  const isFinalIteration = !isContinuousMode && params.iteration >= params.config.iterations;
+
   return {
     summary: params.summary,
-    verdict: params.iteration >= params.config.iterations ? "stop_no_edge" : "keep_searching",
+    verdict: isFinalIteration ? "stop_no_edge" : "keep_searching",
     promotedCandidateId: undefined,
     nextPreparation: continuation.preparation,
     proposedFamilies: [],
     codeTasks: [],
-    nextCandidates:
-      params.iteration >= params.config.iterations
-        ? []
-        : continuation.candidates,
+    nextCandidates: isFinalIteration ? [] : continuation.candidates,
     retireCandidateIds: [],
     observations: [
       "Objective governance review was used because the LLM review path did not return a valid response."
@@ -300,6 +355,8 @@ export async function generateIterationReview(params: {
   }>;
   iteration: number;
   blockCatalog?: ValidatedBlockCatalog;
+  familyStagnationStreak?: Map<string, number>;
+  familyIterationCounts?: Map<string, number>;
 }): Promise<ReviewedIterationResult> {
   let review: ReviewDecision | undefined;
   let reviewFailureMessage: string | undefined;
@@ -349,7 +406,9 @@ export async function generateIterationReview(params: {
       review,
       evaluations: params.evaluations,
       config: params.config,
-      iteration: params.iteration
+      iteration: params.iteration,
+      familyStagnationStreak: params.familyStagnationStreak,
+      familyIterationCounts: params.familyIterationCounts
     });
     review = ensureNextCandidatesForKeepSearching({
       review,

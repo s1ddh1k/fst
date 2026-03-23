@@ -1,6 +1,27 @@
 import { spawn } from "node:child_process";
 
-const RATE_LIMIT_RE = /rate.limit|429|quota|overloaded/i;
+export type LlmErrorCategory = "RATE_LIMIT" | "AUTH" | "TRANSIENT" | "PERMANENT";
+
+const AUTH_RE = /401|403|unauthorized|forbidden|invalid.api.key|authentication|unauthenticated/i;
+const RATE_LIMIT_RE = /rate.limit|429|quota|overloaded|too.many.requests/i;
+const TRANSIENT_RE = /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|EPIPE|EAI_AGAIN|socket hang up|network|EHOSTUNREACH/i;
+
+export function classifyLlmError(stderr: string, stdout = ""): LlmErrorCategory {
+  const combined = `${stderr} ${stdout}`;
+  if (AUTH_RE.test(combined)) return "AUTH";
+  if (RATE_LIMIT_RE.test(combined)) return "RATE_LIMIT";
+  if (TRANSIENT_RE.test(combined)) return "TRANSIENT";
+  return "PERMANENT";
+}
+
+const DEFAULT_PROVIDER_CHAIN: CliLlmProvider[] = ["codex", "claude", "gemini"];
+
+export function resolveFallbackChain(primary?: string): CliLlmProvider[] {
+  const p = (primary ?? process.env.FST_LLM_PROVIDER ?? "codex") as CliLlmProvider;
+  if (!DEFAULT_PROVIDER_CHAIN.includes(p)) return DEFAULT_PROVIDER_CHAIN;
+  return [p, ...DEFAULT_PROVIDER_CHAIN.filter((x) => x !== p)];
+}
+
 const REASONING_EFFORTS = new Set([
   "minimal",
   "low",
@@ -8,7 +29,7 @@ const REASONING_EFFORTS = new Set([
   "high",
   "xhigh"
 ]);
-const MAX_RATE_LIMIT_RETRIES = 3;
+const MAX_RATE_LIMIT_RETRIES = 6;
 const RATE_LIMIT_BASE_DELAY_MS = 5_000;
 
 const ENV_ALLOWED_EXACT = new Set([
@@ -534,36 +555,48 @@ export async function llmText(prompt: string, options: Omit<CliLlmOptions, "outp
     output: number;
   };
 }> {
-  const provider = options.provider ?? process.env.FST_LLM_PROVIDER ?? "codex";
-  const outputFormat: CliOutputFormat = provider === "codex" ? "text" : "stream-json";
+  const chain = resolveFallbackChain(options.provider);
+  const errors: string[] = [];
 
-  for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
-    const result = await spawnLlm(prompt, {
-      ...options,
-      provider,
-      outputFormat
-    });
+  for (const provider of chain) {
+    const outputFormat: CliOutputFormat = provider === "codex" ? "text" : "stream-json";
 
-    if (result.status === "rate_limited") {
-      if (attempt < MAX_RATE_LIMIT_RETRIES) {
+    for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
+      const result = await spawnLlm(prompt, {
+        ...options,
+        provider,
+        outputFormat
+      });
+
+      if (result.status === "done") {
+        if (provider !== chain[0]) {
+          console.warn(`[llm] succeeded with fallback provider=${provider}`);
+        }
+        return {
+          text: result.stdout.trim(),
+          tokenUsage: result.tokenUsage
+        };
+      }
+
+      const category = result.status === "rate_limited"
+        ? "RATE_LIMIT" as LlmErrorCategory
+        : classifyLlmError(result.stderr, result.stdout);
+
+      if (category === "RATE_LIMIT" && attempt < MAX_RATE_LIMIT_RETRIES) {
         const delay = RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt;
+        console.warn(`[llm] rate limited provider=${provider} attempt=${attempt + 1} delay=${delay}ms`);
         await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
       }
-      throw new Error("RATE_LIMITED");
-    }
 
-    if (result.status !== "done") {
-      throw new Error(`LLM ${result.status}: ${result.stderr.slice(0, 200)}`);
+      // AUTH, TRANSIENT, PERMANENT, or exhausted RATE_LIMIT retries → try next provider
+      errors.push(`${provider}:${category}:${result.stderr.slice(0, 100)}`);
+      console.warn(`[llm] ${category} on provider=${provider}, trying next`);
+      break;
     }
-
-    return {
-      text: result.stdout.trim(),
-      tokenUsage: result.tokenUsage
-    };
   }
 
-  throw new Error("LLM failed after max retries");
+  throw new Error(`LLM_ALL_PROVIDERS_EXHAUSTED: ${errors.join(" | ")}`);
 }
 
 export async function llmJson(prompt: string, options: Omit<CliLlmOptions, "outputFormat"> = {}): Promise<{
