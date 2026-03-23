@@ -109,29 +109,19 @@ export async function validateGeneratedStrategy(params: {
     return { ok: false, results };
   }
 
-  // Step 2: Syntax check via tsx
-  try {
-    await runCommand(process.execPath, ["--import", "tsx", "--check", params.filePath], params.cwd);
-    results.push({ step: "syntax_check", passed: true, detail: "No syntax errors" });
-  } catch (error) {
-    results.push({ step: "syntax_check", passed: false, detail: error instanceof Error ? error.message.slice(0, 300) : String(error) });
-    return { ok: false, results };
-  }
-
-  // Step 3: Smoke test — import module and validate shape
+  // Step 2: Smoke test — import module in subprocess and validate shape
+  // (skipping node --check which doesn't work with TypeScript)
   try {
     const smokeScript = `
-      const mod = await import("file://${params.filePath}");
+      const rawMod = await import("file://${params.filePath}?t=" + Date.now());
+      // tsx may wrap exports under .default
+      const mod = rawMod.createStrategy ? rawMod : (rawMod.default ?? rawMod);
       const valid = typeof mod.createStrategy === "function" && mod.metadata != null;
       if (!valid) {
-        process.stderr.write("Missing createStrategy function or metadata export");
+        process.stderr.write("Missing createStrategy or metadata. Keys: " + Object.keys(rawMod).join(","));
         process.exit(1);
       }
-      // Try calling createStrategy with dummy params
-      const strategy = mod.createStrategy({
-        strategyId: "smoke-test",
-        parameters: {}
-      });
+      const strategy = mod.createStrategy({ strategyId: "smoke-test", parameters: {} });
       if (!strategy || typeof strategy.generateSignal !== "function") {
         process.stderr.write("createStrategy did not return a valid Strategy object");
         process.exit(1);

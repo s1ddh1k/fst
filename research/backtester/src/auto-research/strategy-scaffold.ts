@@ -55,7 +55,7 @@ import type {
   StrategySignal,
   StrategyTimeframe
 } from "../../../../packages/shared/src/index.js";
-import type { Candle } from "../../types.js";
+import type { Candle } from "../types.js";
 import type { GeneratedStrategyModule, GeneratedStrategyMetadata } from "../auto-research/strategy-template.js";
 
 // Available indicator functions:

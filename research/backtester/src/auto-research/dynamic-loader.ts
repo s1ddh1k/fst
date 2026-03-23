@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { isValidGeneratedModule, type GeneratedStrategyModule } from "./strategy-template.js";
@@ -6,22 +6,12 @@ import { isValidGeneratedModule, type GeneratedStrategyModule } from "./strategy
 const moduleCache = new Map<string, GeneratedStrategyModule>();
 
 function findGeneratedStrategiesDir(): string {
-  // Walk up from cwd to find research/backtester/src/generated-strategies
   let dir = process.cwd();
   for (let i = 0; i < 10; i++) {
     const candidate = path.join(dir, "research", "backtester", "src", "generated-strategies");
-    try {
-      const { existsSync } = require("node:fs");
-      if (existsSync(candidate)) return candidate;
-    } catch {
-      // fallback: just try the path
-    }
-    // Also check if we're inside research/backtester
+    if (existsSync(candidate)) return candidate;
     const localCandidate = path.join(dir, "src", "generated-strategies");
-    try {
-      const { existsSync } = require("node:fs");
-      if (existsSync(localCandidate)) return localCandidate;
-    } catch {}
+    if (existsSync(localCandidate)) return localCandidate;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
@@ -42,18 +32,17 @@ export async function listDynamicStrategies(): Promise<string[]> {
 }
 
 export async function loadDynamicStrategy(familyId: string): Promise<GeneratedStrategyModule | null> {
-  // Check cache
   if (moduleCache.has(familyId)) return moduleCache.get(familyId)!;
 
   const dir = findGeneratedStrategiesDir();
-  // Try exact match, then sanitized match
   const candidates = [
     path.join(dir, `${familyId}.ts`),
-    path.join(dir, `${familyId.replace(/^block:/, "")}.ts`),
+    path.join(dir, `${familyId.replace(/^(block:|generated:)/, "")}.ts`),
     path.join(dir, `${familyId.replace(/[^a-zA-Z0-9-]/g, "-")}.ts`)
   ];
 
   for (const filePath of candidates) {
+    if (!existsSync(filePath)) continue;
     try {
       const mod = await importTsModule(filePath);
       if (isValidGeneratedModule(mod)) {
@@ -68,55 +57,26 @@ export async function loadDynamicStrategy(familyId: string): Promise<GeneratedSt
   return null;
 }
 
+function unwrapModule(mod: Record<string, unknown>): unknown {
+  // tsx wraps named exports under mod.default in some cases
+  if (mod.createStrategy) return mod;
+  if (mod.default && typeof mod.default === "object") {
+    const def = mod.default as Record<string, unknown>;
+    if (def.createStrategy) return def;
+  }
+  // CommonJS-style wrapping
+  if (mod["module.exports"] && typeof mod["module.exports"] === "object") {
+    const cjs = mod["module.exports"] as Record<string, unknown>;
+    if (cjs.createStrategy) return cjs;
+  }
+  return mod;
+}
+
 async function importTsModule(filePath: string): Promise<unknown> {
-  const { existsSync } = await import("node:fs");
-  if (!existsSync(filePath)) return null;
-
-  // Use tsx to import the module in a subprocess and return the exports
-  const script = `
-    const mod = await import(${JSON.stringify("file://" + filePath)});
-    const result = {
-      hasCreateStrategy: typeof mod.createStrategy === "function",
-      hasMetadata: mod.metadata != null,
-      metadata: mod.metadata,
-    };
-    process.stdout.write(JSON.stringify(result));
-  `;
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
-      stdio: ["ignore", "pipe", "pipe"],
-      cwd: path.dirname(filePath),
-      timeout: 10_000
-    });
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
-    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
-
-    child.on("exit", async (code) => {
-      if (code !== 0) {
-        reject(new Error(`Failed to import ${filePath}: ${stderr.slice(0, 200)}`));
-        return;
-      }
-      try {
-        const info = JSON.parse(stdout);
-        if (!info.hasCreateStrategy || !info.hasMetadata) {
-          reject(new Error(`Module ${filePath} missing createStrategy or metadata export`));
-          return;
-        }
-        // For actual usage, we need the real module. Use dynamic import directly.
-        // The subprocess was just validation. Now import for real:
-        const realMod = await import("file://" + filePath);
-        resolve(realMod);
-      } catch (e) {
-        reject(e);
-      }
-    });
-
-    child.on("error", reject);
-  });
+  // Cache-bust by appending timestamp query param
+  const url = `file://${filePath}?t=${Date.now()}`;
+  const rawMod = await import(url);
+  return unwrapModule(rawMod as Record<string, unknown>);
 }
 
 export function clearDynamicCache(): void {

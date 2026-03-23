@@ -2596,14 +2596,6 @@ export function createAutoResearchOrchestrator(deps: {
                 history: iterations,
                 journalSummary
               });
-              const discoveryResult = await deps.llmClient.proposeCandidates({
-                config: { ...config, candidatesPerIteration: 1 },
-                families: runtimeFamilies,
-                marketCodes,
-                history: iterations
-              }).catch(() => null);
-
-              // Try to get discovery ideas via direct LLM call
               type DiscoveryIdea = { ideaId: string; title: string; thesis: string; mechanism: string; indicators: string[] };
               let discoveryBatch: { ideas: DiscoveryIdea[] } | null = null;
               try {
@@ -2617,31 +2609,42 @@ export function createAutoResearchOrchestrator(deps: {
               }
 
               if (discoveryBatch && discoveryBatch.ideas.length > 0) {
-                const topIdea = discoveryBatch.ideas[0]!;
-                await log(`[auto-research] top idea: ${topIdea.title} — ${topIdea.thesis}`);
+                await log(`[auto-research] discovered ${discoveryBatch.ideas.length} ideas`);
+                const { llmJson: llmJsonCall, llmText: llmTextCall } = await import("./cli-llm.js");
 
-                // Step 2: Design
-                try {
-                  const designPrompt = buildDesignPrompt({ idea: topIdea, config });
-                  const { llmJson: llmJsonDesign } = await import("./cli-llm.js");
-                  const { data: designData } = await llmJsonDesign(designPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
+                // Ensure generated-strategies directory exists
+                const generatedDir = path.join(process.cwd(), "src", "generated-strategies");
+                await mkdir(generatedDir, { recursive: true });
 
-                  if (designData && typeof designData === "object") {
+                // Try each idea until one succeeds
+                for (const idea of discoveryBatch.ideas) {
+                  if (!idea.ideaId || !idea.title) continue;
+                  await log(`[auto-research] trying idea: ${idea.title}`);
+
+                  try {
+                    // Step 2: Design
+                    const designPrompt = buildDesignPrompt({ idea, config });
+                    const { data: designData } = await llmJsonCall(designPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
+                    if (!designData || typeof designData !== "object") continue;
+
                     const design = designData as {
-                      familyId: string; strategyName: string; title: string; thesis: string;
-                      family: "trend" | "breakout" | "micro" | "meanreversion";
-                      sleeveId: string; signalLogicDescription: string;
-                      indicators: string[]; entryLogic: string; exitLogic: string;
-                      parameterSpecs: Array<{ name: string; description: string; min: number; max: number }>;
-                      regimeGate: { allowedRegimes: string[] };
+                      familyId?: string; strategyName?: string; title?: string; thesis?: string;
+                      family?: "trend" | "breakout" | "micro" | "meanreversion";
+                      sleeveId?: string; signalLogicDescription?: string;
+                      indicators?: string[]; entryLogic?: string; exitLogic?: string;
+                      parameterSpecs?: Array<{ name: string; description: string; min: number; max: number }>;
+                      regimeGate?: { allowedRegimes: string[] };
                     };
+
+                    const familyId = design.familyId ?? `generated:${idea.ideaId}`;
+                    const safeName = (design.strategyName ?? `generated-${idea.ideaId}`).replace(/[^a-zA-Z0-9-]/g, "-");
 
                     // Step 3: Generate scaffold
                     const scaffold = generateStrategyScaffold({
-                      familyId: design.familyId ?? `generated:${topIdea.ideaId}`,
-                      strategyName: design.strategyName ?? `generated-${topIdea.ideaId}`,
-                      title: design.title ?? topIdea.title,
-                      thesis: design.thesis ?? topIdea.thesis,
+                      familyId,
+                      strategyName: safeName,
+                      title: design.title ?? idea.title,
+                      thesis: design.thesis ?? idea.thesis,
                       family: design.family ?? "meanreversion",
                       sleeveId: design.sleeveId ?? "reversion",
                       decisionTimeframe: config.timeframe,
@@ -2652,13 +2655,13 @@ export function createAutoResearchOrchestrator(deps: {
                       indicators: Array.isArray(design.indicators) ? design.indicators : []
                     });
 
-                    // Step 4: Ask LLM to fill in the logic
+                    // Step 4: Ask LLM to implement
                     const implPrompt = buildImplementationPrompt({
                       design: {
-                        familyId: design.familyId ?? `generated:${topIdea.ideaId}`,
-                        strategyName: design.strategyName ?? `generated-${topIdea.ideaId}`,
-                        title: design.title ?? topIdea.title,
-                        thesis: design.thesis ?? topIdea.thesis,
+                        familyId,
+                        strategyName: safeName,
+                        title: design.title ?? idea.title,
+                        thesis: design.thesis ?? idea.thesis,
                         signalLogicDescription: design.signalLogicDescription ?? "",
                         entryLogic: design.entryLogic ?? "",
                         exitLogic: design.exitLogic ?? "",
@@ -2668,43 +2671,42 @@ export function createAutoResearchOrchestrator(deps: {
                       scaffoldCode: scaffold
                     });
 
-                    const { llmText } = await import("./cli-llm.js");
-                    const { text: implementedCode } = await llmText(implPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
-
-                    if (implementedCode && implementedCode.length > 200) {
-                      // Write to generated-strategies directory
-                      const safeName = (design.strategyName ?? `generated-${topIdea.ideaId}`).replace(/[^a-zA-Z0-9-]/g, "-");
-                      const strategyPath = path.join(process.cwd(), "src", "generated-strategies", `${safeName}.ts`);
-                      await writeFile(strategyPath, implementedCode);
-                      await log(`[auto-research] wrote generated strategy: ${strategyPath}`);
-
-                      // Step 5: Validate
-                      const validation = await validateGeneratedStrategy({ filePath: strategyPath, cwd: process.cwd() });
-                      if (validation.ok) {
-                        await log(`[auto-research] strategy validated: ${safeName}`);
-                        // Add to runtime families for subsequent iterations
-                        const newFamilyId = design.familyId ?? `generated:${topIdea.ideaId}`;
-                        const newFamily: StrategyFamilyDefinition = {
-                          familyId: newFamilyId,
-                          strategyName: safeName,
-                          title: design.title ?? topIdea.title,
-                          thesis: design.thesis ?? topIdea.thesis,
-                          timeframe: config.timeframe as "1h" | "15m" | "5m" | "1m",
-                          parameterSpecs: Array.isArray(design.parameterSpecs) ? design.parameterSpecs : [],
-                          guardrails: []
-                        };
-                        runtimeFamilies = [...runtimeFamilies, newFamily];
-                        selectedFamilies = [...selectedFamilies, newFamily];
-                        await log(`[auto-research] added new family: ${newFamilyId} — ${design.title ?? topIdea.title}`);
-                      } else {
-                        await log(`[auto-research] strategy validation failed: ${validation.results.map((r) => `${r.step}=${r.passed}`).join(", ")}`);
-                        try { await rm(strategyPath); } catch { /* best-effort cleanup */ }
-                      }
+                    const { text: implementedCode } = await llmTextCall(implPrompt, { provider: config.llmProvider, model: config.llmModel, timeoutMs: config.llmTimeoutMs });
+                    if (!implementedCode || implementedCode.length < 200) {
+                      await log(`[auto-research] idea ${idea.ideaId}: implementation too short (${implementedCode?.length ?? 0} chars)`);
+                      continue;
                     }
+
+                    // Step 5: Write + Validate
+                    const strategyPath = path.join(generatedDir, `${safeName}.ts`);
+                    await writeFile(strategyPath, implementedCode);
+
+                    const validation = await validateGeneratedStrategy({ filePath: strategyPath, cwd: process.cwd() });
+                    if (validation.ok) {
+                      await log(`[auto-research] strategy validated: ${safeName}`);
+                      const newFamily: StrategyFamilyDefinition = {
+                        familyId,
+                        strategyName: safeName,
+                        title: design.title ?? idea.title,
+                        thesis: design.thesis ?? idea.thesis,
+                        timeframe: config.timeframe as "1h" | "15m" | "5m" | "1m",
+                        parameterSpecs: Array.isArray(design.parameterSpecs) ? design.parameterSpecs : [],
+                        guardrails: []
+                      };
+                      runtimeFamilies = [...runtimeFamilies, newFamily];
+                      selectedFamilies = [...selectedFamilies, newFamily];
+                      await log(`[auto-research] added new family: ${familyId}`);
+                      break; // Successfully created one strategy, move on
+                    } else {
+                      await log(`[auto-research] validation failed for ${safeName}: ${validation.results.map((r) => `${r.step}=${r.passed}`).join(", ")}`);
+                      try { await rm(strategyPath); } catch { /* cleanup */ }
+                    }
+                  } catch (error) {
+                    await log(`[auto-research] idea ${idea.ideaId} failed: ${error instanceof Error ? error.message : String(error)}`);
                   }
-                } catch (error) {
-                  await log(`[auto-research] design/implement failed: ${error instanceof Error ? error.message : String(error)}`);
                 }
+              } else {
+                await log("[auto-research] discovery returned no ideas");
               }
             } catch (error) {
               await log(`[auto-research] discovery cycle failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
