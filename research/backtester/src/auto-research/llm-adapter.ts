@@ -801,7 +801,12 @@ export class CliResearchLlmClient implements ResearchLlmClient {
     const prompt =
       promptArtifacts?.prompt ??
       (params.config.researchStage === "block"
-        ? buildBlockProposalPrompt(params)
+        ? buildBlockProposalPrompt({
+            ...params,
+            previousDiagnosis: params.history.length > 0
+              ? { summary: params.history[params.history.length - 1]!.review.summary, observations: params.history[params.history.length - 1]!.review.observations }
+              : undefined
+          })
         : params.config.researchStage === "portfolio" && params.blockCatalog
           ? buildPortfolioCompositionProposalPrompt({ ...params, blockCatalog: params.blockCatalog })
           : buildProposalPrompt(params));

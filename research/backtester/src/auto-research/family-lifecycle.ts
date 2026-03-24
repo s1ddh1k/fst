@@ -2,15 +2,27 @@ import type { CandidateBacktestEvaluation, ResearchIterationRecord } from "./typ
 
 export class FamilyLifecycleTracker {
   private stagnationStreak = new Map<string, number>();
+  private consecutiveNegative = new Map<string, number>();
   private iterationCounts = new Map<string, number>();
   private bestNetReturn = new Map<string, number>();
   private retired = new Set<string>();
+  private globalBestNet = -Infinity;
+  private globalBestRepeatCount = 0;
   private readonly stagnationThreshold: number;
   private readonly iterationBudget: number;
+  private readonly negativeRetireThreshold: number;
+  private readonly globalConvergenceThreshold: number;
 
-  constructor(params: { stagnationThreshold?: number; iterationBudget?: number }) {
+  constructor(params: {
+    stagnationThreshold?: number;
+    iterationBudget?: number;
+    negativeRetireThreshold?: number;
+    globalConvergenceThreshold?: number;
+  }) {
     this.stagnationThreshold = params.stagnationThreshold ?? 8;
     this.iterationBudget = params.iterationBudget ?? 20;
+    this.negativeRetireThreshold = params.negativeRetireThreshold ?? 4;
+    this.globalConvergenceThreshold = params.globalConvergenceThreshold ?? 3;
   }
 
   restoreFromHistory(
@@ -39,6 +51,12 @@ export class FamilyLifecycleTracker {
         } else {
           this.stagnationStreak.set(fid, (this.stagnationStreak.get(fid) ?? 0) + 1);
         }
+        // Restore consecutive negative
+        if (iterBest && iterBest.summary.netReturn < 0) {
+          this.consecutiveNegative.set(fid, (this.consecutiveNegative.get(fid) ?? 0) + 1);
+        } else {
+          this.consecutiveNegative.set(fid, 0);
+        }
       }
     }
   }
@@ -51,7 +69,20 @@ export class FamilyLifecycleTracker {
     const newlyRetired: string[] = [];
     const families = new Set(evaluations.map((e) => e.candidate.familyId));
 
+    // Track global best convergence
+    const iterGlobalBest = evaluations.sort(compareEvaluations)[0];
+    if (iterGlobalBest) {
+      const net = iterGlobalBest.summary.netReturn;
+      if (Math.abs(net - this.globalBestNet) < EPSILON) {
+        this.globalBestRepeatCount++;
+      } else if (net > this.globalBestNet) {
+        this.globalBestNet = net;
+        this.globalBestRepeatCount = 0;
+      }
+    }
+
     for (const fid of families) {
+      if (this.retired.has(fid)) continue;
       this.iterationCounts.set(fid, (this.iterationCounts.get(fid) ?? 0) + 1);
       const prevBest = this.bestNetReturn.get(fid) ?? -Infinity;
       const iterBest = evaluations
@@ -65,12 +96,25 @@ export class FamilyLifecycleTracker {
       } else {
         const streak = (this.stagnationStreak.get(fid) ?? 0) + 1;
         this.stagnationStreak.set(fid, streak);
-        if (streak >= this.stagnationThreshold && !this.retired.has(fid)) {
+        if (streak >= this.stagnationThreshold) {
           this.retired.add(fid);
           newlyRetired.push(fid);
         }
       }
 
+      // Consecutive negative retirement
+      if (iterBest && iterBest.summary.netReturn < 0) {
+        const negStreak = (this.consecutiveNegative.get(fid) ?? 0) + 1;
+        this.consecutiveNegative.set(fid, negStreak);
+        if (negStreak >= this.negativeRetireThreshold && !this.retired.has(fid)) {
+          this.retired.add(fid);
+          newlyRetired.push(fid);
+        }
+      } else {
+        this.consecutiveNegative.set(fid, 0);
+      }
+
+      // Budget exhaustion
       const count = this.iterationCounts.get(fid) ?? 0;
       if (count >= this.iterationBudget && !this.retired.has(fid)) {
         this.retired.add(fid);
@@ -81,25 +125,19 @@ export class FamilyLifecycleTracker {
     return newlyRetired;
   }
 
-  isRetired(familyId: string): boolean {
-    return this.retired.has(familyId);
+  isGloballyConverged(): boolean {
+    return this.globalBestRepeatCount >= this.globalConvergenceThreshold;
   }
 
-  retire(familyId: string): void {
-    this.retired.add(familyId);
+  resetGlobalConvergence(): void {
+    this.globalBestRepeatCount = 0;
   }
 
-  getRetiredSet(): Set<string> {
-    return this.retired;
-  }
-
-  getStagnationStreak(): Map<string, number> {
-    return this.stagnationStreak;
-  }
-
-  getIterationCounts(): Map<string, number> {
-    return this.iterationCounts;
-  }
+  isRetired(familyId: string): boolean { return this.retired.has(familyId); }
+  retire(familyId: string): void { this.retired.add(familyId); }
+  getRetiredSet(): Set<string> { return this.retired; }
+  getStagnationStreak(): Map<string, number> { return this.stagnationStreak; }
+  getIterationCounts(): Map<string, number> { return this.iterationCounts; }
 
   hasActiveFamily(familyIds: Iterable<string>): boolean {
     for (const fid of familyIds) {
@@ -109,9 +147,15 @@ export class FamilyLifecycleTracker {
   }
 
   getSummary(): string {
-    const entries = [...this.stagnationStreak.entries()]
-      .map(([fid, streak]) => `${fid}:stag=${streak},iter=${this.iterationCounts.get(fid) ?? 0}`)
-      .join(" ");
-    return `retired=${this.retired.size} ${entries}`;
+    const entries = [...this.iterationCounts.entries()]
+      .map(([fid, iter]) => {
+        const stag = this.stagnationStreak.get(fid) ?? 0;
+        const neg = this.consecutiveNegative.get(fid) ?? 0;
+        const best = this.bestNetReturn.get(fid) ?? 0;
+        const status = this.retired.has(fid) ? "RETIRED" : "active";
+        return `${fid}(${status} iter=${iter} stag=${stag} neg=${neg} best=${(best*100).toFixed(2)}%)`;
+      })
+      .join(", ");
+    return entries;
   }
 }

@@ -522,6 +522,7 @@ export function buildBlockProposalPrompt(params: {
   families: StrategyFamilyDefinition[];
   marketCodes: string[];
   history: ResearchIterationRecord[];
+  previousDiagnosis?: { summary: string; observations: string[] };
 }): string {
   return `
 ${AUTO_RESEARCH_SYSTEM_PROMPT}
@@ -551,6 +552,12 @@ ${jsonBlock({
   recentEvaluations: params.history.slice(-2).flatMap(h => h.evaluations.map(buildEvaluationAnalysis))
 })}
 
+${params.previousDiagnosis ? `
+CRITICAL — Previous iteration diagnosis (you MUST address these issues):
+- Summary: ${params.previousDiagnosis.summary}
+- Issues found: ${params.previousDiagnosis.observations.join("; ")}
+Your next candidates MUST fix these specific problems. Do NOT repeat the same mistakes.
+` : ""}
 Task — think like a researcher:
 1. Look at recentEvaluations.diagnosis for each candidate:
    - feesAteProfits=true → reduce trade frequency (widen thresholds, increase rebalanceBars)

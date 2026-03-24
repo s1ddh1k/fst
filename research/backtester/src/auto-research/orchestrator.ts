@@ -2535,9 +2535,14 @@ export function createAutoResearchOrchestrator(deps: {
           const isIterationTimedOut = (): boolean =>
             iterationTimeoutMs > 0 && (Date.now() - iterationStartedAt) >= iterationTimeoutMs;
 
-          // Discovery cycle: every N iterations, explore new strategy ideas
+          // Discovery cycle: every N iterations OR when globally converged
           const discoveryInterval = config.discoveryInterval ?? 5;
-          if (isContinuousMode && discoveryInterval > 0 && iteration > 1 && iteration % discoveryInterval === 0) {
+          const forceDiscovery = lifecycle.isGloballyConverged();
+          if (forceDiscovery) {
+            await log(`[auto-research] global convergence detected — forcing discovery cycle`);
+            lifecycle.resetGlobalConvergence();
+          }
+          if (isContinuousMode && (forceDiscovery || (discoveryInterval > 0 && iteration > 1 && iteration % discoveryInterval === 0))) {
             try {
               await log(`[auto-research] discovery cycle at iteration ${iteration}`);
               const { runDiscoveryCycle } = await import("./discovery-cycle.js");
@@ -2545,6 +2550,10 @@ export function createAutoResearchOrchestrator(deps: {
               if (newFamily) {
                 runtimeFamilies = [...runtimeFamilies, newFamily];
                 selectedFamilies = [...selectedFamilies, newFamily];
+                if (config.researchStage === "block") {
+                  blockFamilyIds.add(newFamily.familyId);
+                  await log(`[auto-research] discovery family ${newFamily.familyId} added to block evaluation`);
+                }
               }
             } catch (error) {
               await log(`[auto-research] discovery cycle failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
@@ -2668,6 +2677,29 @@ export function createAutoResearchOrchestrator(deps: {
             config.candidatesPerIteration,
             config.candidateDiversificationMinDistance ?? DEFAULT_CANDIDATE_DIVERSIFICATION_MIN_DISTANCE
           );
+        }
+
+        // Inject unevaluated families to ensure coverage
+        if (config.researchStage === "block") {
+          const evaluatedFamilyIds = new Set(diversifiedCandidates.map((c) => c.familyId));
+          const unevaluated = [...blockFamilyIds]
+            .filter((fid) => !lifecycle.getIterationCounts().has(fid) && !lifecycle.isRetired(fid) && !evaluatedFamilyIds.has(fid));
+          if (unevaluated.length > 0) {
+            const targetFid = unevaluated[0]!;
+            const familyDef = runtimeFamilies.find((f) => f.familyId === targetFid);
+            if (familyDef) {
+              const midpointParams = Object.fromEntries(
+                familyDef.parameterSpecs.map((p) => [p.name, (p.min + p.max) / 2])
+              );
+              const injected = normalizeCandidateProposal(
+                { familyId: targetFid, thesis: "unevaluated family — midpoint exploration", parameters: midpointParams, invalidationSignals: [], origin: "engine_seed" },
+                runtimeFamilies.map((f) => ({ ...f, familyId: f.familyId, strategyName: f.strategyName })),
+                diversifiedCandidates.length
+              );
+              diversifiedCandidates = [...diversifiedCandidates, injected];
+              await log(`[auto-research] injected unevaluated family: ${targetFid}`);
+            }
+          }
         }
 
         if (experimentPlan && config.loopVersion === "v2") {
