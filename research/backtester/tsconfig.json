@@ -5,5 +5,5 @@
     "rootDir": "../.."
   },
   "include": ["src/**/*.ts", "../strategies/src/**/*.ts", "../../packages/shared/src/**/*.ts"],
-  "exclude": ["src/migrate-pg-to-sqlite.ts"]
+  "exclude": ["src/migrate-pg-to-sqlite.ts", "src/generated-strategies/generated-*.ts"]
 }

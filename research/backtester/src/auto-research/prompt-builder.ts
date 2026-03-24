@@ -59,6 +59,43 @@ export function compactEvaluation(evaluation: CandidateBacktestEvaluation) {
   };
 }
 
+export function buildEvaluationAnalysis(evaluation: CandidateBacktestEvaluation) {
+  const s = evaluation.summary;
+  const d = evaluation.diagnostics;
+  const w = d.windows;
+  const feesAteProfits = s.grossReturn > 0 && s.netReturn <= 0;
+  const fewTrades = s.tradeCount < 5;
+  const highGhostRatio = d.coverage.ghostSignalCount > d.coverage.signalCount * 2;
+  const windowSpread = (w.bestWindowNetReturn ?? 0) - (w.worstWindowNetReturn ?? 0);
+  const topRejectReasons = Object.entries({ ...d.reasons.strategy, ...d.reasons.risk })
+    .sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k}(${v})`);
+
+  return {
+    candidateId: evaluation.candidate.candidateId,
+    familyId: evaluation.candidate.familyId,
+    parameters: evaluation.candidate.parameters,
+    netReturn: +(s.netReturn * 100).toFixed(2),
+    grossReturn: +(s.grossReturn * 100).toFixed(2),
+    maxDrawdown: +(s.maxDrawdown * 100).toFixed(2),
+    tradeCount: s.tradeCount,
+    feePaid: +s.feePaid.toFixed(4),
+    winRate: +(s.winRate * 100).toFixed(1),
+    positiveWindowRatio: w.positiveWindowRatio ?? 0,
+    bestWindow: +(( w.bestWindowNetReturn ?? 0) * 100).toFixed(2),
+    worstWindow: +((w.worstWindowNetReturn ?? 0) * 100).toFixed(2),
+    windowCount: w.windowCount ?? 0,
+    diagnosis: {
+      feesAteProfits,
+      fewTrades,
+      highGhostRatio,
+      windowSpread: +(windowSpread * 100).toFixed(2),
+      topRejectReasons,
+      signalsGenerated: d.coverage.signalCount,
+      signalsBlocked: d.coverage.ghostSignalCount + d.coverage.rejectedOrdersCount
+    }
+  };
+}
+
 export function compactHistory(history: ResearchIterationRecord[]) {
   return history.map((iteration) => ({
     iteration: iteration.iteration,
@@ -511,17 +548,19 @@ ${jsonBlock({
   marketCodes: params.marketCodes,
   families: compactFamilies(params.families),
   familyPerformanceSummary: compactFamilyPerformance(params.history),
-  candidateLedgerSummary: compactCandidateLedger(params.history),
-  priorHistory: compactHistory(params.history)
+  recentEvaluations: params.history.slice(-2).flatMap(h => h.evaluations.map(buildEvaluationAnalysis))
 })}
 
-Task:
-1. Focus on finding the best parameters for each block family in isolation.
-2. The block will later be combined with other blocks into a portfolio — you don't need to worry about portfolio-level allocation.
-3. Vary regime gate parameters meaningfully — they control when the strategy is active.
+Task — think like a researcher:
+1. Look at recentEvaluations.diagnosis for each candidate:
+   - feesAteProfits=true → reduce trade frequency (widen thresholds, increase rebalanceBars)
+   - fewTrades=true → relax entry conditions (lower RSI threshold, widen regime gate)
+   - highGhostRatio=true → signals generated but blocked — relax position limits or cooldown
+   - worstWindow much worse than bestWindow → strategy is regime-dependent, tighten regime gate
+   - topRejectReasons tells you exactly what's blocking trades — address those specific reasons
+2. Each nextCandidate must state in its thesis WHAT problem it's fixing from the previous evaluation.
+3. Explore parameter extremes and corners, not just midpoints.
 4. Generate executable candidates from the listed block families only.
-5. Explore parameter extremes and corners, not just midpoints. If a family has produced 0 trades in prior iterations, try minimum gate thresholds to maximize signal activation.
-6. If a family consistently loses money from overtrading, try higher rebalanceBars or tighter entry thresholds.
 
 Return JSON only:
 {
@@ -600,19 +639,34 @@ ${jsonBlock({
     holdoutDays: params.config.holdoutDays
   },
   families: compactFamilies(params.families),
-  latestProposal: params.latestProposal,
-  latestEvaluations: params.evaluations.map(compactEvaluation),
-  familyPerformanceSummary: compactFamilyPerformance(params.history),
-  candidateLedgerSummary: compactCandidateLedger(params.history),
-  priorHistory: compactHistory(params.history)
+  latestEvaluations: params.evaluations.map(buildEvaluationAnalysis),
+  familyPerformanceSummary: compactFamilyPerformance(params.history)
 })}
 
-Task:
-1. Each block is evaluated independently — judge if parameters produce decent risk-adjusted returns within its regime.
-2. A block that passes will be promoted to the validated block catalog for later portfolio assembly.
-3. If searching should continue, propose genuinely different parameter combinations — avoid trivial nudges.
-4. Use diagnostics.coverage and diagnostics.reasons to diagnose zero-trade or weak outcomes.
-5. If a family consistently produces zero trades, suggest widening regime gates or trying extreme parameter corners.
+Task — analyze like a researcher, not a parameter optimizer:
+
+1. DIAGNOSE: For each candidate, analyze WHY it performed the way it did:
+   - Check costs.totalCostsPaid vs summary.grossReturn — is the strategy profitable before fees but killed by costs? → reduce trade frequency
+   - Check windows.positiveWindowRatio — does it win in some periods and lose in others? → identify which market conditions work
+   - Check windows.bestWindowNetReturn vs worstWindowNetReturn — how wide is the spread? → strategy may need regime filtering
+   - Check coverage.ghostSignalCount vs signalCount — are signals being generated but not executed? → position limits or cooldown too tight
+   - Check reasons.strategy / reasons.risk — what's blocking trades? → these are specific strategy rejection reasons
+   - Compare per-window returns — is the loss concentrated in 1-2 bad windows or spread evenly?
+
+2. EXPLAIN: In your summary, state the specific failure mechanism:
+   - "Gross return +2.3% but fees ate 3.1% → need fewer trades with higher conviction"
+   - "4 out of 6 windows profitable but window 3 lost -5% → strategy fails in downtrends, add trend filter"
+   - "Only 3 trades in 90 days → entry conditions too restrictive, relax RSI threshold from 25 to 35"
+   NOT just "keep searching" or "weak performance"
+
+3. PRESCRIBE: Your nextCandidates should address the SPECIFIC diagnosed issue:
+   - If fees too high → widen entry/exit thresholds to reduce trade count
+   - If regime-dependent → change regime gate parameters
+   - If signals blocked → relax position limits or cooldown
+   - If one bad window → add drawdown protection or trend alignment
+   Do NOT just nudge parameters randomly. Each change must address a diagnosed problem.
+
+4. PROMOTE only if: net return > 0, positive window ratio >= 0.5, and trade count >= 10.
 
 Return JSON only — the verdict field MUST be exactly one of these three strings:
 {
