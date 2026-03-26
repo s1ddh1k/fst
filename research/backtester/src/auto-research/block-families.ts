@@ -327,14 +327,254 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "NO regime gate — BB oversold happens in all regimes."
     ]
   }
+],
+
+// ---------------------------------------------------------------------------
+// Simple strategy families — 5-6 params each, actually searchable
+// ---------------------------------------------------------------------------
+
+SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
+  {
+    familyId: "block:simple-ema-crossover-1h",
+    strategyName: "ema-crossover",
+    title: "EMA Crossover Trend Following",
+    thesis: "Buy on golden cross (fast EMA > slow EMA), sell on death cross. Classic trend-following with 5 params.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "fastPeriod", description: "Fast EMA period.", min: 5, max: 20 },
+      { name: "slowPeriod", description: "Slow EMA period.", min: 20, max: 60 },
+      { name: "atrStopMult", description: "ATR multiplier for trailing stop.", min: 1.0, max: 4.0 },
+      { name: "maxHoldBars", description: "Maximum bars to hold a position.", min: 24, max: 168 },
+      { name: "minAtrPct", description: "Minimum ATR/price ratio to avoid flat markets.", min: 0.002, max: 0.02 }
+    ],
+    guardrails: [
+      "Long-only, trend-following.",
+      "Only 5 parameters — designed for systematic optimization.",
+      "fastPeriod must be less than slowPeriod."
+    ]
+  },
+  {
+    familyId: "block:simple-donchian-breakout-1h",
+    strategyName: "donchian-breakout",
+    title: "Donchian Channel Breakout",
+    thesis: "Buy when price breaks above N-bar high, exit below shorter-period low. Turtle Trading approach with 5 params.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "entryLookback", description: "Bars for upper channel (entry breakout).", min: 10, max: 48 },
+      { name: "exitLookback", description: "Bars for lower channel (exit).", min: 5, max: 24 },
+      { name: "stopAtrMult", description: "ATR multiplier for stop loss.", min: 1.0, max: 4.0 },
+      { name: "maxHoldBars", description: "Maximum bars to hold a position.", min: 24, max: 168 },
+      { name: "minChannelWidth", description: "Minimum channel width as % of price.", min: 0.01, max: 0.06 }
+    ],
+    guardrails: [
+      "Long-only, breakout-following.",
+      "Only 5 parameters.",
+      "entryLookback should be >= exitLookback."
+    ]
+  },
+  {
+    familyId: "block:simple-rsi-reversion-1h",
+    strategyName: "simple-rsi-reversion",
+    title: "Simple RSI Mean Reversion",
+    thesis: "Buy when RSI oversold, sell when RSI overbought. Pure mean reversion with 5 params, no filters.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "rsiPeriod", description: "RSI calculation period.", min: 7, max: 28 },
+      { name: "oversold", description: "RSI level to trigger buy.", min: 15, max: 40 },
+      { name: "overbought", description: "RSI level to trigger sell.", min: 55, max: 85 },
+      { name: "stopLossPct", description: "Hard stop loss percentage.", min: 0.02, max: 0.10 },
+      { name: "maxHoldBars", description: "Maximum bars to hold.", min: 12, max: 96 }
+    ],
+    guardrails: [
+      "Long-only, mean reversion.",
+      "Only 5 parameters — no regime gates, no benchmark coupling.",
+      "oversold must be < overbought."
+    ]
+  },
+  {
+    familyId: "block:simple-bb-reversion-1h",
+    strategyName: "simple-bb-reversion",
+    title: "Simple Bollinger Mean Reversion",
+    thesis: "Buy below lower BB + RSI oversold, sell at middle BB or RSI mean. Same idea as the complex version but with 6 params instead of 41.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "bbWindow", description: "Bollinger Band SMA window.", min: 10, max: 40 },
+      { name: "bbMultiplier", description: "Bollinger Band std deviation multiplier.", min: 1.5, max: 3.0 },
+      { name: "rsiPeriod", description: "RSI calculation period.", min: 7, max: 28 },
+      { name: "entryRsi", description: "RSI must be below this to enter.", min: 15, max: 40 },
+      { name: "exitRsi", description: "RSI target for mean reversion exit.", min: 40, max: 65 },
+      { name: "stopLossPct", description: "Hard stop loss percentage.", min: 0.02, max: 0.10 }
+    ],
+    guardrails: [
+      "Long-only, mean reversion.",
+      "Only 6 parameters — the core of what the 41-param version does.",
+      "entryRsi must be < exitRsi."
+    ]
+  },
+  {
+    familyId: "block:simple-momentum-1h",
+    strategyName: "momentum-rotation",
+    title: "Simple Momentum",
+    thesis: "Buy coins with strong positive momentum, sell when momentum reverses. 5 params.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "momentumLookback", description: "Bars to measure momentum.", min: 8, max: 48 },
+      { name: "entryMomentumPct", description: "Minimum momentum % to enter.", min: 0.01, max: 0.08 },
+      { name: "exitMomentumPct", description: "Momentum % below which to exit.", min: -0.03, max: 0.01 },
+      { name: "maxHoldBars", description: "Maximum bars to hold.", min: 12, max: 96 },
+      { name: "stopLossPct", description: "Hard stop loss percentage.", min: 0.02, max: 0.10 }
+    ],
+    guardrails: [
+      "Long-only, momentum-following.",
+      "Only 5 parameters."
+    ]
+  },
+  {
+    familyId: "block:simple-stochastic-rsi-reversion-1h",
+    strategyName: "stochastic-rsi-reversion",
+    title: "Stochastic RSI Mean Reversion",
+    thesis: "Stochastic %K < 20 + RSI < 35 = oversold extreme. Enter on K crossing above D (bounce confirmation), exit on overbought or ATR stop. 7 params.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "stochPeriod", description: "Stochastic lookback period.", min: 8, max: 21 },
+      { name: "stochOversold", description: "Stochastic %K oversold threshold.", min: 12, max: 25 },
+      { name: "rsiPeriod", description: "RSI confirmation period.", min: 10, max: 21 },
+      { name: "rsiOversold", description: "RSI oversold confirmation threshold.", min: 25, max: 40 },
+      { name: "atrPeriod", description: "ATR period for stop-loss.", min: 10, max: 20 },
+      { name: "atrStopMult", description: "ATR multiplier for stop distance.", min: 1.5, max: 3.5 },
+      { name: "exitOverbought", description: "Stochastic %K take-profit level.", min: 65, max: 85 }
+    ],
+    guardrails: [
+      "Long-only, mean reversion.",
+      "7 parameters — dual oscillator confirmation reduces false signals.",
+      "No regime gate — oversold happens in all regimes."
+    ]
+  },
+  {
+    familyId: "block:simple-macd-histogram-reversal-1h",
+    strategyName: "macd-histogram-reversal",
+    title: "MACD Histogram Momentum Reversal",
+    thesis: "MACD histogram crosses zero from below while price above EMA = bearish-to-bullish momentum shift. ATR trailing stop. 7 params.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "macdFast", description: "MACD fast EMA window.", min: 8, max: 16 },
+      { name: "macdSlow", description: "MACD slow EMA window.", min: 20, max: 32 },
+      { name: "macdSignal", description: "MACD signal smoothing window.", min: 6, max: 12 },
+      { name: "emaTrendPeriod", description: "EMA trend filter period.", min: 20, max: 60 },
+      { name: "atrPeriod", description: "ATR period for trailing stop.", min: 10, max: 20 },
+      { name: "atrTrailMult", description: "ATR trailing stop multiplier.", min: 1.5, max: 3.5 },
+      { name: "histMinStrength", description: "Minimum histogram value after zero-cross.", min: 0, max: 50 }
+    ],
+    guardrails: [
+      "Long-only, trend-following momentum.",
+      "7 parameters — trend filter prevents counter-trend entries.",
+      "macdFast must be < macdSlow."
+    ]
+  },
+  {
+    familyId: "block:simple-stochastic-rsi-reversion-5m",
+    strategyName: "stochastic-rsi-reversion-5m",
+    title: "5m Stochastic RSI Scalp Reversion",
+    thesis: "5m oversold stochastic + RSI bounce = micro-reversion scalp. Tight stop, fast exit. 7 params.",
+    timeframe: "5m",
+    requiredData: ["5m"],
+    parameterSpecs: [
+      { name: "stochPeriod", description: "Stochastic lookback period.", min: 8, max: 21 },
+      { name: "stochOversold", description: "Stochastic %K oversold threshold.", min: 12, max: 25 },
+      { name: "rsiPeriod", description: "RSI confirmation period.", min: 8, max: 18 },
+      { name: "rsiOversold", description: "RSI oversold threshold.", min: 25, max: 40 },
+      { name: "atrPeriod", description: "ATR period for stop-loss.", min: 8, max: 18 },
+      { name: "atrStopMult", description: "ATR stop multiplier.", min: 1.0, max: 2.5 },
+      { name: "exitOverbought", description: "Stochastic %K take-profit.", min: 60, max: 80 }
+    ],
+    guardrails: [
+      "Long-only, 5m scalp mean reversion.",
+      "7 parameters — fast entry/exit for micro dips.",
+      "No regime gate — oversold happens in all regimes."
+    ]
+  },
+  {
+    familyId: "block:simple-ema-macd-trend-15m",
+    strategyName: "ema-macd-trend-15m",
+    title: "15m EMA + MACD Trend Following",
+    thesis: "EMA20 > EMA50 + MACD histogram positive = 15m uptrend. Trail with ATR stop. 7 params.",
+    timeframe: "15m",
+    requiredData: ["15m"],
+    parameterSpecs: [
+      { name: "emaFast", description: "Fast EMA period.", min: 10, max: 25 },
+      { name: "emaSlow", description: "Slow EMA period.", min: 30, max: 60 },
+      { name: "macdFast", description: "MACD fast window.", min: 8, max: 16 },
+      { name: "macdSlow", description: "MACD slow window.", min: 20, max: 32 },
+      { name: "atrPeriod", description: "ATR for trailing stop.", min: 10, max: 20 },
+      { name: "atrTrailMult", description: "ATR trailing multiplier.", min: 1.5, max: 3.5 },
+      { name: "minGapPct", description: "Min EMA gap % to confirm trend.", min: 0.001, max: 0.01 }
+    ],
+    guardrails: [
+      "Long-only, 15m trend-following.",
+      "7 parameters — EMA cross + MACD confirmation.",
+      "emaFast must be < emaSlow, macdFast must be < macdSlow."
+    ]
+  },
+  {
+    familyId: "block:simple-cci-volume-reversion-5m",
+    strategyName: "cci-volume-reversion-5m",
+    title: "5m CCI Volume Scalp Reversion",
+    thesis: "CCI extreme + volume spike on 5m = micro-capitulation, fast 15-60min reversion. 7 params.",
+    timeframe: "5m",
+    requiredData: ["5m"],
+    parameterSpecs: [
+      { name: "cciPeriod", description: "CCI calculation period.", min: 8, max: 20 },
+      { name: "cciEntry", description: "CCI extreme entry threshold.", min: -200, max: -80 },
+      { name: "cciExit", description: "CCI mean reversion exit.", min: -20, max: 20 },
+      { name: "volSpikeLookback", description: "Volume average lookback.", min: 10, max: 30 },
+      { name: "volSpikeMin", description: "Minimum volume spike ratio.", min: 1.2, max: 3.0 },
+      { name: "atrPeriod", description: "ATR period for stop.", min: 8, max: 18 },
+      { name: "atrStopMult", description: "ATR stop multiplier.", min: 1.0, max: 2.5 }
+    ],
+    guardrails: [
+      "Long-only, 5m scalp mean reversion.",
+      "7 parameters — volume confirmation for micro-dips.",
+      "No regime gate."
+    ]
+  },
+  {
+    familyId: "block:simple-cci-volume-reversion-1h",
+    strategyName: "cci-volume-reversion",
+    title: "CCI Extreme + Volume Spike Reversion",
+    thesis: "CCI < -100 with volume spike > 1.5x = capitulation selling. Enter when CCI recovering, exit at CCI mean (0) or on stop. 7 params.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "cciPeriod", description: "CCI calculation period.", min: 10, max: 25 },
+      { name: "cciEntry", description: "CCI extreme entry threshold (negative).", min: -200, max: -80 },
+      { name: "cciExit", description: "CCI mean reversion exit target.", min: -20, max: 30 },
+      { name: "volSpikeLookback", description: "Volume average lookback.", min: 10, max: 30 },
+      { name: "volSpikeMin", description: "Minimum volume spike ratio.", min: 1.2, max: 3.0 },
+      { name: "atrPeriod", description: "ATR period for stop-loss.", min: 10, max: 20 },
+      { name: "atrStopMult", description: "ATR stop multiplier.", min: 1.5, max: 3.5 }
+    ],
+    guardrails: [
+      "Long-only, mean reversion.",
+      "7 parameters — volume confirmation filters noise.",
+      "No regime gate — capitulation happens in all regimes."
+    ]
+  }
 ];
 
 export function getBlockFamilyDefinitions(): StrategyFamilyDefinition[] {
-  return BLOCK_FAMILY_CATALOG.slice();
+  return [...BLOCK_FAMILY_CATALOG, ...SIMPLE_FAMILY_CATALOG];
 }
 
 export function getBlockFamilyById(id: string): StrategyFamilyDefinition {
-  const found = BLOCK_FAMILY_CATALOG.find((family) => family.familyId === id);
+  const found = BLOCK_FAMILY_CATALOG.find((family) => family.familyId === id)
+    ?? SIMPLE_FAMILY_CATALOG.find((family) => family.familyId === id);
   if (!found) {
     throw new Error(`Unknown block family: ${id}`);
   }

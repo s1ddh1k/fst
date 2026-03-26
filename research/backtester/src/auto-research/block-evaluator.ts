@@ -16,8 +16,16 @@ import {
   createResidualReversionMultiStrategy,
   createRelativeStrengthRotationStrategy,
   createBollingerMeanReversionMultiStrategy,
-  withRegimeGate
+  withRegimeGate,
+  adaptScoredStrategy
 } from "../multi-strategy/index.js";
+import {
+  createEmaCrossoverStrategy,
+  createDonchianBreakoutStrategy,
+  createSimpleRsiReversionStrategy,
+  createSimpleBbReversionStrategy,
+  createMomentumRotationStrategy
+} from "../../../strategies/src/simple-strategies.js";
 import type { Strategy, StrategySleeveConfig } from "../../../../packages/shared/src/index.js";
 import type { RegimeGateConfig } from "../multi-strategy/RegimeGatedStrategy.js";
 import type {
@@ -74,6 +82,7 @@ function roundInt(value: number, min: number, max: number): number {
 }
 
 function isBbMeanReversionFamily(familyId: string): boolean {
+  if (familyId.startsWith("block:simple-")) return false;
   return familyId.includes("bb-reversion") || familyId.includes("bb-rsi-confirmed-reversion");
 }
 
@@ -115,6 +124,13 @@ function resolveBbPortfolioControls(familyId: string, params: Record<string, num
 
 function buildBlockGateConfig(familyId: string, params: Record<string, number>): RegimeGateConfig {
   const gate: RegimeGateConfig = {};
+
+  // Simple strategies have no regime gate — they trade in all conditions
+  if (familyId.startsWith("block:simple-")) {
+    gate.allowedRegimes = ["trend_up", "trend_down", "range", "volatile"];
+    gate.allowUnknownRegime = true;
+    return gate;
+  }
 
   if (isBbMeanReversionFamily(familyId)) {
     // BB mean reversion works in ALL regimes — oversold happens everywhere
@@ -328,6 +344,37 @@ async function createBlockStrategy(familyId: string, candidateId: string, params
     });
   }
 
+  // New generated simple strategies — must come before generic "reversion"/"breakout" checks
+  if (familyId.includes("simple-stochastic-rsi-reversion-5m")) {
+    const mod = await import("../generated-strategies/generated-block-stochastic-rsi-reversion-5m.js");
+    return mod.createStrategy({ strategyId: candidateId, parameters: params });
+  }
+
+  if (familyId.includes("simple-stochastic-rsi-reversion")) {
+    const mod = await import("../generated-strategies/generated-block-stochastic-rsi-reversion-1h.js");
+    return mod.createStrategy({ strategyId: candidateId, parameters: params });
+  }
+
+  if (familyId.includes("simple-macd-histogram-reversal")) {
+    const mod = await import("../generated-strategies/generated-block-macd-histogram-reversal-1h.js");
+    return mod.createStrategy({ strategyId: candidateId, parameters: params });
+  }
+
+  if (familyId.includes("simple-ema-macd-trend-15m")) {
+    const mod = await import("../generated-strategies/generated-block-ema-macd-trend-15m.js");
+    return mod.createStrategy({ strategyId: candidateId, parameters: params });
+  }
+
+  if (familyId.includes("simple-cci-volume-reversion-5m")) {
+    const mod = await import("../generated-strategies/generated-block-cci-volume-reversion-5m.js");
+    return mod.createStrategy({ strategyId: candidateId, parameters: params });
+  }
+
+  if (familyId.includes("simple-cci-volume-reversion")) {
+    const mod = await import("../generated-strategies/generated-block-cci-volume-reversion-1h.js");
+    return mod.createStrategy({ strategyId: candidateId, parameters: params });
+  }
+
   if (familyId.includes("reversion")) {
     return createResidualReversionMultiStrategy({
       strategyId: `${candidateId}-reversion`,
@@ -345,6 +392,93 @@ async function createBlockStrategy(familyId: string, candidateId: string, params
       minRiskOn: clamp(finiteOrDefault(params.minRiskOn, 0.1), -0.05, 0.35),
       pullbackZ: clamp(finiteOrDefault(params.pullbackZ, 0.9), 0.4, 1.8),
       trailAtrMult: clamp(finiteOrDefault(params.trailAtrMult, 2.2), 1.2, 3.2)
+    });
+  }
+
+  // Simple strategies — 5-6 params each, actually searchable
+  if (familyId.includes("simple-ema-crossover")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-ema`,
+      sleeveId: "trend",
+      family: "trend",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createEmaCrossoverStrategy({
+        fastPeriod: roundInt(finiteOrDefault(params.fastPeriod, 12), 5, 20),
+        slowPeriod: roundInt(finiteOrDefault(params.slowPeriod, 26), 20, 60),
+        atrStopMult: clamp(finiteOrDefault(params.atrStopMult, 2.0), 1.0, 4.0),
+        maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 72), 24, 168),
+        minAtrPct: clamp(finiteOrDefault(params.minAtrPct, 0.005), 0.002, 0.02)
+      })
+    });
+  }
+
+  if (familyId.includes("simple-donchian-breakout")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-donchian`,
+      sleeveId: "breakout",
+      family: "breakout",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createDonchianBreakoutStrategy({
+        entryLookback: roundInt(finiteOrDefault(params.entryLookback, 20), 10, 48),
+        exitLookback: roundInt(finiteOrDefault(params.exitLookback, 10), 5, 24),
+        stopAtrMult: clamp(finiteOrDefault(params.stopAtrMult, 2.0), 1.0, 4.0),
+        maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 96), 24, 168),
+        minChannelWidth: clamp(finiteOrDefault(params.minChannelWidth, 0.02), 0.01, 0.06)
+      })
+    });
+  }
+
+  if (familyId.includes("simple-rsi-reversion")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-rsi`,
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createSimpleRsiReversionStrategy({
+        rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 14), 7, 28),
+        oversold: roundInt(finiteOrDefault(params.oversold, 30), 15, 40),
+        overbought: roundInt(finiteOrDefault(params.overbought, 70), 55, 85),
+        stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.05), 0.02, 0.10),
+        maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 48), 12, 96)
+      })
+    });
+  }
+
+  if (familyId.includes("simple-bb-reversion")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-simple-bb`,
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createSimpleBbReversionStrategy({
+        bbWindow: roundInt(finiteOrDefault(params.bbWindow, 20), 10, 40),
+        bbMultiplier: clamp(finiteOrDefault(params.bbMultiplier, 2.0), 1.5, 3.0),
+        rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 14), 7, 28),
+        entryRsi: roundInt(finiteOrDefault(params.entryRsi, 30), 15, 40),
+        exitRsi: roundInt(finiteOrDefault(params.exitRsi, 50), 40, 65),
+        stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.05), 0.02, 0.10)
+      })
+    });
+  }
+
+  if (familyId.includes("simple-momentum")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-momentum`,
+      sleeveId: "trend",
+      family: "trend",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createMomentumRotationStrategy({
+        momentumLookback: roundInt(finiteOrDefault(params.momentumLookback, 20), 8, 48),
+        entryMomentumPct: clamp(finiteOrDefault(params.entryMomentumPct, 0.03), 0.01, 0.08),
+        exitMomentumPct: clamp(finiteOrDefault(params.exitMomentumPct, -0.01), -0.03, 0.01),
+        maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 48), 12, 96),
+        stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.05), 0.02, 0.10)
+      })
     });
   }
 
@@ -416,6 +550,25 @@ function filterCandlesByRange(candlesByMarket: CandleMap, range: { start: Date; 
       candles.filter((c) => c.candleTimeUtc >= range.start && c.candleTimeUtc <= range.end)
     ])
   );
+}
+
+/**
+ * Compute average buy-and-hold return across all markets for a given range.
+ * For each market: (lastClose - firstOpen) / firstOpen, then average.
+ */
+function computeBuyAndHoldReturn(candlesByMarket: CandleMap, range: { start: Date; end: Date }): number {
+  const returns: number[] = [];
+  for (const candles of Object.values(candlesByMarket)) {
+    const inRange = candles.filter((c) => c.candleTimeUtc >= range.start && c.candleTimeUtc <= range.end);
+    if (inRange.length < 2) continue;
+    const sorted = inRange.slice().sort((a, b) => a.candleTimeUtc.getTime() - b.candleTimeUtc.getTime());
+    const firstOpen = sorted[0].openPrice;
+    const lastClose = sorted[sorted.length - 1].closePrice;
+    if (firstOpen > 0) {
+      returns.push((lastClose - firstOpen) / firstOpen);
+    }
+  }
+  return returns.length === 0 ? 0 : returns.reduce((s, v) => s + v, 0) / returns.length;
 }
 
 export async function evaluateBlockCandidate(params: {
@@ -539,6 +692,8 @@ export async function evaluateBlockCandidate(params: {
     "1m": candles1m as CandleMap
   };
   const executionCandles: Partial<Record<StrategyTimeframe, CandleMap>> = {
+    "1h": candles1h as CandleMap,
+    "15m": candles15m,
     "5m": candles5m as CandleMap,
     "1m": candles1m as CandleMap
   };
@@ -575,6 +730,7 @@ export async function evaluateBlockCandidate(params: {
     const signalCount = testResult.metrics.signalCount;
     const ghostSignalCount = Object.values(testResult.ghostSummary).reduce((sum, item) => sum + item.count, 0);
     const decisionCoverage = testResult.decisionCoverageSummary;
+    const buyAndHoldReturn = computeBuyAndHoldReturn(referenceCandleMap, testRange);
 
     return {
       candidate,
@@ -594,7 +750,8 @@ export async function evaluateBlockCandidate(params: {
         rejectedOrdersCount: testResult.metrics.rejectedOrdersCount,
         cooldownSkipsCount: testResult.metrics.cooldownSkipsCount,
         signalCount,
-        ghostSignalCount
+        ghostSignalCount,
+        buyAndHoldReturn
       },
       diagnostics: {
         coverage: {
@@ -654,7 +811,7 @@ export async function evaluateBlockCandidate(params: {
     throw new Error("No valid block walk-forward windows.");
   }
 
-  // E1+E3: Run windows progressively; bail early if no trades detected
+  // Progressive early exit: bail on hopeless candidates to save compute
   const EARLY_EXIT_WINDOW_COUNT = Math.min(4, windows.length);
   const results: Array<{ trainRange: { start: Date; end: Date }; testRange: { start: Date; end: Date }; test: ReturnType<typeof runBacktest> }> = [];
   let earlyExitZeroTrade = false;
@@ -667,10 +824,30 @@ export async function evaluateBlockCandidate(params: {
       test: runBacktest(w.testRange)
     });
 
-    // After first EARLY_EXIT_WINDOW_COUNT windows, check if all had 0 trades
+    // Check after first EARLY_EXIT_WINDOW_COUNT windows
     if (i + 1 === EARLY_EXIT_WINDOW_COUNT) {
-      const allZeroTrades = results.every((r) => r.test.completedTrades.length === 0);
-      if (allZeroTrades) {
+      const totalTrades = results.reduce((s, r) => s + r.test.completedTrades.length, 0);
+      const allNegative = results.every((r) => r.test.metrics.netReturn < 0);
+      const avgReturn = results.reduce((s, r) => s + r.test.metrics.netReturn, 0) / results.length;
+
+      // Exit 1: zero or near-zero trades — entry conditions are too restrictive
+      if (totalTrades < 3) {
+        earlyExitZeroTrade = true;
+        break;
+      }
+
+      // Exit 2: all windows losing AND average return below -3% — consistently bad
+      if (allNegative && avgReturn < -0.03) {
+        earlyExitZeroTrade = true;
+        break;
+      }
+
+      // Exit 3: losing to buy-and-hold in every window with meaningful margin
+      const windowBhReturns = results.map((r) => computeBuyAndHoldReturn(referenceCandleMap, r.testRange));
+      const allBelowBH = results.every((r, idx) =>
+        r.test.metrics.netReturn < windowBhReturns[idx] - 0.01
+      );
+      if (allBelowBH && avgReturn < 0) {
         earlyExitZeroTrade = true;
         break;
       }
@@ -681,6 +858,10 @@ export async function evaluateBlockCandidate(params: {
   const testDrawdowns = results.map((r) => r.test.metrics.maxDrawdown);
   const positiveWindowCount = testReturns.filter((v) => v > 0).length;
   const totalClosedTrades = results.reduce((s, r) => s + r.test.completedTrades.length, 0);
+  const windowBuyAndHoldReturns = results.map((r) => computeBuyAndHoldReturn(referenceCandleMap, r.testRange));
+  const avgBuyAndHoldReturn = windowBuyAndHoldReturns.length === 0
+    ? 0
+    : windowBuyAndHoldReturns.reduce((s, v) => s + v, 0) / windowBuyAndHoldReturns.length;
   const signalCount = results.reduce((s, r) => s + r.test.metrics.signalCount, 0);
   const ghostSignalCount = results.reduce(
     (s, r) => s + Object.values(r.test.ghostSummary).reduce((gs, item) => gs + item.count, 0),
@@ -765,7 +946,8 @@ export async function evaluateBlockCandidate(params: {
       rejectedOrdersCount: results.reduce((s, r) => s + r.test.metrics.rejectedOrdersCount, 0),
       cooldownSkipsCount: results.reduce((s, r) => s + r.test.metrics.cooldownSkipsCount, 0),
       signalCount,
-      ghostSignalCount
+      ghostSignalCount,
+      buyAndHoldReturn: avgBuyAndHoldReturn
     },
     diagnostics: {
       coverage: {
