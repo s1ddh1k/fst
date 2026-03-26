@@ -503,6 +503,24 @@ function buildRegimeSeries(params: {
   });
 }
 
+export function buildRegimeSeriesFromCandles(
+  closePrices: number[],
+  config?: { trendWindow?: number; momentumLookback?: number; volatilityWindow?: number; volatilityThreshold?: number }
+): CompositeBenchmarkContext["regime"][] {
+  const trendWindow = config?.trendWindow ?? DEFAULT_MARKET_STATE_CONFIG.trendWindow;
+  const momentumLookback = config?.momentumLookback ?? DEFAULT_MARKET_STATE_CONFIG.momentumLookback;
+  const volatilityWindow = config?.volatilityWindow ?? DEFAULT_MARKET_STATE_CONFIG.volatilityWindow;
+  const volatilityThreshold = config?.volatilityThreshold ?? 0.03;
+
+  return buildRegimeSeries({
+    closePrices,
+    smaByIndex: buildRollingAverage(closePrices, trendWindow),
+    momentumByIndex: buildMomentumSeries(closePrices, momentumLookback),
+    historicalVolatilityByIndex: buildHistoricalVolatilitySeries(closePrices, volatilityWindow),
+    volatilityThreshold
+  });
+}
+
 function getMarketFeatureSet(
   candles: Candle[],
   config: ResolvedMarketStateConfig

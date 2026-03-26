@@ -286,7 +286,20 @@ export type CandidateEvaluationDiagnostics = {
     bestWindowMaxDrawdown?: number;
     worstWindowMaxDrawdown?: number;
     totalClosedTrades?: number;
+    details?: WindowPerformanceRecord[];
   };
+};
+
+export type WindowPerformanceRecord = {
+  testStartAt: string;
+  testEndAt: string;
+  netReturn: number;
+  maxDrawdown: number;
+  tradeCount: number;
+  winRate: number;
+  buyAndHoldReturn: number;
+  dominantRegime: string;
+  regimeDistribution: Record<string, number>;
 };
 
 export type CandidateBacktestEvaluation = {
@@ -448,6 +461,10 @@ export type AutoResearchRunConfig = {
   familyIterationBudget?: number;
   stagnationRetireThreshold?: number;
   discoveryInterval?: number;
+
+  // Test date range override
+  testStartDate?: Date;
+  testEndDate?: Date;
 };
 
 export type AutoResearchConfigRepair = {

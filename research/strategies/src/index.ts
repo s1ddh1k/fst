@@ -4,6 +4,7 @@ export * as factors from "./factors/index.js";
 export { createIntegratedMultiFactorStrategy } from "./integrated-multi-factor.js";
 export {
   buildMarketStateContext,
+  buildRegimeSeriesFromCandles,
   getMarketStateConfigKey,
   resolveMarketStateConfig
 } from "./market-state.js";
@@ -50,6 +51,7 @@ export type {
   BenchmarkMarketContext,
   Candle,
   CompositeBenchmarkContext,
+  CompositeBenchmarkRegime,
   MarketBreadthContext,
   MarketStateConfig,
   MarketStateContext,

@@ -378,6 +378,10 @@ async function main(): Promise<void> {
   const autoResearchStagnationRetireThreshold = autoResearchStagnationThresholdOption
     ? Number.parseInt(autoResearchStagnationThresholdOption, 10)
     : undefined;
+  const testStartOption = getOption(process.argv, "--test-start");
+  const testStartDate = testStartOption ? new Date(testStartOption) : undefined;
+  const testEndOption = getOption(process.argv, "--test-end");
+  const testEndDate = testEndOption ? new Date(testEndOption) : undefined;
   const parametersJson = getOption(process.argv, "--parameters-json");
   const benchmarkMarketCode = getOption(process.argv, "--benchmark-market");
   const maxPositions = Number.parseInt(getOption(process.argv, "--max-positions") ?? "5", 10);
@@ -517,7 +521,9 @@ async function main(): Promise<void> {
         maxRunDurationMs: autoResearchMaxRunDurationMs,
         iterationTimeoutMs: autoResearchIterationTimeoutMs,
         familyIterationBudget: autoResearchFamilyIterationBudget,
-        stagnationRetireThreshold: autoResearchStagnationRetireThreshold
+        stagnationRetireThreshold: autoResearchStagnationRetireThreshold,
+        testStartDate,
+        testEndDate
       });
 
       if (autoResearchStage === "auto") {
@@ -582,7 +588,9 @@ async function main(): Promise<void> {
                 maxRunDurationMs: autoResearchMaxRunDurationMs,
                 iterationTimeoutMs: autoResearchIterationTimeoutMs,
                 familyIterationBudget: autoResearchFamilyIterationBudget,
-                stagnationRetireThreshold: autoResearchStagnationRetireThreshold
+                stagnationRetireThreshold: autoResearchStagnationRetireThreshold,
+                testStartDate,
+                testEndDate
               });
               console.log(JSON.stringify(portfolioReport, null, 2));
               return;

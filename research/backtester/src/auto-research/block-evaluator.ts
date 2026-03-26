@@ -31,8 +31,10 @@ import type { RegimeGateConfig } from "../multi-strategy/RegimeGatedStrategy.js"
 import type {
   AutoResearchRunConfig,
   CandidateBacktestEvaluation,
-  NormalizedCandidateProposal
+  NormalizedCandidateProposal,
+  WindowPerformanceRecord
 } from "./types.js";
+import { buildMarketStateContexts } from "../../../strategies/src/market-state.js";
 import { summarizeReferenceCandleSpan } from "./walk-forward-config.js";
 
 type CandleMap = Record<string, Candle[]>;
@@ -199,7 +201,7 @@ async function createBlockStrategy(familyId: string, candidateId: string, params
     });
   }
 
-  if (familyId.includes("breakout")) {
+  if (familyId.includes("breakout") && !familyId.startsWith("block:simple-")) {
     return createRelativeBreakoutRotationMultiStrategy({
       strategyId: `${candidateId}-breakout`,
       breakoutLookback: roundInt(finiteOrDefault(params.breakoutLookback, 20), 12, 36),
@@ -375,7 +377,7 @@ async function createBlockStrategy(familyId: string, candidateId: string, params
     return mod.createStrategy({ strategyId: candidateId, parameters: params });
   }
 
-  if (familyId.includes("reversion")) {
+  if (familyId.includes("reversion") && !familyId.startsWith("block:simple-")) {
     return createResidualReversionMultiStrategy({
       strategyId: `${candidateId}-reversion`,
       entryThreshold: clamp(finiteOrDefault(params.entryThreshold, 0.24), 0.15, 0.45),
@@ -724,7 +726,11 @@ export async function evaluateBlockCandidate(params: {
     });
 
   if (config.mode === "holdout") {
-    const { trainRange, testRange } = splitTrainTestByDays(referenceCandles, config.holdoutDays);
+    const split = splitTrainTestByDays(referenceCandles, config.holdoutDays);
+    const trainRange = split.trainRange;
+    const testRange = (config.testStartDate && config.testEndDate)
+      ? { start: config.testStartDate, end: config.testEndDate }
+      : split.testRange;
     const testResult = runBacktest(testRange);
     const testUniverse = universeSizeSummary(testResult);
     const signalCount = testResult.metrics.signalCount;
@@ -805,7 +811,13 @@ export async function evaluateBlockCandidate(params: {
   // walk-forward with early exit for 0-trade candidates
   const trainingDays = config.trainingDays ?? config.holdoutDays * 2;
   const stepDays = config.stepDays ?? config.holdoutDays;
-  const windows = buildWalkForwardRanges({ candles: referenceCandles, trainingDays, holdoutDays: config.holdoutDays, stepDays });
+  let windows = buildWalkForwardRanges({ candles: referenceCandles, trainingDays, holdoutDays: config.holdoutDays, stepDays });
+  if (config.testStartDate && config.testEndDate) {
+    // Keep windows whose test range overlaps with the specified period
+    windows = windows.filter((w) =>
+      w.testRange.start < config.testEndDate! && w.testRange.end > config.testStartDate!
+    );
+  }
 
   if (windows.length === 0) {
     throw new Error("No valid block walk-forward windows.");
@@ -862,6 +874,54 @@ export async function evaluateBlockCandidate(params: {
   const avgBuyAndHoldReturn = windowBuyAndHoldReturns.length === 0
     ? 0
     : windowBuyAndHoldReturns.reduce((s, v) => s + v, 0) / windowBuyAndHoldReturns.length;
+
+  // Per-window regime-tagged performance records (composite regime: weekly 50% + daily 35% + intraday 15%)
+  const sampleCandleMap = candles1h as CandleMap;
+  const sampleMarket = Object.keys(sampleCandleMap).sort(
+    (a, b) => (sampleCandleMap[b]?.length ?? 0) - (sampleCandleMap[a]?.length ?? 0)
+  )[0];
+  const windowDetails: WindowPerformanceRecord[] = results.map((r, i) => {
+    const startMs = r.testRange.start.getTime();
+    const endMs = r.testRange.end.getTime();
+    // Sample composite regime every 24h within the window
+    const counts: Record<string, number> = {};
+    let total = 0;
+    if (sampleMarket) {
+      const windowCandles = (sampleCandleMap[sampleMarket] ?? []).filter(
+        (c) => c.candleTimeUtc.getTime() >= startMs && c.candleTimeUtc.getTime() <= endMs
+      );
+      const sampleInterval = 24; // every 24 bars (1 day for 1h candles)
+      for (let idx = 0; idx < windowCandles.length; idx += sampleInterval) {
+        const ctx = buildMarketStateContexts({
+          referenceTime: windowCandles[idx].candleTimeUtc,
+          universeCandlesByMarket: sampleCandleMap
+        });
+        const regime = ctx[sampleMarket]?.composite?.regime ?? "unknown";
+        counts[regime] = (counts[regime] ?? 0) + 1;
+        total++;
+      }
+    }
+    let dominantRegime = "unknown";
+    let maxCount = 0;
+    const regimeDistribution: Record<string, number> = {};
+    for (const [regime, count] of Object.entries(counts)) {
+      const ratio = Math.round((count / Math.max(total, 1)) * 100) / 100;
+      if (ratio > 0) regimeDistribution[regime] = ratio;
+      if (count > maxCount) { maxCount = count; dominantRegime = regime; }
+    }
+    return {
+      testStartAt: r.testRange.start.toISOString(),
+      testEndAt: r.testRange.end.toISOString(),
+      netReturn: r.test.metrics.netReturn,
+      maxDrawdown: r.test.metrics.maxDrawdown,
+      tradeCount: r.test.completedTrades.length,
+      winRate: r.test.metrics.winRate,
+      buyAndHoldReturn: windowBuyAndHoldReturns[i],
+      dominantRegime,
+      regimeDistribution
+    };
+  });
+
   const signalCount = results.reduce((s, r) => s + r.test.metrics.signalCount, 0);
   const ghostSignalCount = results.reduce(
     (s, r) => s + Object.values(r.test.ghostSummary).reduce((gs, item) => gs + item.count, 0),
@@ -1000,7 +1060,8 @@ export async function evaluateBlockCandidate(params: {
         worstWindowNetReturn: Math.min(...testReturns),
         bestWindowMaxDrawdown: Math.min(...testDrawdowns),
         worstWindowMaxDrawdown: Math.max(...testDrawdowns),
-        totalClosedTrades
+        totalClosedTrades,
+        details: windowDetails
       }
     }
   };

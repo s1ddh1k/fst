@@ -11,7 +11,8 @@ import type { Candle } from "../types.js";
 import { buildWalkForwardRanges, splitTrainTestByDays } from "../validation.js";
 import { calculateAutoResearchMinimumLimit } from "./limit-resolution.js";
 import { buildPortfolioCandidateRuntime } from "./portfolio-runtime.js";
-import type { AutoResearchRunConfig, CandidateBacktestEvaluation, NormalizedCandidateProposal, ValidatedBlockCatalog } from "./types.js";
+import type { AutoResearchRunConfig, CandidateBacktestEvaluation, NormalizedCandidateProposal, ValidatedBlockCatalog, WindowPerformanceRecord } from "./types.js";
+import { buildMarketStateContexts } from "../../../strategies/src/market-state.js";
 import { repairWalkForwardConfig, summarizeReferenceCandleSpan } from "./walk-forward-config.js";
 
 type CandleMap = Record<string, Candle[]>;
@@ -634,12 +635,17 @@ function buildPortfolioWalkForwardEvaluation(params: {
 }): CandidateBacktestEvaluation {
   const trainingDays = params.config.trainingDays ?? params.config.holdoutDays * 2;
   const stepDays = params.config.stepDays ?? params.config.holdoutDays;
-  const windows = buildWalkForwardRanges({
+  let windows = buildWalkForwardRanges({
     candles: params.candleData.referenceCandles,
     trainingDays,
     holdoutDays: params.config.holdoutDays,
     stepDays
   });
+  if (params.config.testStartDate && params.config.testEndDate) {
+    windows = windows.filter((w) =>
+      w.testRange.start < params.config.testEndDate! && w.testRange.end > params.config.testStartDate!
+    );
+  }
 
   if (windows.length === 0) {
     throw new Error("No valid portfolio walk-forward windows could be constructed.");
@@ -732,6 +738,52 @@ function buildPortfolioWalkForwardEvaluation(params: {
       0
     ) / totalDecisionObservations;
 
+  // Per-window regime-tagged performance records (composite regime: weekly 50% + daily 35% + intraday 15%)
+  const sampleCandleMap = (params.candleData.decisionCandles["1h"] ?? {}) as Record<string, Candle[]>;
+  const sampleMarket = Object.keys(sampleCandleMap).sort(
+    (a, b) => (sampleCandleMap[b]?.length ?? 0) - (sampleCandleMap[a]?.length ?? 0)
+  )[0];
+  const windowDetails: WindowPerformanceRecord[] = results.map((r) => {
+    const startMs = r.testRange.start.getTime();
+    const endMs = r.testRange.end.getTime();
+    const counts: Record<string, number> = {};
+    let total = 0;
+    if (sampleMarket) {
+      const windowCandles = (sampleCandleMap[sampleMarket] ?? []).filter(
+        (c) => c.candleTimeUtc.getTime() >= startMs && c.candleTimeUtc.getTime() <= endMs
+      );
+      const sampleInterval = 24;
+      for (let idx = 0; idx < windowCandles.length; idx += sampleInterval) {
+        const ctx = buildMarketStateContexts({
+          referenceTime: windowCandles[idx].candleTimeUtc,
+          universeCandlesByMarket: sampleCandleMap
+        });
+        const regime = ctx[sampleMarket]?.composite?.regime ?? "unknown";
+        counts[regime] = (counts[regime] ?? 0) + 1;
+        total++;
+      }
+    }
+    let dominantRegime = "unknown";
+    let maxCount = 0;
+    const regimeDistribution: Record<string, number> = {};
+    for (const [regime, count] of Object.entries(counts)) {
+      const ratio = Math.round((count / Math.max(total, 1)) * 100) / 100;
+      if (ratio > 0) regimeDistribution[regime] = ratio;
+      if (count > maxCount) { maxCount = count; dominantRegime = regime; }
+    }
+    return {
+      testStartAt: r.testRange.start.toISOString(),
+      testEndAt: r.testRange.end.toISOString(),
+      netReturn: r.test.metrics.netReturn,
+      maxDrawdown: r.test.metrics.maxDrawdown,
+      tradeCount: r.test.completedTrades.length,
+      winRate: r.test.metrics.winRate,
+      buyAndHoldReturn: 0,
+      dominantRegime,
+      regimeDistribution
+    };
+  });
+
   return {
     candidate: params.candidate,
     mode: "walk-forward",
@@ -816,7 +868,8 @@ function buildPortfolioWalkForwardEvaluation(params: {
         worstWindowNetReturn: Math.min(...testReturns),
         bestWindowMaxDrawdown: Math.min(...testDrawdowns),
         worstWindowMaxDrawdown: Math.max(...testDrawdowns),
-        totalClosedTrades
+        totalClosedTrades,
+        details: windowDetails
       }
     }
   };
