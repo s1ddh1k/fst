@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { getBlockFamilyDefinitions, getBlockFamilyById } from "../src/auto-research/block-families.js";
 
 function isBbMeanReversionFamily(familyId: string): boolean {
+  if (familyId.startsWith("block:simple-")) return false;
   return familyId.includes("bb-reversion") || familyId.includes("bb-rsi-confirmed-reversion");
 }
 
@@ -12,7 +13,7 @@ describe("block-families", () => {
     assert.ok(families.length >= 4, `Expected at least 4 block families, got ${families.length}`);
     for (const family of families) {
       assert.ok(family.familyId.startsWith("block:"), `Family ${family.familyId} should start with 'block:'`);
-      assert.ok(family.strategyName.startsWith("block:"), `Strategy name should start with 'block:'`);
+      assert.ok(family.strategyName.length > 0, `Strategy name should not be empty for ${family.familyId}`);
       assert.ok(family.parameterSpecs.length >= 4, `Family ${family.familyId} should have at least 4 params`);
       assert.ok(family.timeframe, `Family ${family.familyId} should have a timeframe`);
     }
@@ -36,8 +37,9 @@ describe("block-families", () => {
   it("each non-bb block family has gate parameters", () => {
     const families = getBlockFamilyDefinitions();
     for (const family of families) {
-      // BB mean reversion families operate without regime gates
+      // BB mean reversion and simple families operate without regime gates
       if (isBbMeanReversionFamily(family.familyId)) continue;
+      if (family.familyId.startsWith("block:simple-")) continue;
       const gateParams = family.parameterSpecs.filter((p) => p.name.startsWith("gate"));
       assert.ok(gateParams.length >= 2, `Family ${family.familyId} should have at least 2 gate params, got ${gateParams.length}`);
     }

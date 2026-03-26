@@ -19,7 +19,12 @@ import {
   createLeaderBreakoutRetestStrategy,
   createCompressionBreakoutTrendStrategy,
   createLeaderTrendContinuationStrategy,
-  createBollingerMeanReversionStrategy
+  createBollingerMeanReversionStrategy,
+  createDonchianBreakoutStrategy,
+  createEmaCrossoverStrategy,
+  createSimpleRsiReversionStrategy,
+  createSimpleBbReversionStrategy,
+  createMomentumRotationStrategy
 } from "../../../research/strategies/src/index.js";
 import type { Strategy, ScoredStrategy } from "../../../research/strategies/src/types.js";
 
@@ -106,6 +111,16 @@ export function createScoredStrategyFromRecommendation(params: {
       return createResidualReversionStrategy(strategyParameters);
     case "bollinger-mean-reversion":
       return createBollingerMeanReversionStrategy(strategyParameters) as ScoredStrategy;
+    case "donchian-breakout":
+      return createDonchianBreakoutStrategy(strategyParameters);
+    case "ema-crossover":
+      return createEmaCrossoverStrategy(strategyParameters);
+    case "simple-rsi-reversion":
+      return createSimpleRsiReversionStrategy(strategyParameters);
+    case "simple-bb-reversion":
+      return createSimpleBbReversionStrategy(strategyParameters);
+    case "momentum-rotation":
+      return createMomentumRotationStrategy(strategyParameters);
     default:
       throw new Error(`Unsupported scored strategy for paper trading: ${params.strategyName}`);
   }
@@ -121,6 +136,11 @@ export function isScoredStrategy(strategyName: string): boolean {
     "compression-breakout-trend",
     "leader-trend-continuation",
     "residual-reversion",
-    "bollinger-mean-reversion"
+    "bollinger-mean-reversion",
+    "donchian-breakout",
+    "ema-crossover",
+    "simple-rsi-reversion",
+    "simple-bb-reversion",
+    "momentum-rotation"
   ].includes(strategyName);
 }

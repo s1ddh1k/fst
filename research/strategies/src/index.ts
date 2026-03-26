@@ -30,6 +30,13 @@ export { createCompressionBreakoutTrendStrategy } from "./compression-breakout-t
 export { createLeaderTrendContinuationStrategy } from "./leader-trend-continuation.js";
 export { createBollingerMeanReversionStrategy } from "./bollinger-mean-reversion.js";
 export {
+  createEmaCrossoverStrategy,
+  createDonchianBreakoutStrategy,
+  createSimpleRsiReversionStrategy,
+  createSimpleBbReversionStrategy,
+  createMomentumRotationStrategy
+} from "./simple-strategies.js";
+export {
   SCORED_DECISION_TIMEFRAME,
   assertSupportedScoredDecisionTimeframe,
   isSupportedScoredDecisionTimeframe

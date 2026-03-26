@@ -4,6 +4,13 @@ export const DEFAULT_MIN_NET_RETURN_FOR_PROMOTION = 0.05;
 const DEFAULT_MAX_DRAWDOWN_FOR_PROMOTION = 0.35;
 const DEFAULT_MIN_RANDOM_PERCENTILE_FOR_PROMOTION = 0.5;
 
+/**
+ * Minimum total closed trades across all walk-forward windows
+ * for a strategy to be considered statistically meaningful.
+ * With fewer than this, performance is indistinguishable from noise.
+ */
+export const DEFAULT_MIN_TRADES_FOR_EVALUATION = 10;
+
 function positiveWindowRatio(evaluation: CandidateBacktestEvaluation): number {
   return evaluation.diagnostics.windows.positiveWindowRatio ?? 0;
 }
@@ -95,11 +102,16 @@ export function calculateCandidateRiskAdjustedScore(
   const percentile = randomPercentile(evaluation);
   const maxDrawdown = resolveEvaluationMaxDrawdown(evaluation);
 
+  // Hard penalty: strategies with too few trades are statistically meaningless
+  if (trades < DEFAULT_MIN_TRADES_FOR_EVALUATION) {
+    return Number((-0.5 + trades * 0.01).toFixed(6));
+  }
+
   let score = evaluation.summary.netReturn;
   score -= maxDrawdown * 1.25;
   score += positiveWindowRatio(evaluation) * 0.15;
   score += worstWindowNetReturn(evaluation) * 0.35;
-  score += Math.min(trades, 20) * 0.0025;
+  score += Math.min(trades, 50) * 0.002;
   score += Math.min(windows, 12) * 0.003;
 
   if (tradefulScore(evaluation) === 0) {
@@ -135,15 +147,19 @@ export function passesPromotionGate(
     return false;
   }
 
-  if (
-    config?.minTrades !== undefined &&
-    resolveEvaluationTradeCount(evaluation) < config.minTrades
-  ) {
+  const minTrades = config?.minTrades ?? DEFAULT_MIN_TRADES_FOR_EVALUATION;
+  if (resolveEvaluationTradeCount(evaluation) < minTrades) {
     return false;
   }
 
   const minNetReturn = config?.minNetReturn ?? DEFAULT_MIN_NET_RETURN_FOR_PROMOTION;
   if (evaluation.summary.netReturn <= minNetReturn) {
+    return false;
+  }
+
+  // Must beat buy-and-hold — no point promoting a strategy that underperforms passive holding
+  const bh = evaluation.summary.buyAndHoldReturn;
+  if (bh !== undefined && evaluation.summary.netReturn <= bh) {
     return false;
   }
 
@@ -249,10 +265,14 @@ export function compareCandidateEvaluations(
 }
 
 export function summarizeEvaluationRanking(evaluation: CandidateBacktestEvaluation) {
+  const bh = evaluation.summary.buyAndHoldReturn;
+  const excessReturn = bh !== undefined ? evaluation.summary.netReturn - bh : undefined;
   return {
     tradeful: resolveEvaluationTradeCount(evaluation) > 0,
     riskAdjustedScore: calculateCandidateRiskAdjustedScore(evaluation),
     netReturn: evaluation.summary.netReturn,
+    buyAndHoldReturn: bh,
+    excessReturn,
     maxDrawdown: resolveEvaluationMaxDrawdown(evaluation),
     tradeCount: resolveEvaluationTradeCount(evaluation),
     positiveWindowRatio: positiveWindowRatio(evaluation),

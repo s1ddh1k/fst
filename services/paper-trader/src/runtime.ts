@@ -66,46 +66,40 @@ function updateSyntheticCandle(
   const last = candles[candles.length - 1];
 
   if (!last || last.candleTimeUtc.getTime() !== bucketStart.getTime()) {
-    const next = [
-      ...candles,
-      {
-        marketCode: message.code,
-        timeframe,
-        candleTimeUtc: bucketStart,
-        openPrice: message.trade_price,
-        highPrice: message.trade_price,
-        lowPrice: message.trade_price,
-        closePrice: message.trade_price,
-        volume: message.trade_volume,
-        quoteVolume: message.trade_price * message.trade_volume,
-        isSynthetic: false
-      }
-    ];
-    const trimmed = next.slice(-400);
+    candles.push({
+      marketCode: message.code,
+      timeframe,
+      candleTimeUtc: bucketStart,
+      openPrice: message.trade_price,
+      highPrice: message.trade_price,
+      lowPrice: message.trade_price,
+      closePrice: message.trade_price,
+      volume: message.trade_volume,
+      quoteVolume: message.trade_price * message.trade_volume,
+      isSynthetic: false
+    });
+    const droppedCount = Math.max(0, candles.length - 400);
+    if (droppedCount > 0) candles.splice(0, droppedCount);
 
     return {
-      candles: trimmed,
+      candles,
       openedNewBucket: true,
-      droppedCount: Math.max(0, next.length - trimmed.length)
+      droppedCount
     };
   }
 
-  const nextCandles = candles.slice(0, -1);
-  nextCandles.push({
-    ...last,
-    highPrice: Math.max(last.highPrice, message.trade_price),
-    lowPrice: Math.min(last.lowPrice, message.trade_price),
-    closePrice: message.trade_price,
-    volume: last.volume + message.trade_volume,
-    quoteVolume: (last.quoteVolume ?? last.closePrice * last.volume) + message.trade_price * message.trade_volume,
-    isSynthetic: false
-  });
-  const trimmed = nextCandles.slice(-400);
+  const prevQuoteVolume = last.quoteVolume ?? (last.closePrice * last.volume);
+  last.highPrice = Math.max(last.highPrice, message.trade_price);
+  last.lowPrice = Math.min(last.lowPrice, message.trade_price);
+  last.closePrice = message.trade_price;
+  last.volume += message.trade_volume;
+  last.quoteVolume = prevQuoteVolume + message.trade_price * message.trade_volume;
+  last.isSynthetic = false;
 
   return {
-    candles: trimmed,
+    candles,
     openedNewBucket: false,
-    droppedCount: Math.max(0, nextCandles.length - trimmed.length)
+    droppedCount: 0
   };
 }
 
@@ -333,6 +327,8 @@ export async function runRecommendedLivePaperTrading(params: {
 
   const initialEquity = params.currentBalance ?? params.startingBalance;
   let runtimePeakEquity = initialEquity;
+  let lastDbSyncMs = 0;
+  const DB_SYNC_INTERVAL_MS = 30_000;
 
   const state: RuntimeState = {
     cash: resolveAvailablePaperCash({
@@ -384,19 +380,27 @@ export async function runRecommendedLivePaperTrading(params: {
           candleCount: state.candles.length
         })
       ) {
-        await syncMarkToDb({
-          sessionId: params.sessionId,
-          marketCode: params.marketCode,
-          cash: state.cash,
-          quantity: state.quantity,
-          avgEntryPrice: state.avgEntryPrice,
-          realizedPnl: state.realizedPnl,
-          markPrice: message.trade_price
-        });
+        const now = Date.now();
+        if (now - lastDbSyncMs >= DB_SYNC_INTERVAL_MS) {
+          lastDbSyncMs = now;
+          await syncMarkToDb({
+            sessionId: params.sessionId,
+            marketCode: params.marketCode,
+            cash: state.cash,
+            quantity: state.quantity,
+            avgEntryPrice: state.avgEntryPrice,
+            realizedPnl: state.realizedPnl,
+            markPrice: message.trade_price
+          });
+        }
         return;
       }
 
       const signalIndex = state.candles.length - 2;
+      const equity = state.cash + state.quantity * message.trade_price;
+      const pnl = state.quantity > 0 ? ((message.trade_price - state.avgEntryPrice) / state.avgEntryPrice * 100).toFixed(2) : "0";
+      process.stderr.write(`[candle] ${params.marketCode} bars=${state.candles.length} equity=${Math.round(equity)} pnl=${pnl}%\n`);
+
       const marketState = await buildSignalMarketState({
         marketCode: params.marketCode,
         timeframe: params.timeframe,
@@ -424,12 +428,15 @@ export async function runRecommendedLivePaperTrading(params: {
             : undefined
       };
 
-      const signal = isScored && scoredStrategy
-        ? scoredStrategy.generateSignal(signalContext).signal
-        : strategy!.generateSignal(signalContext);
-      const conviction = isScored && scoredStrategy
-        ? scoredStrategy.generateSignal(signalContext).conviction
-        : 1;
+      let signal: "BUY" | "SELL" | "HOLD";
+      let conviction = 1;
+      if (isScored && scoredStrategy) {
+        const result = scoredStrategy.generateSignal(signalContext);
+        signal = result.signal;
+        conviction = result.conviction;
+      } else {
+        signal = strategy!.generateSignal(signalContext);
+      }
 
       if (isScored && riskManager) {
         const currentEquity = state.cash + state.quantity * message.trade_price;
@@ -471,6 +478,11 @@ export async function runRecommendedLivePaperTrading(params: {
         }
 
         riskManager.onBarClose(state.cash + state.quantity * message.trade_price);
+      }
+
+      if (signal !== "HOLD") {
+        const time = state.candles[signalIndex]?.candleTimeUtc?.toISOString().slice(0, 16) ?? "";
+        process.stderr.write(`[${time}] ${params.marketCode} signal=${signal} price=${message.trade_price} pos=${state.quantity > 0 ? "long" : "flat"}\n`);
       }
 
       if (signal === "BUY" && state.quantity === 0 && state.cash > 0) {

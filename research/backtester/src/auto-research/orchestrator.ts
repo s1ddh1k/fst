@@ -74,6 +74,7 @@ import { renderAutoResearchHtmlWithOptions } from "./report-html.js";
 import { runPostMutationValidation } from "./validation.js";
 import { autoPromoteAndLog } from "./auto-promote.js";
 import { discoverRuntimeScoredStrategyNames } from "./runtime-discovery.js";
+import { generateOptimizedCandidatesForFamilies } from "./parameter-optimizer.js";
 import { repairWalkForwardConfig } from "./walk-forward-config.js";
 import { calculateAutoResearchMinimumLimit, repairAutoResearchLimit } from "./limit-resolution.js";
 import {
@@ -609,6 +610,8 @@ type LiveLeaderboardEntry = {
   netReturn: number;
   maxDrawdown: number;
   tradeCount: number;
+  buyAndHoldReturn?: number;
+  excessReturn?: number;
   parameters: Record<string, number>;
 };
 
@@ -823,29 +826,26 @@ function buildLeaderboard(
   iterations: ResearchIterationRecord[],
   liveEvaluations: CandidateBacktestEvaluation[] = []
 ): LiveLeaderboardEntry[] {
-  return [
-    ...iterations.flatMap((iteration) =>
-      iteration.evaluations.map((evaluation) => ({
-        iteration: iteration.iteration,
-        candidateId: evaluation.candidate.candidateId,
-        familyId: evaluation.candidate.familyId,
-        riskAdjustedScore: calculateCandidateRiskAdjustedScore(evaluation),
-        netReturn: evaluation.summary.netReturn,
-        maxDrawdown: evaluation.summary.maxDrawdown,
-        tradeCount: evaluation.summary.tradeCount,
-        parameters: evaluation.candidate.parameters
-      }))
-    ),
-    ...liveEvaluations.map((evaluation) => ({
-      iteration: iterations.length + 1,
+  const toEntry = (evaluation: CandidateBacktestEvaluation, iter: number) => {
+    const bh = evaluation.summary.buyAndHoldReturn;
+    return {
+      iteration: iter,
       candidateId: evaluation.candidate.candidateId,
       familyId: evaluation.candidate.familyId,
       riskAdjustedScore: calculateCandidateRiskAdjustedScore(evaluation),
       netReturn: evaluation.summary.netReturn,
       maxDrawdown: evaluation.summary.maxDrawdown,
       tradeCount: evaluation.summary.tradeCount,
+      buyAndHoldReturn: bh,
+      excessReturn: bh !== undefined ? evaluation.summary.netReturn - bh : undefined,
       parameters: evaluation.candidate.parameters
-    }))
+    };
+  };
+  return [
+    ...iterations.flatMap((iteration) =>
+      iteration.evaluations.map((evaluation) => toEntry(evaluation, iteration.iteration))
+    ),
+    ...liveEvaluations.map((evaluation) => toEntry(evaluation, iterations.length + 1))
   ].sort((left, right) => {
     if (right.riskAdjustedScore !== left.riskAdjustedScore) {
       return right.riskAdjustedScore - left.riskAdjustedScore;
@@ -1714,6 +1714,34 @@ async function buildEngineAugmentedCandidates(params: {
 
     addMutationCandidate(evaluation, mutationSeed);
     mutationSeed += 1;
+  }
+
+  // Fill remaining budget with optimizer-generated candidates
+  // These use LHS exploration + Gaussian exploitation around best known params
+  const optimizerBudget = params.config.candidatesPerIteration - engineCandidates.length;
+  if (optimizerBudget > 0) {
+    const activeFamilies = params.families.filter(
+      (f) => !params.hiddenFamilyIds.has(f.familyId)
+    );
+    const optimizerCandidates = generateOptimizedCandidatesForFamilies({
+      families: activeFamilies,
+      previousEvaluations: historicalEvaluations,
+      iteration: params.iteration,
+      totalBudget: optimizerBudget,
+      config: {
+        minDistance: params.config.candidateDiversificationMinDistance ?? 0.08,
+        seed: params.iteration * 7919
+      }
+    });
+
+    for (const candidate of optimizerCandidates) {
+      if (engineCandidates.length >= params.config.candidatesPerIteration) break;
+      const fp = candidateFingerprint(candidate);
+      if (usedFingerprints.has(fp)) continue;
+      usedFingerprints.add(fp);
+      representedFamilies.add(candidate.familyId);
+      engineCandidates.push(candidate);
+    }
   }
 
   return engineCandidates;

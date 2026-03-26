@@ -24,8 +24,11 @@ Operating principles:
 const AUTO_RESEARCH_GLOBAL_PROMPT = `
 Global research policy:
 - Use only the structured JSON facts provided in the prompt.
-- Favor diverse hypotheses over narrow parameter twitching.
-- Prefer walk-forward candidates with positive window breadth, tolerable worst-window outcomes, and non-trivial closed-trade counts.
+- Focus on STRATEGY STRUCTURE and LOGIC — which indicators, entry/exit rules, regime filters.
+- DO NOT spend effort fine-tuning numeric parameters. A numeric optimizer handles parameter search automatically. Your parameter values are starting points, not final.
+- Favor diverse strategy STRUCTURES over narrow parameter twitching of existing strategies.
+- Prefer walk-forward candidates with positive window breadth, tolerable worst-window outcomes, and non-trivial closed-trade counts (minimum 10 trades across all windows).
+- Strategies that underperform buy-and-hold are useless — focus on generating genuine edge.
 - Treat code mutation as a last-mile tool, not the default action.
 - When proposing a refinement of an earlier candidate, include parentCandidateIds.
 `.trim();
@@ -65,10 +68,15 @@ export function buildEvaluationAnalysis(evaluation: CandidateBacktestEvaluation)
   const w = d.windows;
   const feesAteProfits = s.grossReturn > 0 && s.netReturn <= 0;
   const fewTrades = s.tradeCount < 5;
+  const tooFewTradesForStatistics = (w.totalClosedTrades ?? s.tradeCount) < 10;
   const highGhostRatio = d.coverage.ghostSignalCount > d.coverage.signalCount * 2;
   const windowSpread = (w.bestWindowNetReturn ?? 0) - (w.worstWindowNetReturn ?? 0);
   const topRejectReasons = Object.entries({ ...d.reasons.strategy, ...d.reasons.risk })
     .sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k}(${v})`);
+
+  const buyAndHoldReturn = s.buyAndHoldReturn;
+  const excessReturn = buyAndHoldReturn !== undefined ? s.netReturn - buyAndHoldReturn : undefined;
+  const underperformsBaseline = excessReturn !== undefined && excessReturn <= 0;
 
   return {
     candidateId: evaluation.candidate.candidateId,
@@ -76,8 +84,11 @@ export function buildEvaluationAnalysis(evaluation: CandidateBacktestEvaluation)
     parameters: evaluation.candidate.parameters,
     netReturn: +(s.netReturn * 100).toFixed(2),
     grossReturn: +(s.grossReturn * 100).toFixed(2),
+    buyAndHoldReturn: buyAndHoldReturn !== undefined ? +(buyAndHoldReturn * 100).toFixed(2) : undefined,
+    excessReturn: excessReturn !== undefined ? +(excessReturn * 100).toFixed(2) : undefined,
     maxDrawdown: +(s.maxDrawdown * 100).toFixed(2),
     tradeCount: s.tradeCount,
+    totalClosedTrades: w.totalClosedTrades ?? s.tradeCount,
     feePaid: +s.feePaid.toFixed(4),
     winRate: +(s.winRate * 100).toFixed(1),
     positiveWindowRatio: w.positiveWindowRatio ?? 0,
@@ -87,6 +98,8 @@ export function buildEvaluationAnalysis(evaluation: CandidateBacktestEvaluation)
     diagnosis: {
       feesAteProfits,
       fewTrades,
+      tooFewTradesForStatistics,
+      underperformsBaseline,
       highGhostRatio,
       windowSpread: +(windowSpread * 100).toFixed(2),
       topRejectReasons,
@@ -560,13 +573,15 @@ Your next candidates MUST fix these specific problems. Do NOT repeat the same mi
 ` : ""}
 Task — think like a researcher:
 1. Look at recentEvaluations.diagnosis for each candidate:
+   - underperformsBaseline=true → strategy has NO edge over buy-and-hold. Consider a DIFFERENT strategy structure.
+   - tooFewTradesForStatistics=true → fewer than 10 trades total, results are noise. MUST relax entry conditions significantly.
    - feesAteProfits=true → reduce trade frequency (widen thresholds, increase rebalanceBars)
    - fewTrades=true → relax entry conditions (lower RSI threshold, widen regime gate)
    - highGhostRatio=true → signals generated but blocked — relax position limits or cooldown
    - worstWindow much worse than bestWindow → strategy is regime-dependent, tighten regime gate
    - topRejectReasons tells you exactly what's blocking trades — address those specific reasons
 2. Each nextCandidate must state in its thesis WHAT problem it's fixing from the previous evaluation.
-3. Explore parameter extremes and corners, not just midpoints.
+3. Focus on strategy STRUCTURE changes (different indicator combos, entry/exit logic) rather than tweaking parameter values. A numeric optimizer handles parameter search automatically.
 4. Generate executable candidates from the listed block families only.
 
 Return JSON only:
@@ -653,14 +668,17 @@ ${jsonBlock({
 Task — analyze like a researcher, not a parameter optimizer:
 
 1. DIAGNOSE: For each candidate, analyze WHY it performed the way it did:
+   - Check excessReturn — is the strategy actually beating buy-and-hold? underperformsBaseline=true means it has NO real edge.
+   - Check totalClosedTrades — strategies with fewer than 10 total trades are STATISTICALLY MEANINGLESS, don't promote them.
    - Check costs.totalCostsPaid vs summary.grossReturn — is the strategy profitable before fees but killed by costs? → reduce trade frequency
    - Check windows.positiveWindowRatio — does it win in some periods and lose in others? → identify which market conditions work
    - Check windows.bestWindowNetReturn vs worstWindowNetReturn — how wide is the spread? → strategy may need regime filtering
    - Check coverage.ghostSignalCount vs signalCount — are signals being generated but not executed? → position limits or cooldown too tight
    - Check reasons.strategy / reasons.risk — what's blocking trades? → these are specific strategy rejection reasons
-   - Compare per-window returns — is the loss concentrated in 1-2 bad windows or spread evenly?
 
 2. EXPLAIN: In your summary, state the specific failure mechanism:
+   - "excessReturn=-1.2% → strategy underperforms simply holding the market, no real edge detected"
+   - "Only 4 total closed trades → results are noise, need to relax entry to generate at least 10+ trades"
    - "Gross return +2.3% but fees ate 3.1% → need fewer trades with higher conviction"
    - "4 out of 6 windows profitable but window 3 lost -5% → strategy fails in downtrends, add trend filter"
    - "Only 3 trades in 90 days → entry conditions too restrictive, relax RSI threshold from 25 to 35"

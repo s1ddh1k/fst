@@ -33,12 +33,12 @@ function buildEvaluation(candidate: NormalizedCandidateProposal, netReturn: numb
       turnover: 0.3,
       winRate: 0.5,
       avgHoldBars: 10,
-      tradeCount: 4,
+      tradeCount: 20,
       feePaid: 10,
       slippagePaid: 15,
       rejectedOrdersCount: 0,
       cooldownSkipsCount: 0,
-      signalCount: 6,
+      signalCount: 30,
       ghostSignalCount: 12,
       bootstrapPValue: 0.04,
       bootstrapSignificant: true,
@@ -46,8 +46,8 @@ function buildEvaluation(candidate: NormalizedCandidateProposal, netReturn: numb
     },
     diagnostics: {
       coverage: {
-        tradeCount: 4,
-        signalCount: 6,
+        tradeCount: 20,
+        signalCount: 30,
         ghostSignalCount: 12,
         rejectedOrdersCount: 0,
         cooldownSkipsCount: 0,
@@ -285,7 +285,7 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
   assert.equal(proposeCalls, 1);
   assert.equal(report.iterations.length, 1);
   assert.equal(report.bestCandidate?.summary.netReturn, 0.12);
-  assert.equal(report.bestTradeCandidate?.summary.tradeCount, 4);
+  assert.equal(report.bestTradeCandidate?.summary.tradeCount, 20);
   assert.ok(report.catalog.some((entry) => entry.familyId === "momentum-reacceleration-v1"));
 
   const savedReport = JSON.parse(await readFile(path.join(outputDir, "report.json"), "utf8"));

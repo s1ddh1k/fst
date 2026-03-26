@@ -14,9 +14,11 @@ export async function streamTickers(params: {
 }): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let handledEvents = 0;
+    let busy = false;
     const websocket = new WebSocket("wss://api.upbit.com/websocket/v1");
 
     websocket.addEventListener("open", () => {
+      process.stderr.write(`[stream] connected, subscribing to ${params.marketCodes.length} markets\n`);
       websocket.send(
         JSON.stringify([
           {
@@ -35,6 +37,8 @@ export async function streamTickers(params: {
     });
 
     websocket.addEventListener("message", async (event: MessageEvent<string | Blob | ArrayBuffer>) => {
+      if (busy) return;
+      busy = true;
       try {
         const text =
           typeof event.data === "string"
@@ -52,11 +56,13 @@ export async function streamTickers(params: {
       } catch (error) {
         websocket.close();
         reject(error);
+      } finally {
+        busy = false;
       }
     });
 
-    websocket.addEventListener("close", () => resolve());
-    websocket.addEventListener("error", (error: Event) => reject(error));
+    websocket.addEventListener("close", () => { process.stderr.write("[stream] disconnected\n"); resolve(); });
+    websocket.addEventListener("error", (error: Event) => { process.stderr.write(`[stream] error: ${String(error)}\n`); reject(error); });
   });
 }
 

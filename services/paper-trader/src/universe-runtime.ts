@@ -69,46 +69,40 @@ function updateSyntheticCandle(
   const last = candles[candles.length - 1];
 
   if (!last || last.candleTimeUtc.getTime() !== bucketStart.getTime()) {
-    const next = [
-      ...candles,
-      {
-        marketCode: message.code,
-        timeframe,
-        candleTimeUtc: bucketStart,
-        openPrice: message.trade_price,
-        highPrice: message.trade_price,
-        lowPrice: message.trade_price,
-        closePrice: message.trade_price,
-        volume: message.trade_volume,
-        quoteVolume: message.trade_price * message.trade_volume,
-        isSynthetic: false
-      }
-    ];
-    const trimmed = next.slice(-400);
+    candles.push({
+      marketCode: message.code,
+      timeframe,
+      candleTimeUtc: bucketStart,
+      openPrice: message.trade_price,
+      highPrice: message.trade_price,
+      lowPrice: message.trade_price,
+      closePrice: message.trade_price,
+      volume: message.trade_volume,
+      quoteVolume: message.trade_price * message.trade_volume,
+      isSynthetic: false
+    });
+    const droppedCount = Math.max(0, candles.length - 400);
+    if (droppedCount > 0) candles.splice(0, droppedCount);
 
     return {
-      candles: trimmed,
+      candles,
       openedNewBucket: true,
-      droppedCount: Math.max(0, next.length - trimmed.length)
+      droppedCount
     };
   }
 
-  const nextCandles = candles.slice(0, -1);
-  nextCandles.push({
-    ...last,
-    highPrice: Math.max(last.highPrice, message.trade_price),
-    lowPrice: Math.min(last.lowPrice, message.trade_price),
-    closePrice: message.trade_price,
-    volume: last.volume + message.trade_volume,
-    quoteVolume: (last.quoteVolume ?? last.closePrice * last.volume) + message.trade_price * message.trade_volume,
-    isSynthetic: false
-  });
-  const trimmed = nextCandles.slice(-400);
+  const prevQuoteVolume = last.quoteVolume ?? (last.closePrice * last.volume);
+  last.highPrice = Math.max(last.highPrice, message.trade_price);
+  last.lowPrice = Math.min(last.lowPrice, message.trade_price);
+  last.closePrice = message.trade_price;
+  last.volume += message.trade_volume;
+  last.quoteVolume = prevQuoteVolume + message.trade_price * message.trade_volume;
+  last.isSynthetic = false;
 
   return {
-    candles: trimmed,
+    candles,
     openedNewBucket: false,
-    droppedCount: Math.max(0, nextCandles.length - trimmed.length)
+    droppedCount: 0
   };
 }
 
@@ -467,6 +461,8 @@ export async function runRecommendedUniverseScoredPaperTrading(params: {
   let lastEvaluatedBucketTimeMs: number | null = null;
   let evaluationBarIndex = 0;
   let peakEquity = params.currentBalance;
+  let lastDbSyncMs = 0;
+  const DB_SYNC_INTERVAL_MS = 30_000;
 
   await streamTickers({
     marketCodes: universeMarkets,
@@ -493,6 +489,30 @@ export async function runRecommendedUniverseScoredPaperTrading(params: {
         return;
       }
 
+      if (
+        !opsGuard.shouldEvaluateSignal({
+          openedNewBucket: candleUpdate.openedNewBucket,
+          candleCount: candleUpdate.candles.length
+        })
+      ) {
+        const now = Date.now();
+        if (now - lastDbSyncMs >= DB_SYNC_INTERVAL_MS) {
+          lastDbSyncMs = now;
+          await syncUniverseMarksToDb({
+            sessionId: params.sessionId,
+            cash: state.cash,
+            positions: state.positions,
+            realizedPnlByMarket: state.realizedPnlByMarket,
+            universeCandlesByMarket: state.universeCandlesByMarket
+          });
+        }
+        return;
+      }
+
+      if (lastEvaluatedBucketTimeMs === currentBucketTime.getTime()) {
+        return;
+      }
+
       for (const marketCode of universeMarkets) {
         if (marketCode === message.code) {
           continue;
@@ -504,26 +524,6 @@ export async function runRecommendedUniverseScoredPaperTrading(params: {
           marketCode,
           currentBucketTime
         );
-      }
-
-      if (
-        !opsGuard.shouldEvaluateSignal({
-          openedNewBucket: candleUpdate.openedNewBucket,
-          candleCount: candleUpdate.candles.length
-        })
-      ) {
-        await syncUniverseMarksToDb({
-          sessionId: params.sessionId,
-          cash: state.cash,
-          positions: state.positions,
-          realizedPnlByMarket: state.realizedPnlByMarket,
-          universeCandlesByMarket: state.universeCandlesByMarket
-        });
-        return;
-      }
-
-      if (lastEvaluatedBucketTimeMs === currentBucketTime.getTime()) {
-        return;
       }
 
       const referenceTime = previousBucketTime(currentBucketTime, params.timeframe);

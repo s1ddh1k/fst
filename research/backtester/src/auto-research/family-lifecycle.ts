@@ -1,10 +1,13 @@
 import type { CandidateBacktestEvaluation, ResearchIterationRecord } from "./types.js";
+import { calculateCandidateRiskAdjustedScore } from "./ranking.js";
 
 export class FamilyLifecycleTracker {
   private stagnationStreak = new Map<string, number>();
   private consecutiveNegative = new Map<string, number>();
+  private consecutiveBelowBaseline = new Map<string, number>();
   private iterationCounts = new Map<string, number>();
   private bestNetReturn = new Map<string, number>();
+  private bestRiskAdjustedScore = new Map<string, number>();
   private retired = new Set<string>();
   private globalBestNet = -Infinity;
   private globalBestRepeatCount = 0;
@@ -12,17 +15,26 @@ export class FamilyLifecycleTracker {
   private readonly iterationBudget: number;
   private readonly negativeRetireThreshold: number;
   private readonly globalConvergenceThreshold: number;
+  private readonly belowBaselineRetireThreshold: number;
+  private readonly hopelessScoreThreshold: number;
+  private readonly hopelessMinIterations: number;
 
   constructor(params: {
     stagnationThreshold?: number;
     iterationBudget?: number;
     negativeRetireThreshold?: number;
     globalConvergenceThreshold?: number;
+    belowBaselineRetireThreshold?: number;
+    hopelessScoreThreshold?: number;
+    hopelessMinIterations?: number;
   }) {
-    this.stagnationThreshold = params.stagnationThreshold ?? 8;
-    this.iterationBudget = params.iterationBudget ?? 20;
-    this.negativeRetireThreshold = params.negativeRetireThreshold ?? 4;
+    this.stagnationThreshold = params.stagnationThreshold ?? 5;
+    this.iterationBudget = params.iterationBudget ?? 15;
+    this.negativeRetireThreshold = params.negativeRetireThreshold ?? 3;
     this.globalConvergenceThreshold = params.globalConvergenceThreshold ?? 3;
+    this.belowBaselineRetireThreshold = params.belowBaselineRetireThreshold ?? 4;
+    this.hopelessScoreThreshold = params.hopelessScoreThreshold ?? -0.2;
+    this.hopelessMinIterations = params.hopelessMinIterations ?? 5;
   }
 
   restoreFromHistory(
@@ -114,8 +126,42 @@ export class FamilyLifecycleTracker {
         this.consecutiveNegative.set(fid, 0);
       }
 
-      // Budget exhaustion
+      // Consecutive below-baseline retirement — all candidates lose to buy-and-hold
+      if (iterBest) {
+        const bh = iterBest.summary.buyAndHoldReturn;
+        const underperforms = bh !== undefined && iterBest.summary.netReturn <= bh;
+        if (underperforms) {
+          const belowStreak = (this.consecutiveBelowBaseline.get(fid) ?? 0) + 1;
+          this.consecutiveBelowBaseline.set(fid, belowStreak);
+          if (belowStreak >= this.belowBaselineRetireThreshold && !this.retired.has(fid)) {
+            this.retired.add(fid);
+            newlyRetired.push(fid);
+          }
+        } else {
+          this.consecutiveBelowBaseline.set(fid, 0);
+        }
+      }
+
+      // Hopeless family — best-ever score still very low after several iterations
       const count = this.iterationCounts.get(fid) ?? 0;
+      const bestScore = this.bestRiskAdjustedScore.get(fid) ?? -Infinity;
+      if (iterBest) {
+        const score = calculateCandidateRiskAdjustedScore(iterBest);
+        if (score > bestScore) {
+          this.bestRiskAdjustedScore.set(fid, score);
+        }
+      }
+      const currentBestScore = this.bestRiskAdjustedScore.get(fid) ?? -Infinity;
+      if (
+        count >= this.hopelessMinIterations &&
+        currentBestScore < this.hopelessScoreThreshold &&
+        !this.retired.has(fid)
+      ) {
+        this.retired.add(fid);
+        newlyRetired.push(fid);
+      }
+
+      // Budget exhaustion
       if (count >= this.iterationBudget && !this.retired.has(fid)) {
         this.retired.add(fid);
         newlyRetired.push(fid);
@@ -151,9 +197,11 @@ export class FamilyLifecycleTracker {
       .map(([fid, iter]) => {
         const stag = this.stagnationStreak.get(fid) ?? 0;
         const neg = this.consecutiveNegative.get(fid) ?? 0;
+        const belowBH = this.consecutiveBelowBaseline.get(fid) ?? 0;
         const best = this.bestNetReturn.get(fid) ?? 0;
+        const score = this.bestRiskAdjustedScore.get(fid);
         const status = this.retired.has(fid) ? "RETIRED" : "active";
-        return `${fid}(${status} iter=${iter} stag=${stag} neg=${neg} best=${(best*100).toFixed(2)}%)`;
+        return `${fid}(${status} iter=${iter} stag=${stag} neg=${neg} belowBH=${belowBH} best=${(best*100).toFixed(2)}%${score !== undefined ? ` score=${score.toFixed(3)}` : ""})`;
       })
       .join(", ");
     return entries;

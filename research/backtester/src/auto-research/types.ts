@@ -312,6 +312,8 @@ export type CandidateBacktestEvaluation = {
     bootstrapPValue?: number;
     bootstrapSignificant?: boolean;
     randomPercentile?: number;
+    /** Average buy-and-hold return across test windows for baseline comparison */
+    buyAndHoldReturn?: number;
   };
   diagnostics: CandidateEvaluationDiagnostics;
   rawSummary?: HoldoutBacktestSummary | WalkForwardBacktestSummary;

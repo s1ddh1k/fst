@@ -6,7 +6,29 @@ import { evaluateBlockCandidate } from "./block-evaluator.js";
 import { evaluatePortfolioCandidate } from "./portfolio-evaluator.js";
 import { isPortfolioStrategyName } from "./portfolio-runtime.js";
 import { getResolvedWalkForwardConfig, summarizeReferenceCandleSpan, type ReferenceCandleSpan } from "./walk-forward-config.js";
+import type { Candle } from "../types.js";
 import type { AutoResearchRunConfig, CandidateBacktestEvaluation, NormalizedCandidateProposal, ValidatedBlockCatalog } from "./types.js";
+
+/**
+ * Compute average buy-and-hold return across all markets for a given range.
+ */
+function computeBuyAndHoldFromPreloaded(
+  universeCandlesByMarket: Record<string, Candle[]>,
+  range: { start: Date; end: Date }
+): number {
+  const returns: number[] = [];
+  for (const candles of Object.values(universeCandlesByMarket)) {
+    const inRange = candles.filter((c) => c.candleTimeUtc >= range.start && c.candleTimeUtc <= range.end);
+    if (inRange.length < 2) continue;
+    const sorted = inRange.slice().sort((a, b) => a.candleTimeUtc.getTime() - b.candleTimeUtc.getTime());
+    const firstOpen = sorted[0].openPrice;
+    const lastClose = sorted[sorted.length - 1].closePrice;
+    if (firstOpen > 0) {
+      returns.push((lastClose - firstOpen) / firstOpen);
+    }
+  }
+  return returns.length === 0 ? 0 : returns.reduce((s, v) => s + v, 0) / returns.length;
+}
 
 function getOption(args: string[], key: string): string | undefined {
   const index = args.indexOf(key);
@@ -321,6 +343,12 @@ async function main(): Promise<void> {
       const positiveWindowCount = windowReturns.filter((value) => value > 0).length;
       const negativeWindowCount = windowReturns.filter((value) => value < 0).length;
       const totalClosedTrades = summary.windows.reduce((sum, window) => sum + window.test.tradeCount, 0);
+      const windowBhReturns = summary.windows.map((w) =>
+        computeBuyAndHoldFromPreloaded(preloaded.universeCandlesByMarket, w.testRange)
+      );
+      const avgBuyAndHoldReturn = windowBhReturns.length === 0
+        ? 0
+        : windowBhReturns.reduce((s, v) => s + v, 0) / windowBhReturns.length;
       evaluation = {
         candidate: payload.candidate,
         mode: "walk-forward",
@@ -354,7 +382,8 @@ async function main(): Promise<void> {
           ghostSignalCount: aggregateSignals.ghostSignalCount,
           bootstrapSignificant: bootstrapPasses / Math.max(summary.scoredWindows.length, 1) >= 0.5,
           randomPercentile:
-            randomPercentiles.reduce((sum, value) => sum + value, 0) / Math.max(randomPercentiles.length, 1)
+            randomPercentiles.reduce((sum, value) => sum + value, 0) / Math.max(randomPercentiles.length, 1),
+          buyAndHoldReturn: avgBuyAndHoldReturn
         },
         diagnostics: {
           coverage: {
@@ -431,6 +460,10 @@ async function main(): Promise<void> {
         preloaded
       });
 
+      const holdoutBuyAndHold = computeBuyAndHoldFromPreloaded(
+        preloaded.universeCandlesByMarket,
+        summary.testRange
+      );
       evaluation = {
         candidate: payload.candidate,
         mode: "holdout",
@@ -452,7 +485,8 @@ async function main(): Promise<void> {
           ghostSignalCount: summary.scoredTest.ghostSignalCount,
           bootstrapPValue: summary.scoredTest.bootstrap?.pValue,
           bootstrapSignificant: summary.scoredTest.bootstrap?.isSignificant,
-          randomPercentile: summary.scoredTest.randomBenchmark?.percentileVsRandom
+          randomPercentile: summary.scoredTest.randomBenchmark?.percentileVsRandom,
+          buyAndHoldReturn: holdoutBuyAndHold
         },
         diagnostics: {
           coverage: {

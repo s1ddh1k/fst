@@ -8,6 +8,8 @@ type AutoResearchLeaderboardEntry = {
   netReturn: number;
   maxDrawdown: number;
   tradeCount: number;
+  buyAndHoldReturn?: number;
+  excessReturn?: number;
   parameters?: Record<string, number>;
 };
 
@@ -165,15 +167,21 @@ export function renderAutoResearchHtmlWithOptions(
   const leaderboardRows = (options.leaderboard ?? [])
     .slice(0, 12)
     .map(
-      (entry) => `
+      (entry) => {
+        const excess = entry.excessReturn;
+        const excessClass = excess !== undefined && excess <= 0 ? ' class="negative"' : "";
+        return `
             <tr>
               <td>${entry.iteration}</td>
               <td>${esc(entry.candidateId)}</td>
               <td>${esc(entry.familyId)}</td>
               <td>${pct(entry.netReturn)}</td>
+              <td>${entry.buyAndHoldReturn !== undefined ? pct(entry.buyAndHoldReturn) : "-"}</td>
+              <td${excessClass}>${excess !== undefined ? pct(excess) : "-"}</td>
               <td>${pct(entry.maxDrawdown)}</td>
               <td>${entry.tradeCount}</td>
-            </tr>`
+            </tr>`;
+      }
     )
     .join("");
   const rawLeaderboardRows = (options.rawLeaderboard ?? [])
@@ -242,20 +250,25 @@ export function renderAutoResearchHtmlWithOptions(
     .map((iteration) => {
       const evalRows = iteration.evaluations
         .map(
-          (evaluation) => `
+          (evaluation) => {
+            const bh = evaluation.summary.buyAndHoldReturn;
+            const excess = bh !== undefined ? evaluation.summary.netReturn - bh : undefined;
+            const excessClass = excess !== undefined && excess <= 0 ? ' class="negative"' : "";
+            return `
             <tr>
               <td>${esc(evaluation.candidate.candidateId)}</td>
               <td>${esc(evaluation.candidate.familyId)}</td>
               <td><code>${esc(JSON.stringify(evaluation.candidate.parameters))}</code></td>
               <td>${pct(evaluation.summary.netReturn)}</td>
+              <td>${bh !== undefined ? pct(bh) : "-"}</td>
+              <td${excessClass}>${excess !== undefined ? pct(excess) : "-"}</td>
               <td>${pct(evaluation.summary.maxDrawdown)}</td>
-              <td>${evaluation.summary.tradeCount}</td>
+              <td>${evaluation.diagnostics.windows.totalClosedTrades ?? evaluation.summary.tradeCount}</td>
               <td>${summarizeWindows(evaluation.diagnostics.windows)}</td>
               <td>${summarizeCrossChecks(evaluation.diagnostics.crossChecks)}</td>
               <td>${topReasons(evaluation.diagnostics.reasons.strategy)}</td>
-              <td>${topReasons(evaluation.diagnostics.reasons.coordinator)}</td>
-              <td>${topReasons(evaluation.diagnostics.reasons.execution)}</td>
-            </tr>`
+            </tr>`;
+          }
         )
         .join("");
 
@@ -271,13 +284,13 @@ export function renderAutoResearchHtmlWithOptions(
                 <th>Family</th>
                 <th>Parameters</th>
                 <th>Net</th>
+                <th>B&amp;H</th>
+                <th>Excess</th>
                 <th>Drawdown</th>
                 <th>Trades</th>
                 <th>Window Stats</th>
                 <th>Cross-Checks</th>
                 <th>Strategy Reasons</th>
-                <th>Coordinator Reasons</th>
-                <th>Execution Reasons</th>
               </tr>
             </thead>
             <tbody>${evalRows}</tbody>
@@ -310,6 +323,7 @@ export function renderAutoResearchHtmlWithOptions(
     th, td { text-align:left; padding:10px 8px; border-top:1px solid var(--line); vertical-align:top; }
     th { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
     code { font-size:12px; white-space:pre-wrap; word-break:break-word; }
+    .negative { color: #c0392b; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -379,6 +393,8 @@ export function renderAutoResearchHtmlWithOptions(
                 <th>Candidate</th>
                 <th>Family</th>
                 <th>Net</th>
+                <th>B&amp;H</th>
+                <th>Excess</th>
                 <th>Drawdown</th>
                 <th>Trades</th>
               </tr>
