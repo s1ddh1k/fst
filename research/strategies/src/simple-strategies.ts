@@ -375,3 +375,138 @@ export function createMomentumRotationStrategy(params?: {
     }
   };
 }
+
+// ---------------------------------------------------------------------------
+// 6. Oversold Bounce Scalp — 6 params
+//    Bear-market strategy: buy only on extreme oversold (RSI + BB),
+//    take small profit quickly, cut losses fast. Short holding period.
+// ---------------------------------------------------------------------------
+
+export function createOversoldBounceScalpStrategy(params?: {
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  bbWindow?: number;
+  bbMultiplier?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+}): ScoredStrategy {
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 15;
+  const bbWindow = params?.bbWindow ?? 20;
+  const bbMultiplier = params?.bbMultiplier ?? 2.5;
+  const profitTargetPct = params?.profitTargetPct ?? 0.02;
+  const stopLossPct = params?.stopLossPct ?? 0.03;
+
+  const parameters: Record<string, number> = {
+    rsiPeriod, rsiEntry, bbWindow, bbMultiplier, profitTargetPct, stopLossPct
+  };
+
+  return {
+    name: "oversold-bounce-scalp",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const bb = getBollingerBands(candles, index, bbWindow, bbMultiplier);
+
+      if (close === undefined || rsi === null || bb === null) {
+        return hold("insufficient_data");
+      }
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) {
+          return sell(0.9, "profit_target");
+        }
+
+        if (pnl < -stopLossPct) {
+          return sell(0.9, "stop_loss");
+        }
+
+        if (currentPosition.barsHeld >= 12) {
+          return sell(0.7, "time_exit");
+        }
+
+        return hold("hold_position");
+      }
+
+      if (rsi <= rsiEntry && close < bb.lower) {
+        return buy(0.8, "extreme_oversold_bounce");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7. Crash Dip Buy — 5 params
+//    Buy after sharp single-bar drops, ride the dead cat bounce.
+//    Uses ATR-normalized drop size to detect crashes.
+// ---------------------------------------------------------------------------
+
+export function createCrashDipBuyStrategy(params?: {
+  atrPeriod?: number;
+  dropAtrMult?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+  maxHoldBars?: number;
+}): ScoredStrategy {
+  const atrPeriod = params?.atrPeriod ?? 14;
+  const dropAtrMult = params?.dropAtrMult ?? 2.0;
+  const profitTargetPct = params?.profitTargetPct ?? 0.015;
+  const stopLossPct = params?.stopLossPct ?? 0.025;
+  const maxHoldBars = params?.maxHoldBars ?? 8;
+
+  const parameters: Record<string, number> = {
+    atrPeriod, dropAtrMult, profitTargetPct, stopLossPct, maxHoldBars
+  };
+
+  return {
+    name: "crash-dip-buy",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      const current = candles[index];
+      const previous = candles[index - 1];
+      const atr = getAtr(candles, index, atrPeriod);
+
+      if (!current || !previous || atr === null || atr === 0) {
+        return hold("insufficient_data");
+      }
+
+      const close = current.closePrice;
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) {
+          return sell(0.9, "profit_target");
+        }
+
+        if (pnl < -stopLossPct) {
+          return sell(0.9, "stop_loss");
+        }
+
+        if (currentPosition.barsHeld >= maxHoldBars) {
+          return sell(0.7, "time_exit");
+        }
+
+        return hold("hold_position");
+      }
+
+      const barDrop = (previous.closePrice - close) / atr;
+      if (barDrop >= dropAtrMult) {
+        return buy(0.8, "crash_dip_detected");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}

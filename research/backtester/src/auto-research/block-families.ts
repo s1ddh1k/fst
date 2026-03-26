@@ -435,6 +435,47 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
     ]
   },
   {
+    familyId: "block:simple-oversold-bounce-1h",
+    strategyName: "oversold-bounce-scalp",
+    title: "Oversold Bounce Scalp",
+    thesis: "Bear-market strategy: enter only on extreme oversold (low RSI + below BB lower), take small profit quickly (1-3%), cut losses fast. Max 12 bars hold.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "rsiPeriod", description: "RSI calculation period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI extreme oversold threshold.", min: 8, max: 25 },
+      { name: "bbWindow", description: "Bollinger Band window.", min: 14, max: 30 },
+      { name: "bbMultiplier", description: "BB multiplier (wider = more selective).", min: 1.8, max: 3.5 },
+      { name: "profitTargetPct", description: "Take profit at this % gain.", min: 0.005, max: 0.04 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.01, max: 0.05 }
+    ],
+    guardrails: [
+      "Long-only, bear-market bounce scalping.",
+      "6 parameters. Very selective entry, quick exit.",
+      "rsiEntry should be very low (8-25) for extreme oversold only."
+    ]
+  },
+  {
+    familyId: "block:simple-crash-dip-1h",
+    strategyName: "crash-dip-buy",
+    title: "Crash Dip Buy",
+    thesis: "Buy after sharp single-bar drops (>N*ATR), ride the dead cat bounce. Very short hold (4-12 bars), tight profit target and stop.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "atrPeriod", description: "ATR calculation period.", min: 10, max: 20 },
+      { name: "dropAtrMult", description: "Minimum drop size in ATR multiples to trigger entry.", min: 1.5, max: 4.0 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.005, max: 0.03 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.01, max: 0.04 },
+      { name: "maxHoldBars", description: "Maximum bars to hold.", min: 4, max: 16 }
+    ],
+    guardrails: [
+      "Long-only, crash bounce strategy.",
+      "5 parameters. Enters only on sharp drops.",
+      "Very short holding period — in and out quickly."
+    ]
+  },
+  {
     familyId: "block:simple-stochastic-rsi-reversion-1h",
     strategyName: "stochastic-rsi-reversion",
     title: "Stochastic RSI Mean Reversion",

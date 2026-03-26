@@ -24,7 +24,9 @@ import {
   createDonchianBreakoutStrategy,
   createSimpleRsiReversionStrategy,
   createSimpleBbReversionStrategy,
-  createMomentumRotationStrategy
+  createMomentumRotationStrategy,
+  createOversoldBounceScalpStrategy,
+  createCrashDipBuyStrategy
 } from "../../../strategies/src/simple-strategies.js";
 import type { Strategy, StrategySleeveConfig } from "../../../../packages/shared/src/index.js";
 import type { RegimeGateConfig } from "../multi-strategy/RegimeGatedStrategy.js";
@@ -484,6 +486,41 @@ async function createBlockStrategy(familyId: string, candidateId: string, params
     });
   }
 
+  if (familyId.includes("simple-oversold-bounce")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-bounce`,
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createOversoldBounceScalpStrategy({
+        rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 14), 7, 21),
+        rsiEntry: roundInt(finiteOrDefault(params.rsiEntry, 15), 8, 25),
+        bbWindow: roundInt(finiteOrDefault(params.bbWindow, 20), 14, 30),
+        bbMultiplier: clamp(finiteOrDefault(params.bbMultiplier, 2.5), 1.8, 3.5),
+        profitTargetPct: clamp(finiteOrDefault(params.profitTargetPct, 0.02), 0.005, 0.04),
+        stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.03), 0.01, 0.05)
+      })
+    });
+  }
+
+  if (familyId.includes("simple-crash-dip")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-crash`,
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createCrashDipBuyStrategy({
+        atrPeriod: roundInt(finiteOrDefault(params.atrPeriod, 14), 10, 20),
+        dropAtrMult: clamp(finiteOrDefault(params.dropAtrMult, 2.0), 1.5, 4.0),
+        profitTargetPct: clamp(finiteOrDefault(params.profitTargetPct, 0.015), 0.005, 0.03),
+        stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.025), 0.01, 0.04),
+        maxHoldBars: roundInt(finiteOrDefault(params.maxHoldBars, 8), 4, 16)
+      })
+    });
+  }
+
   // Dynamic fallback: try loading LLM-generated strategy
   try {
     const { loadDynamicStrategy } = await import("./dynamic-loader.js");
@@ -676,8 +713,10 @@ export async function evaluateBlockCandidate(params: {
 
   const sleeveId: "trend" | "breakout" | "micro" = candidate.familyId.includes("reversion") ? "micro"
     : candidate.familyId.includes("micro") ? "micro"
-      : candidate.familyId.includes("breakout") ? "breakout"
-        : "trend";
+      : candidate.familyId.includes("bounce") ? "micro"
+        : candidate.familyId.includes("crash-dip") ? "micro"
+          : candidate.familyId.includes("breakout") ? "breakout"
+            : "trend";
 
   const sleeves: StrategySleeveConfig[] = [{
     sleeveId,

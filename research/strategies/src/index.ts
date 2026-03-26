@@ -35,7 +35,9 @@ export {
   createDonchianBreakoutStrategy,
   createSimpleRsiReversionStrategy,
   createSimpleBbReversionStrategy,
-  createMomentumRotationStrategy
+  createMomentumRotationStrategy,
+  createOversoldBounceScalpStrategy,
+  createCrashDipBuyStrategy
 } from "./simple-strategies.js";
 export {
   SCORED_DECISION_TIMEFRAME,
