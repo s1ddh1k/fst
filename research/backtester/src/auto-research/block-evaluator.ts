@@ -31,7 +31,10 @@ import {
   createVolumeExhaustionBounceStrategy,
   createBbSqueezeScalpStrategy,
   createRelativeStrengthBounceStrategy,
-  createTrendAccelerationStrategy
+  createTrendAccelerationStrategy,
+  createVolumeExhaustionBounce5mStrategy,
+  createOversoldScalp5mStrategy,
+  createMomentumBurst5mStrategy
 } from "../../../strategies/src/simple-strategies.js";
 import type { Strategy, StrategySleeveConfig } from "../../../../packages/shared/src/index.js";
 import type { RegimeGateConfig } from "../multi-strategy/RegimeGatedStrategy.js";
@@ -616,6 +619,61 @@ async function createBlockStrategy(familyId: string, candidateId: string, params
         volumeMinMult: clamp(finiteOrDefault(params.volumeMinMult, 1.2), 1.0, 2.5),
         atrPeriod: roundInt(finiteOrDefault(params.atrPeriod, 14), 10, 20),
         atrTrailMult: clamp(finiteOrDefault(params.atrTrailMult, 2.5), 1.5, 4.0)
+      })
+    });
+  }
+
+  if (familyId.includes("simple-vol-exhaustion-5m")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-vex5m`,
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "5m",
+      executionTimeframe: "5m",
+      scoredStrategy: createVolumeExhaustionBounce5mStrategy({
+        dropLookback: roundInt(finiteOrDefault(params.dropLookback, 6), 3, 12),
+        dropThresholdPct: clamp(finiteOrDefault(params.dropThresholdPct, 0.02), 0.01, 0.04),
+        volumeWindow: roundInt(finiteOrDefault(params.volumeWindow, 24), 12, 36),
+        volumeSpikeMult: clamp(finiteOrDefault(params.volumeSpikeMult, 2.0), 1.5, 3.5),
+        rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 14), 7, 21),
+        rsiEntry: roundInt(finiteOrDefault(params.rsiEntry, 25), 12, 35),
+        profitTargetPct: clamp(finiteOrDefault(params.profitTargetPct, 0.008), 0.003, 0.02)
+      })
+    });
+  }
+
+  if (familyId.includes("simple-oversold-scalp-5m")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-os5m`,
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "5m",
+      executionTimeframe: "5m",
+      scoredStrategy: createOversoldScalp5mStrategy({
+        rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 14), 7, 21),
+        rsiEntry: roundInt(finiteOrDefault(params.rsiEntry, 20), 10, 30),
+        bbWindow: roundInt(finiteOrDefault(params.bbWindow, 20), 14, 30),
+        bbMultiplier: clamp(finiteOrDefault(params.bbMultiplier, 2.0), 1.5, 3.0),
+        profitTargetPct: clamp(finiteOrDefault(params.profitTargetPct, 0.006), 0.002, 0.015),
+        stopLossPct: clamp(finiteOrDefault(params.stopLossPct, 0.01), 0.005, 0.02)
+      })
+    });
+  }
+
+  if (familyId.includes("simple-momentum-burst-5m")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-mb5m`,
+      sleeveId: "breakout",
+      family: "breakout",
+      decisionTimeframe: "5m",
+      executionTimeframe: "5m",
+      scoredStrategy: createMomentumBurst5mStrategy({
+        momentumLookback: roundInt(finiteOrDefault(params.momentumLookback, 12), 6, 24),
+        momentumThresholdPct: clamp(finiteOrDefault(params.momentumThresholdPct, 0.015), 0.005, 0.03),
+        volumeWindow: roundInt(finiteOrDefault(params.volumeWindow, 24), 12, 36),
+        volumeSpikeMult: clamp(finiteOrDefault(params.volumeSpikeMult, 1.8), 1.3, 3.0),
+        atrPeriod: roundInt(finiteOrDefault(params.atrPeriod, 14), 10, 20),
+        atrTrailMult: clamp(finiteOrDefault(params.atrTrailMult, 2.0), 1.2, 3.0)
       })
     });
   }

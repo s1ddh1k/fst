@@ -921,3 +921,226 @@ export function createTrendAccelerationStrategy(params?: {
     }
   };
 }
+
+// ---------------------------------------------------------------------------
+// 5m STRATEGIES — higher frequency, more trades, smaller moves
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 13. Volume Exhaustion Bounce 5m — 7 params
+//    Same concept as 1h version but on 5m: catch micro-capitulation events.
+//    12x more opportunities per day. Tighter stops, faster exits.
+// ---------------------------------------------------------------------------
+
+export function createVolumeExhaustionBounce5mStrategy(params?: {
+  dropLookback?: number;
+  dropThresholdPct?: number;
+  volumeWindow?: number;
+  volumeSpikeMult?: number;
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  profitTargetPct?: number;
+}): ScoredStrategy {
+  const dropLookback = params?.dropLookback ?? 6;
+  const dropThresholdPct = params?.dropThresholdPct ?? 0.02;
+  const volumeWindow = params?.volumeWindow ?? 24;
+  const volumeSpikeMult = params?.volumeSpikeMult ?? 2.0;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 25;
+  const profitTargetPct = params?.profitTargetPct ?? 0.008;
+
+  const parameters: Record<string, number> = {
+    dropLookback, dropThresholdPct, volumeWindow, volumeSpikeMult, rsiPeriod, rsiEntry, profitTargetPct
+  };
+
+  return {
+    name: "volume-exhaustion-5m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      if (index < dropLookback) return hold("insufficient_data");
+
+      const close = candles[index]?.closePrice;
+      const pastClose = candles[index - dropLookback]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const volSpike = getVolumeSpikeRatio(candles, index, volumeWindow);
+
+      if (close === undefined || pastClose === undefined || rsi === null || volSpike === null || pastClose === 0) {
+        return hold("insufficient_data");
+      }
+
+      const dropPct = (pastClose - close) / pastClose;
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) {
+          return sell(0.9, "profit_target");
+        }
+
+        if (pnl < -(profitTargetPct * 2)) {
+          return sell(0.9, "stop_loss");
+        }
+
+        // 5m: max 36 bars = 3 hours
+        if (currentPosition.barsHeld >= 36) {
+          return sell(0.6, "time_exit");
+        }
+
+        if (rsi > 50 && pnl > 0) {
+          return sell(0.7, "rsi_recovered");
+        }
+
+        return hold("hold_position");
+      }
+
+      if (dropPct >= dropThresholdPct &&
+          volSpike >= volumeSpikeMult &&
+          rsi <= rsiEntry) {
+        return buy(0.85, "5m_volume_exhaustion");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 14. Oversold Scalp 5m — 6 params
+//    5m version of oversold bounce. More signals, tighter targets.
+// ---------------------------------------------------------------------------
+
+export function createOversoldScalp5mStrategy(params?: {
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  bbWindow?: number;
+  bbMultiplier?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+}): ScoredStrategy {
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 20;
+  const bbWindow = params?.bbWindow ?? 20;
+  const bbMultiplier = params?.bbMultiplier ?? 2.0;
+  const profitTargetPct = params?.profitTargetPct ?? 0.006;
+  const stopLossPct = params?.stopLossPct ?? 0.01;
+
+  const parameters: Record<string, number> = {
+    rsiPeriod, rsiEntry, bbWindow, bbMultiplier, profitTargetPct, stopLossPct
+  };
+
+  return {
+    name: "oversold-scalp-5m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const bb = getBollingerBands(candles, index, bbWindow, bbMultiplier);
+
+      if (close === undefined || rsi === null || bb === null) {
+        return hold("insufficient_data");
+      }
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) {
+          return sell(0.9, "profit_target");
+        }
+
+        if (pnl < -stopLossPct) {
+          return sell(0.9, "stop_loss");
+        }
+
+        // 5m: max 24 bars = 2 hours
+        if (currentPosition.barsHeld >= 24) {
+          return sell(0.7, "time_exit");
+        }
+
+        return hold("hold_position");
+      }
+
+      if (rsi <= rsiEntry && close < bb.lower) {
+        return buy(0.8, "5m_oversold_bounce");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 15. Momentum Burst 5m — 6 params
+//    Catch short-term momentum bursts on 5m. Volume-confirmed breakouts
+//    with ATR trailing stop. Works in all regimes — momentum bursts happen
+//    even in bear markets (relief rallies).
+// ---------------------------------------------------------------------------
+
+export function createMomentumBurst5mStrategy(params?: {
+  momentumLookback?: number;
+  momentumThresholdPct?: number;
+  volumeWindow?: number;
+  volumeSpikeMult?: number;
+  atrPeriod?: number;
+  atrTrailMult?: number;
+}): ScoredStrategy {
+  const momentumLookback = params?.momentumLookback ?? 12;
+  const momentumThresholdPct = params?.momentumThresholdPct ?? 0.015;
+  const volumeWindow = params?.volumeWindow ?? 24;
+  const volumeSpikeMult = params?.volumeSpikeMult ?? 1.8;
+  const atrPeriod = params?.atrPeriod ?? 14;
+  const atrTrailMult = params?.atrTrailMult ?? 2.0;
+
+  const parameters: Record<string, number> = {
+    momentumLookback, momentumThresholdPct, volumeWindow, volumeSpikeMult, atrPeriod, atrTrailMult
+  };
+
+  return {
+    name: "momentum-burst-5m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+    contextConfig: { momentumLookback },
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      const close = candles[index]?.closePrice;
+      const mom = getMomentum(candles, index, momentumLookback);
+      const volSpike = getVolumeSpikeRatio(candles, index, volumeWindow);
+      const atr = getAtr(candles, index, atrPeriod);
+
+      if (close === undefined || mom === null || volSpike === null || atr === null || atr === 0) {
+        return hold("insufficient_data");
+      }
+
+      const momPct = mom / close;
+
+      if (hasPosition && currentPosition) {
+        const highSinceEntry = Math.max(close, currentPosition.entryPrice);
+        const trailStop = highSinceEntry - atrTrailMult * atr;
+
+        if (close < trailStop) {
+          return sell(0.9, "atr_trail_stop");
+        }
+
+        // 5m: max 48 bars = 4 hours
+        if (currentPosition.barsHeld >= 48) {
+          return sell(0.6, "max_hold");
+        }
+
+        return hold("hold_position");
+      }
+
+      // Entry: strong momentum burst + volume confirmation
+      if (momPct >= momentumThresholdPct && volSpike >= volumeSpikeMult) {
+        return buy(0.85, "5m_momentum_burst");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}

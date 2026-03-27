@@ -629,6 +629,68 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
     ]
   },
   {
+    familyId: "block:simple-vol-exhaustion-5m",
+    strategyName: "volume-exhaustion-5m",
+    title: "5m Volume Exhaustion Bounce",
+    thesis: "5m micro-capitulation: multi-bar drop + volume spike + RSI oversold. Same concept as 1h but 12x more opportunities. Tight profit target 0.5-1.5%.",
+    timeframe: "5m",
+    requiredData: ["5m"],
+    parameterSpecs: [
+      { name: "dropLookback", description: "Bars to measure drop.", min: 3, max: 12 },
+      { name: "dropThresholdPct", description: "Min drop % to trigger.", min: 0.01, max: 0.04 },
+      { name: "volumeWindow", description: "Volume average window.", min: 12, max: 36 },
+      { name: "volumeSpikeMult", description: "Volume spike threshold.", min: 1.5, max: 3.5 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI oversold entry.", min: 12, max: 35 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.003, max: 0.02 }
+    ],
+    guardrails: [
+      "Long-only, 5m scalp.",
+      "7 parameters. Triple confirmation: drop + volume + RSI.",
+      "Max hold 36 bars (3 hours). Adaptive stop = 2x profit target."
+    ]
+  },
+  {
+    familyId: "block:simple-oversold-scalp-5m",
+    strategyName: "oversold-scalp-5m",
+    title: "5m Oversold Scalp",
+    thesis: "5m RSI + BB oversold entry with tight profit target. Quick in-and-out for micro bounces.",
+    timeframe: "5m",
+    requiredData: ["5m"],
+    parameterSpecs: [
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI oversold entry.", min: 10, max: 30 },
+      { name: "bbWindow", description: "BB window.", min: 14, max: 30 },
+      { name: "bbMultiplier", description: "BB multiplier.", min: 1.5, max: 3.0 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.002, max: 0.015 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.005, max: 0.02 }
+    ],
+    guardrails: [
+      "Long-only, 5m scalp.",
+      "6 parameters. Max hold 24 bars (2 hours)."
+    ]
+  },
+  {
+    familyId: "block:simple-momentum-burst-5m",
+    strategyName: "momentum-burst-5m",
+    title: "5m Momentum Burst",
+    thesis: "Catch short-term momentum bursts with volume confirmation. ATR trailing stop lets bursts run. Works in all regimes.",
+    timeframe: "5m",
+    requiredData: ["5m"],
+    parameterSpecs: [
+      { name: "momentumLookback", description: "Bars for momentum.", min: 6, max: 24 },
+      { name: "momentumThresholdPct", description: "Min momentum % for entry.", min: 0.005, max: 0.03 },
+      { name: "volumeWindow", description: "Volume average window.", min: 12, max: 36 },
+      { name: "volumeSpikeMult", description: "Volume spike threshold.", min: 1.3, max: 3.0 },
+      { name: "atrPeriod", description: "ATR period.", min: 10, max: 20 },
+      { name: "atrTrailMult", description: "ATR trailing stop.", min: 1.2, max: 3.0 }
+    ],
+    guardrails: [
+      "Long-only, 5m momentum.",
+      "6 parameters. ATR trailing stop, max 48 bars (4 hours)."
+    ]
+  },
+  {
     familyId: "block:simple-stochastic-rsi-reversion-5m",
     strategyName: "stochastic-rsi-reversion-5m",
     title: "5m Stochastic RSI Scalp Reversion",

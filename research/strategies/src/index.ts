@@ -42,7 +42,10 @@ export {
   createVolumeExhaustionBounceStrategy,
   createBbSqueezeScalpStrategy,
   createRelativeStrengthBounceStrategy,
-  createTrendAccelerationStrategy
+  createTrendAccelerationStrategy,
+  createVolumeExhaustionBounce5mStrategy,
+  createOversoldScalp5mStrategy,
+  createMomentumBurst5mStrategy
 } from "./simple-strategies.js";
 export {
   SCORED_DECISION_TIMEFRAME,
