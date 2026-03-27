@@ -12,6 +12,7 @@ import { getAtr } from "./factors/volatility.js";
 import { getDonchianChannel } from "./factors/trend.js";
 import { getMomentum } from "./factors/momentum.js";
 import { getBollingerBands } from "./factors/oscillators.js";
+import { getVolumeSpikeRatio } from "./factors/volume.js";
 import type { MarketStateConfig, ScoredStrategy, StrategyContext, SignalResult } from "./types.js";
 import { buy, hold, sell } from "./scored-signal.js";
 
@@ -504,6 +505,256 @@ export function createCrashDipBuyStrategy(params?: {
       const barDrop = (previous.closePrice - close) / atr;
       if (barDrop >= dropAtrMult) {
         return buy(0.8, "crash_dip_detected");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 8. Volume Breakout Trend Rider — 7 params
+//    Bull-market strategy. Enter on breakout with volume confirmation,
+//    ATR trailing stop lets winners run. No fixed profit target.
+// ---------------------------------------------------------------------------
+
+export function createVolumeBreakoutRiderStrategy(params?: {
+  emaFast?: number;
+  emaSlow?: number;
+  volumeWindow?: number;
+  volumeSpikeMult?: number;
+  atrPeriod?: number;
+  atrTrailMult?: number;
+  maxHoldBars?: number;
+}): ScoredStrategy {
+  const emaFast = params?.emaFast ?? 10;
+  const emaSlow = params?.emaSlow ?? 30;
+  const volumeWindow = params?.volumeWindow ?? 20;
+  const volumeSpikeMult = params?.volumeSpikeMult ?? 1.8;
+  const atrPeriod = params?.atrPeriod ?? 14;
+  const atrTrailMult = params?.atrTrailMult ?? 2.5;
+  const maxHoldBars = params?.maxHoldBars ?? 72;
+
+  const parameters: Record<string, number> = {
+    emaFast, emaSlow, volumeWindow, volumeSpikeMult, atrPeriod, atrTrailMult, maxHoldBars
+  };
+
+  return {
+    name: "volume-breakout-rider",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      const close = candles[index]?.closePrice;
+      const fast = getEma(candles, index, emaFast);
+      const slow = getEma(candles, index, emaSlow);
+      const prevFast = index > 0 ? getEma(candles, index - 1, emaFast) : null;
+      const prevSlow = index > 0 ? getEma(candles, index - 1, emaSlow) : null;
+      const volSpike = getVolumeSpikeRatio(candles, index, volumeWindow);
+      const atr = getAtr(candles, index, atrPeriod);
+
+      if (close === undefined || fast === null || slow === null || atr === null || atr === 0 || volSpike === null) {
+        return hold("insufficient_data");
+      }
+
+      // Exit: ATR trailing stop — let winners run
+      if (hasPosition && currentPosition) {
+        const highSinceEntry = Math.max(close, currentPosition.entryPrice);
+        const trailStop = highSinceEntry - atrTrailMult * atr;
+
+        if (close < trailStop) {
+          return sell(0.9, "atr_trail_stop");
+        }
+
+        if (currentPosition.barsHeld >= maxHoldBars) {
+          return sell(0.6, "max_hold");
+        }
+
+        // EMA death cross while in profit — take it
+        if (fast < slow && (close - currentPosition.entryPrice) / currentPosition.entryPrice > 0.01) {
+          return sell(0.7, "ema_cross_exit");
+        }
+
+        return hold("hold_position");
+      }
+
+      // Entry: EMA golden cross + volume spike (trend start with conviction)
+      if (prevFast !== null && prevSlow !== null &&
+          fast > slow && prevFast <= prevSlow &&
+          volSpike >= volumeSpikeMult) {
+        return buy(0.85, "volume_confirmed_breakout");
+      }
+
+      // Entry: price above both EMAs + volume spike (trend continuation)
+      if (fast > slow && close > fast &&
+          volSpike >= volumeSpikeMult &&
+          (close - fast) / close < 0.02) { // not too extended
+        return buy(0.7, "trend_continuation_volume");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 9. Volume Exhaustion Bounce — 7 params
+//    Bear-market strategy. Detects panic selling via volume spike + sharp drop
+//    over multiple bars. More reliable than single-bar crash detection.
+// ---------------------------------------------------------------------------
+
+export function createVolumeExhaustionBounceStrategy(params?: {
+  dropLookback?: number;
+  dropThresholdPct?: number;
+  volumeWindow?: number;
+  volumeSpikeMult?: number;
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  profitTargetPct?: number;
+}): ScoredStrategy {
+  const dropLookback = params?.dropLookback ?? 5;
+  const dropThresholdPct = params?.dropThresholdPct ?? 0.06;
+  const volumeWindow = params?.volumeWindow ?? 20;
+  const volumeSpikeMult = params?.volumeSpikeMult ?? 2.5;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 20;
+  const profitTargetPct = params?.profitTargetPct ?? 0.025;
+
+  const parameters: Record<string, number> = {
+    dropLookback, dropThresholdPct, volumeWindow, volumeSpikeMult, rsiPeriod, rsiEntry, profitTargetPct
+  };
+
+  return {
+    name: "volume-exhaustion-bounce",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      if (index < dropLookback) return hold("insufficient_data");
+
+      const close = candles[index]?.closePrice;
+      const pastClose = candles[index - dropLookback]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const volSpike = getVolumeSpikeRatio(candles, index, volumeWindow);
+
+      if (close === undefined || pastClose === undefined || rsi === null || volSpike === null || pastClose === 0) {
+        return hold("insufficient_data");
+      }
+
+      const dropPct = (pastClose - close) / pastClose;
+
+      // Exit: profit target or time-based
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) {
+          return sell(0.9, "profit_target");
+        }
+
+        // Adaptive stop: half of profit target
+        if (pnl < -(profitTargetPct * 1.5)) {
+          return sell(0.9, "stop_loss");
+        }
+
+        if (currentPosition.barsHeld >= 18) {
+          return sell(0.6, "time_exit");
+        }
+
+        // RSI recovered — take what we have
+        if (rsi > 50 && pnl > 0) {
+          return sell(0.7, "rsi_recovered");
+        }
+
+        return hold("hold_position");
+      }
+
+      // Entry: multi-bar drop + volume spike + RSI oversold = capitulation exhaustion
+      if (dropPct >= dropThresholdPct &&
+          volSpike >= volumeSpikeMult &&
+          rsi <= rsiEntry) {
+        return buy(0.85, "volume_exhaustion_detected");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 10. BB Squeeze Scalp — 6 params
+//    Sideways strategy. Trade only when Bollinger Bands are contracted (squeeze).
+//    Buy at lower band, sell at upper band. Inactive during trending markets.
+// ---------------------------------------------------------------------------
+
+export function createBbSqueezeScalpStrategy(params?: {
+  bbWindow?: number;
+  bbMultiplier?: number;
+  squeezeMaxWidth?: number;
+  rsiPeriod?: number;
+  rsiOversold?: number;
+  rsiOverbought?: number;
+}): ScoredStrategy {
+  const bbWindow = params?.bbWindow ?? 20;
+  const bbMultiplier = params?.bbMultiplier ?? 2.0;
+  const squeezeMaxWidth = params?.squeezeMaxWidth ?? 0.04;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiOversold = params?.rsiOversold ?? 30;
+  const rsiOverbought = params?.rsiOverbought ?? 70;
+
+  const parameters: Record<string, number> = {
+    bbWindow, bbMultiplier, squeezeMaxWidth, rsiPeriod, rsiOversold, rsiOverbought
+  };
+
+  return {
+    name: "bb-squeeze-scalp",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      const close = candles[index]?.closePrice;
+      const bb = getBollingerBands(candles, index, bbWindow, bbMultiplier);
+      const rsi = getRsi(candles, index, rsiPeriod);
+
+      if (close === undefined || bb === null || rsi === null || bb.upper === 0) {
+        return hold("insufficient_data");
+      }
+
+      const bbWidth = (bb.upper - bb.lower) / bb.middle;
+
+      // Exit
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        // Dynamic exit: sell at upper band or RSI overbought
+        if (close >= bb.upper || rsi >= rsiOverbought) {
+          return sell(0.8, "bb_upper_or_rsi_exit");
+        }
+
+        // Stop at middle band breakdown if losing
+        if (pnl < 0 && close < bb.middle && rsi < 45) {
+          return sell(0.7, "bb_middle_breakdown");
+        }
+
+        // Hard stop
+        if (pnl < -0.04) {
+          return sell(0.9, "hard_stop");
+        }
+
+        if (currentPosition.barsHeld >= 36) {
+          return sell(0.6, "max_hold");
+        }
+
+        return hold("hold_position");
+      }
+
+      // Entry: only during BB squeeze (low volatility) + price at lower band + RSI oversold
+      if (bbWidth <= squeezeMaxWidth &&
+          close <= bb.lower &&
+          rsi <= rsiOversold) {
+        return buy(0.8, "bb_squeeze_oversold");
       }
 
       return hold("no_signal");

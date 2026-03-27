@@ -37,7 +37,10 @@ export {
   createSimpleBbReversionStrategy,
   createMomentumRotationStrategy,
   createOversoldBounceScalpStrategy,
-  createCrashDipBuyStrategy
+  createCrashDipBuyStrategy,
+  createVolumeBreakoutRiderStrategy,
+  createVolumeExhaustionBounceStrategy,
+  createBbSqueezeScalpStrategy
 } from "./simple-strategies.js";
 export {
   SCORED_DECISION_TIMEFRAME,

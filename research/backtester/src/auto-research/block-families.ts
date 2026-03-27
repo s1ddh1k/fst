@@ -476,6 +476,71 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
     ]
   },
   {
+    familyId: "block:simple-volume-breakout-rider-1h",
+    strategyName: "volume-breakout-rider",
+    title: "Volume Breakout Trend Rider",
+    thesis: "Bull-market strategy: enter on EMA golden cross with volume confirmation, ATR trailing stop lets winners run. No fixed profit target — captures full trend moves.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "emaFast", description: "Fast EMA period.", min: 5, max: 15 },
+      { name: "emaSlow", description: "Slow EMA period.", min: 20, max: 50 },
+      { name: "volumeWindow", description: "Volume average window.", min: 10, max: 30 },
+      { name: "volumeSpikeMult", description: "Volume spike threshold (multiple of avg).", min: 1.3, max: 3.0 },
+      { name: "atrPeriod", description: "ATR period for trailing stop.", min: 10, max: 20 },
+      { name: "atrTrailMult", description: "ATR trailing stop multiplier.", min: 1.5, max: 4.0 },
+      { name: "maxHoldBars", description: "Maximum bars to hold.", min: 24, max: 168 }
+    ],
+    guardrails: [
+      "Long-only, trend-following with volume confirmation.",
+      "7 parameters. ATR trailing stop instead of fixed profit target.",
+      "emaFast must be < emaSlow."
+    ]
+  },
+  {
+    familyId: "block:simple-volume-exhaustion-1h",
+    strategyName: "volume-exhaustion-bounce",
+    title: "Volume Exhaustion Bounce",
+    thesis: "Bear-market strategy: detects capitulation via multi-bar drop + volume spike + RSI extreme. More reliable than single-bar crash detection. Quick profit-taking.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "dropLookback", description: "Bars to measure the drop.", min: 3, max: 8 },
+      { name: "dropThresholdPct", description: "Minimum drop % to trigger.", min: 0.03, max: 0.12 },
+      { name: "volumeWindow", description: "Volume average window.", min: 10, max: 30 },
+      { name: "volumeSpikeMult", description: "Volume spike threshold.", min: 1.5, max: 4.0 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI oversold entry.", min: 10, max: 30 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.01, max: 0.05 }
+    ],
+    guardrails: [
+      "Long-only, bear-market bounce strategy.",
+      "7 parameters. Triple confirmation: drop + volume + RSI.",
+      "Adaptive stop = 1.5x profit target."
+    ]
+  },
+  {
+    familyId: "block:simple-bb-squeeze-1h",
+    strategyName: "bb-squeeze-scalp",
+    title: "BB Squeeze Scalp",
+    thesis: "Sideways strategy: trade only when BB width is contracted (squeeze). Buy at lower band with RSI oversold, sell at upper band. Inactive during trends.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "bbWindow", description: "BB calculation window.", min: 14, max: 30 },
+      { name: "bbMultiplier", description: "BB multiplier.", min: 1.5, max: 3.0 },
+      { name: "squeezeMaxWidth", description: "Max BB width to allow entry (squeeze filter).", min: 0.02, max: 0.08 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiOversold", description: "RSI oversold entry.", min: 20, max: 40 },
+      { name: "rsiOverbought", description: "RSI overbought exit.", min: 55, max: 80 }
+    ],
+    guardrails: [
+      "Long-only, sideways-market mean reversion.",
+      "6 parameters. BB squeeze filter prevents trend-market entries.",
+      "rsiOversold must be < rsiOverbought."
+    ]
+  },
+  {
     familyId: "block:simple-stochastic-rsi-reversion-1h",
     strategyName: "stochastic-rsi-reversion",
     title: "Stochastic RSI Mean Reversion",
