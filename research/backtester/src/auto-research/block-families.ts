@@ -541,6 +541,50 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
     ]
   },
   {
+    familyId: "block:simple-rs-bounce-1h",
+    strategyName: "relative-strength-bounce",
+    title: "Relative Strength Volume Bounce",
+    thesis: "All-regime strategy: buy relatively strong coins (high momentum percentile) on RSI oversold + volume spike. ATR trailing stop. Key insight: strong coins bounce harder even in bear markets.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "minMomentumPercentile", description: "Min momentum percentile vs universe (0-1).", min: 0.4, max: 0.85 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI oversold entry.", min: 15, max: 40 },
+      { name: "volumeWindow", description: "Volume average window.", min: 10, max: 30 },
+      { name: "volumeSpikeMult", description: "Volume spike threshold.", min: 1.2, max: 3.0 },
+      { name: "atrPeriod", description: "ATR period for trailing stop.", min: 10, max: 20 },
+      { name: "atrTrailMult", description: "ATR trailing stop multiplier.", min: 1.5, max: 3.5 }
+    ],
+    guardrails: [
+      "Long-only, relative-strength filtered.",
+      "7 parameters. Uses marketState.relativeStrength for coin selection.",
+      "ATR trailing stop — no fixed profit target."
+    ]
+  },
+  {
+    familyId: "block:simple-trend-accel-1h",
+    strategyName: "trend-acceleration",
+    title: "Trend Acceleration Rider",
+    thesis: "Bull-market strategy: enter when a strong coin's momentum is accelerating (not just positive). Volume confirmation + relative strength filter + ATR trailing stop.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "minMomentumPercentile", description: "Min momentum percentile.", min: 0.5, max: 0.9 },
+      { name: "momentumLookback", description: "Momentum calculation lookback.", min: 6, max: 24 },
+      { name: "accelerationLookback", description: "Bars ago to compare momentum for acceleration.", min: 3, max: 12 },
+      { name: "volumeWindow", description: "Volume average window.", min: 10, max: 30 },
+      { name: "volumeMinMult", description: "Minimum volume vs average.", min: 1.0, max: 2.5 },
+      { name: "atrPeriod", description: "ATR period.", min: 10, max: 20 },
+      { name: "atrTrailMult", description: "ATR trailing stop multiplier.", min: 1.5, max: 4.0 }
+    ],
+    guardrails: [
+      "Long-only, momentum acceleration.",
+      "7 parameters. Requires momentum increasing, not just positive.",
+      "Relative strength filter picks top performers."
+    ]
+  },
+  {
     familyId: "block:simple-stochastic-rsi-reversion-1h",
     strategyName: "stochastic-rsi-reversion",
     title: "Stochastic RSI Mean Reversion",

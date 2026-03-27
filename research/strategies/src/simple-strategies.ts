@@ -13,7 +13,7 @@ import { getDonchianChannel } from "./factors/trend.js";
 import { getMomentum } from "./factors/momentum.js";
 import { getBollingerBands } from "./factors/oscillators.js";
 import { getVolumeSpikeRatio } from "./factors/volume.js";
-import type { MarketStateConfig, ScoredStrategy, StrategyContext, SignalResult } from "./types.js";
+import type { MarketStateConfig, ScoredStrategy, StrategyContext, SignalResult, MarketStateContext } from "./types.js";
 import { buy, hold, sell } from "./scored-signal.js";
 
 // ---------------------------------------------------------------------------
@@ -755,6 +755,166 @@ export function createBbSqueezeScalpStrategy(params?: {
           close <= bb.lower &&
           rsi <= rsiOversold) {
         return buy(0.8, "bb_squeeze_oversold");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 11. Relative Strength Volume Bounce — 7 params
+//    All-regime strategy. Combines relative strength (this coin is stronger
+//    than average) with volume exhaustion entry and ATR trailing exit.
+//    Key insight: even in bear markets, relatively strong coins bounce harder.
+// ---------------------------------------------------------------------------
+
+export function createRelativeStrengthBounceStrategy(params?: {
+  minMomentumPercentile?: number;
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  volumeWindow?: number;
+  volumeSpikeMult?: number;
+  atrPeriod?: number;
+  atrTrailMult?: number;
+}): ScoredStrategy {
+  const minMomentumPercentile = params?.minMomentumPercentile ?? 0.6;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 30;
+  const volumeWindow = params?.volumeWindow ?? 20;
+  const volumeSpikeMult = params?.volumeSpikeMult ?? 1.5;
+  const atrPeriod = params?.atrPeriod ?? 14;
+  const atrTrailMult = params?.atrTrailMult ?? 2.0;
+
+  const parameters: Record<string, number> = {
+    minMomentumPercentile, rsiPeriod, rsiEntry, volumeWindow, volumeSpikeMult, atrPeriod, atrTrailMult
+  };
+
+  return {
+    name: "relative-strength-bounce",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+    contextConfig: { trendWindow: 55 },
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition, marketState } = context;
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const volSpike = getVolumeSpikeRatio(candles, index, volumeWindow);
+      const atr = getAtr(candles, index, atrPeriod);
+      const rs = marketState?.relativeStrength;
+
+      if (close === undefined || rsi === null || volSpike === null || atr === null || atr === 0) {
+        return hold("insufficient_data");
+      }
+
+      // Exit: ATR trailing stop
+      if (hasPosition && currentPosition) {
+        const highSinceEntry = Math.max(close, currentPosition.entryPrice);
+        const trailStop = highSinceEntry - atrTrailMult * atr;
+
+        if (close < trailStop) {
+          return sell(0.9, "atr_trail_stop");
+        }
+
+        if (currentPosition.barsHeld >= 48) {
+          return sell(0.6, "max_hold");
+        }
+
+        return hold("hold_position");
+      }
+
+      // Entry: relative strength filter + RSI oversold + volume spike
+      const percentile = rs?.momentumPercentile ?? 0.5;
+      if (percentile >= minMomentumPercentile &&
+          rsi <= rsiEntry &&
+          volSpike >= volumeSpikeMult) {
+        return buy(0.85, "strong_coin_oversold_volume");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 12. Trend Acceleration Rider — 7 params
+//    Bull-market strategy. Enters when a strong coin accelerates (momentum
+//    increasing, not just positive). Uses relative strength to pick winners.
+//    ATR trailing stop for exits.
+// ---------------------------------------------------------------------------
+
+export function createTrendAccelerationStrategy(params?: {
+  minMomentumPercentile?: number;
+  momentumLookback?: number;
+  accelerationLookback?: number;
+  volumeWindow?: number;
+  volumeMinMult?: number;
+  atrPeriod?: number;
+  atrTrailMult?: number;
+}): ScoredStrategy {
+  const minMomentumPercentile = params?.minMomentumPercentile ?? 0.7;
+  const momentumLookback = params?.momentumLookback ?? 12;
+  const accelerationLookback = params?.accelerationLookback ?? 6;
+  const volumeWindow = params?.volumeWindow ?? 20;
+  const volumeMinMult = params?.volumeMinMult ?? 1.2;
+  const atrPeriod = params?.atrPeriod ?? 14;
+  const atrTrailMult = params?.atrTrailMult ?? 2.5;
+
+  const parameters: Record<string, number> = {
+    minMomentumPercentile, momentumLookback, accelerationLookback, volumeWindow, volumeMinMult, atrPeriod, atrTrailMult
+  };
+
+  return {
+    name: "trend-acceleration",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+    contextConfig: { momentumLookback },
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition, marketState } = context;
+      const close = candles[index]?.closePrice;
+      const mom = getMomentum(candles, index, momentumLookback);
+      const prevMom = index >= accelerationLookback ? getMomentum(candles, index - accelerationLookback, momentumLookback) : null;
+      const volSpike = getVolumeSpikeRatio(candles, index, volumeWindow);
+      const atr = getAtr(candles, index, atrPeriod);
+      const rs = marketState?.relativeStrength;
+
+      if (close === undefined || mom === null || prevMom === null || atr === null || atr === 0 || volSpike === null) {
+        return hold("insufficient_data");
+      }
+
+      const momPct = mom / close;
+      const prevMomPct = prevMom / (candles[index - accelerationLookback]?.closePrice || close);
+
+      // Exit: ATR trailing stop
+      if (hasPosition && currentPosition) {
+        const highSinceEntry = Math.max(close, currentPosition.entryPrice);
+        const trailStop = highSinceEntry - atrTrailMult * atr;
+
+        if (close < trailStop) {
+          return sell(0.9, "atr_trail_stop");
+        }
+
+        // Momentum deceleration while profitable — partial exit signal
+        if (momPct < prevMomPct * 0.5 && (close - currentPosition.entryPrice) / currentPosition.entryPrice > 0.02) {
+          return sell(0.7, "momentum_deceleration");
+        }
+
+        if (currentPosition.barsHeld >= 96) {
+          return sell(0.6, "max_hold");
+        }
+
+        return hold("hold_position");
+      }
+
+      // Entry: strong coin + momentum accelerating + above-average volume
+      const percentile = rs?.momentumPercentile ?? 0.5;
+      if (percentile >= minMomentumPercentile &&
+          momPct > 0 &&
+          momPct > prevMomPct && // acceleration
+          volSpike >= volumeMinMult) {
+        return buy(0.85, "trend_acceleration_strong_coin");
       }
 
       return hold("no_signal");

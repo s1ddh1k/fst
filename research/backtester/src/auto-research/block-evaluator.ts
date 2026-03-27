@@ -29,7 +29,9 @@ import {
   createCrashDipBuyStrategy,
   createVolumeBreakoutRiderStrategy,
   createVolumeExhaustionBounceStrategy,
-  createBbSqueezeScalpStrategy
+  createBbSqueezeScalpStrategy,
+  createRelativeStrengthBounceStrategy,
+  createTrendAccelerationStrategy
 } from "../../../strategies/src/simple-strategies.js";
 import type { Strategy, StrategySleeveConfig } from "../../../../packages/shared/src/index.js";
 import type { RegimeGateConfig } from "../multi-strategy/RegimeGatedStrategy.js";
@@ -580,6 +582,44 @@ async function createBlockStrategy(familyId: string, candidateId: string, params
     });
   }
 
+  if (familyId.includes("simple-rs-bounce")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-rs-bounce`,
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createRelativeStrengthBounceStrategy({
+        minMomentumPercentile: clamp(finiteOrDefault(params.minMomentumPercentile, 0.6), 0.4, 0.85),
+        rsiPeriod: roundInt(finiteOrDefault(params.rsiPeriod, 14), 7, 21),
+        rsiEntry: roundInt(finiteOrDefault(params.rsiEntry, 30), 15, 40),
+        volumeWindow: roundInt(finiteOrDefault(params.volumeWindow, 20), 10, 30),
+        volumeSpikeMult: clamp(finiteOrDefault(params.volumeSpikeMult, 1.5), 1.2, 3.0),
+        atrPeriod: roundInt(finiteOrDefault(params.atrPeriod, 14), 10, 20),
+        atrTrailMult: clamp(finiteOrDefault(params.atrTrailMult, 2.0), 1.5, 3.5)
+      })
+    });
+  }
+
+  if (familyId.includes("simple-trend-accel")) {
+    return adaptScoredStrategy({
+      strategyId: `${candidateId}-accel`,
+      sleeveId: "trend",
+      family: "trend",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createTrendAccelerationStrategy({
+        minMomentumPercentile: clamp(finiteOrDefault(params.minMomentumPercentile, 0.7), 0.5, 0.9),
+        momentumLookback: roundInt(finiteOrDefault(params.momentumLookback, 12), 6, 24),
+        accelerationLookback: roundInt(finiteOrDefault(params.accelerationLookback, 6), 3, 12),
+        volumeWindow: roundInt(finiteOrDefault(params.volumeWindow, 20), 10, 30),
+        volumeMinMult: clamp(finiteOrDefault(params.volumeMinMult, 1.2), 1.0, 2.5),
+        atrPeriod: roundInt(finiteOrDefault(params.atrPeriod, 14), 10, 20),
+        atrTrailMult: clamp(finiteOrDefault(params.atrTrailMult, 2.5), 1.5, 4.0)
+      })
+    });
+  }
+
   // Dynamic fallback: try loading LLM-generated strategy
   try {
     const { loadDynamicStrategy } = await import("./dynamic-loader.js");
@@ -776,7 +816,8 @@ export async function evaluateBlockCandidate(params: {
         : candidate.familyId.includes("crash-dip") ? "micro"
           : candidate.familyId.includes("exhaustion") ? "micro"
             : candidate.familyId.includes("squeeze") ? "micro"
-              : candidate.familyId.includes("breakout") ? "breakout"
+              : candidate.familyId.includes("rs-bounce") ? "micro"
+                : candidate.familyId.includes("breakout") ? "breakout"
                 : "trend";
 
   const sleeves: StrategySleeveConfig[] = [{

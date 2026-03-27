@@ -40,7 +40,9 @@ export {
   createCrashDipBuyStrategy,
   createVolumeBreakoutRiderStrategy,
   createVolumeExhaustionBounceStrategy,
-  createBbSqueezeScalpStrategy
+  createBbSqueezeScalpStrategy,
+  createRelativeStrengthBounceStrategy,
+  createTrendAccelerationStrategy
 } from "./simple-strategies.js";
 export {
   SCORED_DECISION_TIMEFRAME,
