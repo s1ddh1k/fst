@@ -109,6 +109,8 @@ export type MarketStateConfig = {
   zScoreWindow?: number;
   volatilityWindow?: number;
   benchmarkMarketCode?: string;
+  /** Use adaptive regime detection optimized for crypto (SMA200, momentum72, no volatile override) */
+  useAdaptiveRegime?: boolean;
 };
 
 export type StrategyContext = {

@@ -3,12 +3,13 @@
  *
  * Instead of a separate regime-switching simulator, this configures
  * multiple regime-gated strategies in the real backtest engine:
- *   - trend_up:   donchian-breakout (30 coin universe)
- *   - trend_down: vol-exhaustion-15m (30 coin universe)
- *   - range:      rsi-reversion (30 coin universe)
+ *   - trend_up:   relative strength rotation (uses adaptive regime from market-state.ts)
+ *   - trend_down: vol-exhaustion (crypto regime gate)
+ *   - range:      cash (no trading)
  *
- * All strategies run simultaneously. The regime gate activates/deactivates
- * each strategy automatically based on market state.
+ * The rotation strategy uses adaptive regime detection built into market-state.ts
+ * (SMA200, momentum72, no volatile override) instead of the external crypto-regime-gate.
+ * This keeps regime logic centralized and testable.
  */
 
 import type { Candle } from "../types.js";
@@ -41,32 +42,24 @@ export function runRegimePortfolioBacktest(config: RegimePortfolioConfig) {
   // Use BTC as regime benchmark for all markets
   const btcCandles = candlesByTimeframeAndMarket["1h"]?.["KRW-BTC"] ?? [];
 
-  // Same proven strategy as BTC single-market, applied to each coin:
-  //   trend_up:   donchian breakout (trend following on each coin)
-  //   trend_down: volume-exhaustion (catch capitulation bounces on each coin)
-  //   range:      cash (no trading)
-
   // trend_up: relative strength rotation
-  // 유니버스에서 아직 덜 오른(상대적 약세) 종목 매수 → 충분히 오르면 매도 → 다른 종목으로 교체
-  const trendUpStrategy = withCryptoRegimeGate({
-    strategy: createRelativeStrengthRotationStrategy({
-      strategyId: "regime-rotation",
-      rebalanceBars: 5,
-      entryFloor: 0.70,         // 상대강도 70% 이상이면 진입
-      reEntryCooldownBars: 3,
-      exitFloor: 0.50,          // 상대강도 50% 이하면 교체
-      switchGap: 0.10,          // 현재 vs 대체 종목 gap
-      minAboveTrendRatio: 0.0,  // 완전 비활성 — crypto regime gate만 사용
-      minLiquidityScore: 0.0,
-      minCompositeTrend: -1.0   // 완전 비활성
-    }),
-    allowedRegimes: ["trend_up"],
-    exitOnDisallow: true,
-    benchmarkCandles: btcCandles,
-    cooldownBars: 72
+  // Uses adaptive regime from market-state.ts directly (useAdaptiveRegime: true)
+  // instead of external crypto-regime-gate wrapping.
+  // The strategy's own minAboveTrendRatio and minCompositeTrend handle regime gating internally.
+  const trendUpStrategy = createRelativeStrengthRotationStrategy({
+    strategyId: "regime-rotation",
+    rebalanceBars: 5,
+    entryFloor: 0.70,
+    reEntryCooldownBars: 3,
+    exitFloor: 0.50,
+    switchGap: 0.10,
+    minAboveTrendRatio: 0.55,   // Re-enabled — adaptive regime gives meaningful trend signals
+    minLiquidityScore: 0.05,
+    minCompositeTrend: 0         // Re-enabled — adaptive regime gives meaningful trend signals
   });
 
   // trend_down: volume-exhaustion — catches capitulation bounces on individual coins
+  // Still uses crypto regime gate since it needs 1h BTC candles for separate regime detection
   const trendDownStrategy = withCryptoRegimeGate({
     strategy: adaptScoredStrategy({
       strategyId: "regime-vex-1h",
@@ -103,6 +96,8 @@ export function runRegimePortfolioBacktest(config: RegimePortfolioConfig) {
     ],
     decisionCandles: candlesByTimeframeAndMarket as any,
     executionCandles: candlesByTimeframeAndMarket as any,
+    // Use adaptive regime detection for market state contexts
+    marketStateConfig: { useAdaptiveRegime: true },
     universeConfig: {
       topN: Math.min(config.maxOpenPositions ?? 5, marketCodes.length),
       lookbackBars: 28,

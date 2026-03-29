@@ -10,7 +10,7 @@ import type {
 
 const COMPOSITE_MARKET_CODE = "__COMPOSITE__";
 
-const DEFAULT_MARKET_STATE_CONFIG: Required<Omit<MarketStateConfig, "benchmarkMarketCode">> = {
+const DEFAULT_MARKET_STATE_CONFIG: Required<Omit<MarketStateConfig, "benchmarkMarketCode" | "useAdaptiveRegime">> = {
   trendWindow: 55,
   momentumLookback: 20,
   volumeWindow: 20,
@@ -40,7 +40,7 @@ const COMPOSITE_ANCHOR_WEIGHTS = {
   weekly: 0.5
 } as const;
 
-export type ResolvedMarketStateConfig = Required<Omit<MarketStateConfig, "benchmarkMarketCode">>;
+export type ResolvedMarketStateConfig = Required<Omit<MarketStateConfig, "benchmarkMarketCode" | "useAdaptiveRegime">>;
 
 type AnchorTimeframe = "1d" | "1w";
 
@@ -503,6 +503,40 @@ function buildRegimeSeries(params: {
   });
 }
 
+/**
+ * Adaptive regime series optimized for crypto markets.
+ * - Uses SMA(200) for trend (vs SMA(55) default) — crypto needs longer trend windows
+ * - Uses momentum(72) (vs momentum(20)) — reduces whipsaw in volatile markets
+ * - REMOVES the volatile override — crypto is always volatile; the override classifies 93%+ as "volatile"
+ * - Same return type as buildRegimeSeries for drop-in compatibility
+ */
+function buildAdaptiveRegimeSeries(params: {
+  closePrices: number[];
+  smaByIndex: NumericSeries;
+  momentumByIndex: NumericSeries;
+}): CompositeBenchmarkContext["regime"][] {
+  return params.closePrices.map((close, index) => {
+    const sma = params.smaByIndex[index];
+    const momentum = params.momentumByIndex[index];
+
+    if (sma === null || momentum === null || close === undefined) {
+      return "unknown";
+    }
+
+    // No volatile override — crypto is always volatile, so this gate is useless
+
+    if (close > sma && momentum > 0) {
+      return "trend_up";
+    }
+
+    if (close < sma && momentum < 0) {
+      return "trend_down";
+    }
+
+    return "range";
+  });
+}
+
 export function buildRegimeSeriesFromCandles(
   closePrices: number[],
   config?: { trendWindow?: number; momentumLookback?: number; volatilityWindow?: number; volatilityThreshold?: number }
@@ -521,11 +555,27 @@ export function buildRegimeSeriesFromCandles(
   });
 }
 
+export function buildAdaptiveRegimeSeriesFromCandles(
+  closePrices: number[],
+  config?: { trendWindow?: number; momentumLookback?: number }
+): CompositeBenchmarkContext["regime"][] {
+  const trendWindow = config?.trendWindow ?? 200;
+  const momentumLookback = config?.momentumLookback ?? 72;
+
+  return buildAdaptiveRegimeSeries({
+    closePrices,
+    smaByIndex: buildRollingAverage(closePrices, trendWindow),
+    momentumByIndex: buildMomentumSeries(closePrices, momentumLookback)
+  });
+}
+
 function getMarketFeatureSet(
   candles: Candle[],
-  config: ResolvedMarketStateConfig
+  config: ResolvedMarketStateConfig,
+  options?: { useAdaptiveRegime?: boolean }
 ): MarketFeatureSet {
-  const configKey = getMarketStateConfigKey(config);
+  const adaptiveSuffix = options?.useAdaptiveRegime ? "|adaptive=1" : "";
+  const configKey = getMarketStateConfigKey(config) + adaptiveSuffix;
   const cachedByConfig = marketFeatureCache.get(candles);
   const cached = cachedByConfig?.get(configKey);
 
@@ -552,13 +602,22 @@ function getMarketFeatureSet(
     ),
     regimeByIndex: []
   };
-  featureSet.regimeByIndex = buildRegimeSeries({
-    closePrices,
-    smaByIndex,
-    momentumByIndex: featureSet.momentumByIndex,
-    historicalVolatilityByIndex: featureSet.historicalVolatilityByIndex,
-    volatilityThreshold: 0.03
-  });
+
+  if (options?.useAdaptiveRegime) {
+    featureSet.regimeByIndex = buildAdaptiveRegimeSeries({
+      closePrices,
+      smaByIndex,
+      momentumByIndex: featureSet.momentumByIndex
+    });
+  } else {
+    featureSet.regimeByIndex = buildRegimeSeries({
+      closePrices,
+      smaByIndex,
+      momentumByIndex: featureSet.momentumByIndex,
+      historicalVolatilityByIndex: featureSet.historicalVolatilityByIndex,
+      volatilityThreshold: 0.03
+    });
+  }
 
   const perConfigCache = cachedByConfig ?? new Map<string, MarketFeatureSet>();
   perConfigCache.set(configKey, featureSet);
@@ -599,6 +658,7 @@ function resolveMarketSnapshot(params: {
   index?: number;
   alignedIndex?: number;
   config: ResolvedMarketStateConfig;
+  useAdaptiveRegime?: boolean;
 }): ResolvedMarketSnapshot | null {
   const index =
     params.alignedIndex ??
@@ -609,7 +669,7 @@ function resolveMarketSnapshot(params: {
     return null;
   }
 
-  const features = getMarketFeatureSet(params.candles, params.config);
+  const features = getMarketFeatureSet(params.candles, params.config, { useAdaptiveRegime: params.useAdaptiveRegime });
   const close = params.candles[index]?.closePrice;
   const previousClose = params.candles[index - 1]?.closePrice;
   const ema = features.emaByIndex[index];
@@ -828,6 +888,7 @@ function determineAnchoredRegime(params: {
   trendScore: number;
   momentum: number | null;
   historicalVolatility: number | null;
+  useAdaptiveRegime?: boolean;
 }): CompositeBenchmarkContext["regime"] {
   const weeklyBias = getDirectionalBias(params.weekly?.regime);
   const dailyBias = getDirectionalBias(params.daily?.regime);
@@ -845,22 +906,27 @@ function determineAnchoredRegime(params: {
     { weight: COMPOSITE_ANCHOR_WEIGHTS.intraday, value: intradayBias === 0 ? null : intradayBias },
     { weight: 0.2, value: benchmarkBias === 0 ? null : benchmarkBias }
   ]) ?? 0;
-  const volatileVotes = [
-    params.intraday.regime,
-    params.daily?.regime,
-    params.weekly?.regime,
-    params.benchmark?.regime
-  ].filter((regime) => regime === "volatile").length;
   const benchmarkTrendScore = params.benchmark?.trendScore ?? 0;
 
-  if (
-    volatileVotes >= 2 ||
-    (
-      volatileVotes >= 1 &&
-      (macroConflict || Math.abs(params.trendScore) < 0.12 || Math.abs(benchmarkTrendScore) < 0.12)
-    )
-  ) {
-    return "volatile";
+  // In adaptive mode, skip ALL volatile overrides — crypto is always volatile,
+  // so these checks just suppress valid trend_up/trend_down signals.
+  if (!params.useAdaptiveRegime) {
+    const volatileVotes = [
+      params.intraday.regime,
+      params.daily?.regime,
+      params.weekly?.regime,
+      params.benchmark?.regime
+    ].filter((regime) => regime === "volatile").length;
+
+    if (
+      volatileVotes >= 2 ||
+      (
+        volatileVotes >= 1 &&
+        (macroConflict || Math.abs(params.trendScore) < 0.12 || Math.abs(benchmarkTrendScore) < 0.12)
+      )
+    ) {
+      return "volatile";
+    }
   }
 
   if (
@@ -897,8 +963,11 @@ function determineAnchoredRegime(params: {
     return "trend_down";
   }
 
-  if ((params.historicalVolatility ?? 0) >= 0.04 && Math.abs(params.trendScore) < 0.15) {
-    return "volatile";
+  // In adaptive mode, skip the late volatile check too
+  if (!params.useAdaptiveRegime) {
+    if ((params.historicalVolatility ?? 0) >= 0.04 && Math.abs(params.trendScore) < 0.15) {
+      return "volatile";
+    }
   }
 
   if (params.trendScore >= 0.2 && (params.momentum ?? 0) >= 0) {
@@ -920,6 +989,7 @@ function combineCompositeBenchmarkContext(params: {
     weekly?: CompositeBenchmarkAnchorContext;
   };
   benchmark?: CompositeBenchmarkContext;
+  useAdaptiveRegime?: boolean;
 }): CompositeBenchmarkContext {
   const trendScoreBase = weightedAverageFromAnchors([
     { weight: COMPOSITE_ANCHOR_WEIGHTS.intraday, value: params.anchors.intraday.trendScore },
@@ -978,7 +1048,8 @@ function combineCompositeBenchmarkContext(params: {
     benchmark: params.benchmark,
     trendScore,
     momentum,
-    historicalVolatility
+    historicalVolatility,
+    useAdaptiveRegime: params.useAdaptiveRegime
   });
 
   return {
@@ -1073,6 +1144,7 @@ function resolveUniverseSnapshots(params: {
   universeCandlesByMarket: Record<string, Candle[]>;
   config: ResolvedMarketStateConfig;
   aggregateTo?: AnchorTimeframe;
+  useAdaptiveRegime?: boolean;
 }): Map<string, ResolvedMarketSnapshot> {
   const snapshots = new Map<string, ResolvedMarketSnapshot>();
 
@@ -1083,7 +1155,8 @@ function resolveUniverseSnapshots(params: {
       candles,
       referenceTime: params.referenceTime,
       alignedIndex: params.aggregateTo ? undefined : params.alignedIndex,
-      config: params.config
+      config: params.config,
+      useAdaptiveRegime: params.useAdaptiveRegime
     });
 
     if (snapshot) {
@@ -1100,6 +1173,7 @@ function buildCompositeAnchorInput(params: {
   universeCandlesByMarket: Record<string, Candle[]>;
   config: ResolvedMarketStateConfig;
   aggregateTo?: AnchorTimeframe;
+  useAdaptiveRegime?: boolean;
 }): CompositeAnchorInput | undefined {
   const snapshots = resolveUniverseSnapshots(params);
   if (snapshots.size === 0) {
@@ -1124,6 +1198,7 @@ function buildBenchmarkAnchorContext(params: {
   universeCandlesByMarket: Record<string, Candle[]>;
   config: ResolvedMarketStateConfig;
   aggregateTo?: AnchorTimeframe;
+  useAdaptiveRegime?: boolean;
 }): CompositeBenchmarkAnchorContext | undefined {
   const rawCandles = params.universeCandlesByMarket[params.benchmarkMarketCode];
   if (!rawCandles || rawCandles.length === 0) {
@@ -1135,7 +1210,8 @@ function buildBenchmarkAnchorContext(params: {
     marketCode: params.benchmarkMarketCode,
     candles,
     referenceTime: params.referenceTime,
-    config: params.config
+    config: params.config,
+    useAdaptiveRegime: params.useAdaptiveRegime
   });
 
   if (!snapshot) {
@@ -1150,13 +1226,15 @@ function buildAnchoredBenchmarkContext(params: {
   referenceTime: Date;
   universeCandlesByMarket: Record<string, Candle[]>;
   intradayConfig: ResolvedMarketStateConfig;
+  useAdaptiveRegime?: boolean;
 }): CompositeBenchmarkContext | undefined {
   const intraday = buildBenchmarkAnchorContext({
     timeframe: "intraday",
     benchmarkMarketCode: params.benchmarkMarketCode,
     referenceTime: params.referenceTime,
     universeCandlesByMarket: params.universeCandlesByMarket,
-    config: params.intradayConfig
+    config: params.intradayConfig,
+    useAdaptiveRegime: params.useAdaptiveRegime
   });
 
   if (!intraday) {
@@ -1169,7 +1247,8 @@ function buildAnchoredBenchmarkContext(params: {
     referenceTime: params.referenceTime,
     universeCandlesByMarket: params.universeCandlesByMarket,
     config: DAILY_ANCHOR_CONFIG,
-    aggregateTo: "1d"
+    aggregateTo: "1d",
+    useAdaptiveRegime: params.useAdaptiveRegime
   });
   const weekly = buildBenchmarkAnchorContext({
     timeframe: "1w",
@@ -1177,7 +1256,8 @@ function buildAnchoredBenchmarkContext(params: {
     referenceTime: params.referenceTime,
     universeCandlesByMarket: params.universeCandlesByMarket,
     config: WEEKLY_ANCHOR_CONFIG,
-    aggregateTo: "1w"
+    aggregateTo: "1w",
+    useAdaptiveRegime: params.useAdaptiveRegime
   });
 
   return combineCompositeBenchmarkContext({
@@ -1186,7 +1266,8 @@ function buildAnchoredBenchmarkContext(params: {
       intraday,
       daily,
       weekly
-    }
+    },
+    useAdaptiveRegime: params.useAdaptiveRegime
   });
 }
 
@@ -1212,12 +1293,14 @@ export function buildMarketStateContexts(params: {
     return {};
   }
 
+  const useAdaptiveRegime = params.config?.useAdaptiveRegime;
   const config = resolveMarketStateConfig(params.config);
   const intradayAnchor = buildCompositeAnchorInput({
     referenceTime,
     alignedIndex: params.alignedIndex,
     universeCandlesByMarket: params.universeCandlesByMarket,
-    config
+    config,
+    useAdaptiveRegime
   });
   if (!intradayAnchor) {
     return {};
@@ -1227,7 +1310,8 @@ export function buildMarketStateContexts(params: {
     referenceTime,
     alignedIndex: params.alignedIndex,
     universeCandlesByMarket: params.universeCandlesByMarket,
-    config
+    config,
+    useAdaptiveRegime
   });
   const snapshotValues = [...snapshots.values()];
   const breadth = intradayAnchor.breadth;
@@ -1235,13 +1319,15 @@ export function buildMarketStateContexts(params: {
     referenceTime,
     universeCandlesByMarket: params.universeCandlesByMarket,
     config: DAILY_ANCHOR_CONFIG,
-    aggregateTo: "1d"
+    aggregateTo: "1d",
+    useAdaptiveRegime
   });
   const weeklyAnchor = buildCompositeAnchorInput({
     referenceTime,
     universeCandlesByMarket: params.universeCandlesByMarket,
     config: WEEKLY_ANCHOR_CONFIG,
-    aggregateTo: "1w"
+    aggregateTo: "1w",
+    useAdaptiveRegime
   });
   const resolvedBenchmarkMarketCode = resolveBenchmarkMarketCode({
     benchmarkMarketCode: params.benchmarkMarketCode ?? params.config?.benchmarkMarketCode,
@@ -1252,7 +1338,8 @@ export function buildMarketStateContexts(params: {
         benchmarkMarketCode: resolvedBenchmarkMarketCode,
         referenceTime,
         universeCandlesByMarket: params.universeCandlesByMarket,
-        intradayConfig: config
+        intradayConfig: config,
+        useAdaptiveRegime
       })
     : undefined;
   const benchmarkForRelativeStrength =
@@ -1281,7 +1368,8 @@ export function buildMarketStateContexts(params: {
         ? toCompositeAnchorContext("1w", weeklyAnchor.sampleSize, weeklyAnchor.composite)
         : undefined
     },
-    benchmark
+    benchmark,
+    useAdaptiveRegime
   });
   const requestedMarkets = params.marketCodes ? new Set(params.marketCodes) : undefined;
   const sortedMomentumValues = snapshotValues

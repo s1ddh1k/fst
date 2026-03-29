@@ -464,7 +464,8 @@ export function runMultiStrategyBacktest(config: MultiStrategyBacktestConfig): M
           alignedIndex: decisionIndex,
           marketCodes: universeSnapshot.markets,
           universeName: "multi-strategy",
-          universeCandlesByMarket: decisionSet.candlesByMarket
+          universeCandlesByMarket: decisionSet.candlesByMarket,
+          config: config.marketStateConfig as any
         });
       if (!marketStateContextsByTimeframe.has(strategy.decisionTimeframe)) {
         marketStateContextsByTimeframe.set(strategy.decisionTimeframe, cachedMarketStates);

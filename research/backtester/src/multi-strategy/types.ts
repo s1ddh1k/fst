@@ -78,6 +78,8 @@ export type MultiStrategyBacktestConfig = {
   sleeves: StrategySleeveConfig[];
   decisionCandles: TimeframeCandleMap;
   executionCandles: TimeframeCandleMap;
+  /** Market state config passed to buildMarketStateContexts (e.g. useAdaptiveRegime) */
+  marketStateConfig?: Record<string, unknown>;
   preNormalizedDecisionSets?: Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
   preNormalizedExecutionSets?: Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
   precomputedUniverseSnapshotsByTf?: Partial<Record<StrategyTimeframe, Map<string, UniverseSnapshot>>>;
