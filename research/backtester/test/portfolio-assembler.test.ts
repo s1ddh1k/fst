@@ -9,9 +9,9 @@ import type { ValidatedBlock, ValidatedBlockCatalog } from "../src/auto-research
 
 function makeBlock(overrides?: Partial<ValidatedBlock>): ValidatedBlock {
   return {
-    blockId: "block:rotation-15m-trend-up-abc123",
-    strategyType: "block:rotation-15m-trend-up",
-    strategyName: "block:rotation-15m-trend-up",
+    blockId: "block:rotation-1h-trend-up-abc123",
+    strategyType: "block:rotation-1h-trend-up",
+    strategyName: "block:rotation-1h-trend-up",
     decisionTimeframe: "15m",
     executionTimeframe: "5m",
     family: "trend",
@@ -40,7 +40,7 @@ function makeBlock(overrides?: Partial<ValidatedBlock>): ValidatedBlock {
       riskAdjustedScore: 0.5
     },
     validatedAt: new Date().toISOString(),
-    sourceFamilyId: "block:rotation-15m-trend-up",
+    sourceFamilyId: "block:rotation-1h-trend-up",
     ...overrides
   };
 }

@@ -276,16 +276,16 @@ function createBbReversionFactory(
 
 const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   {
-    familyId: "block:rotation-15m-trend-up",
-    strategyName: "block:rotation-15m-trend-up",
+    familyId: "block:rotation-1h-trend-up",
+    strategyName: "block:rotation-1h-trend-up",
     sleeveId: "trend",
     family: "trend",
-    title: "15m Rotation Block (trend_up)",
-    thesis: "Relative strength rotation on 15m decision, 5m execution, gated to trend-up regime.",
-    timeframe: "15m",
-    requiredData: ["15m", "5m"],
+    title: "1h Rotation Block (trend_up)",
+    thesis: "Relative strength rotation on 1h, adaptive regime (SMA720=30d). Buys strong coins in uptrend, rotates on weakness.",
+    timeframe: "1h",
+    requiredData: ["1h"],
     parameterSpecs: [
-      { name: "rebalanceBars", description: "Rebalance cadence in 15m bars.", min: 4, max: 8 },
+      { name: "rebalanceBars", description: "Rebalance cadence in 1h bars.", min: 4, max: 24 },
       { name: "entryFloor", description: "Rotation entry floor.", min: 0.72, max: 0.92 },
       { name: "exitFloor", description: "Rotation exit floor.", min: 0.42, max: 0.72 },
       { name: "switchGap", description: "Switch threshold.", min: 0.06, max: 0.18 },
@@ -300,7 +300,7 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "Keep regime gate for trend_up only."
     ],
     createStrategy: async (candidateId, params) => {
-      const family = BLOCK_FAMILY_CATALOG.find(f => f.familyId === "block:rotation-15m-trend-up")!;
+      const family = BLOCK_FAMILY_CATALOG.find(f => f.familyId === "block:rotation-1h-trend-up")!;
       const p = clampParams(params, family.parameterSpecs);
       return createRelativeStrengthRotationStrategy({
         strategyId: `${candidateId}-rotation`,

@@ -20,11 +20,10 @@ describe("block-families", () => {
   });
 
   it("retrieves a block family by id", () => {
-    const family = getBlockFamilyById("block:rotation-15m-trend-up");
-    assert.equal(family.familyId, "block:rotation-15m-trend-up");
-    assert.equal(family.timeframe, "15m");
-    assert.ok(family.requiredData?.includes("15m"));
-    assert.ok(family.requiredData?.includes("5m"));
+    const family = getBlockFamilyById("block:rotation-1h-trend-up");
+    assert.equal(family.familyId, "block:rotation-1h-trend-up");
+    assert.equal(family.timeframe, "1h");
+    assert.ok(family.requiredData?.includes("1h"));
   });
 
   it("throws on unknown block family", () => {

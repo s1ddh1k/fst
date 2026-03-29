@@ -17,8 +17,8 @@ function makeEvaluation(overrides?: Partial<{
   return {
     candidate: {
       candidateId: overrides?.candidateId ?? "candidate-01",
-      familyId: overrides?.familyId ?? "block:rotation-15m-trend-up",
-      strategyName: overrides?.familyId ?? "block:rotation-15m-trend-up",
+      familyId: overrides?.familyId ?? "block:rotation-1h-trend-up",
+      strategyName: overrides?.familyId ?? "block:rotation-1h-trend-up",
       thesis: "test",
       parameters: { rebalanceBars: 5, entryFloor: 0.78 },
       invalidationSignals: []

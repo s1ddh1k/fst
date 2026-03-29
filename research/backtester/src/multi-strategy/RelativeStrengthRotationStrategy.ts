@@ -32,8 +32,8 @@ export function createRelativeStrengthRotationStrategy(params?: {
     id: strategyId,
     sleeveId,
     family: "trend",
-    decisionTimeframe: "15m",
-    executionTimeframe: "5m",
+    decisionTimeframe: "1h",
+    executionTimeframe: "1h",
     parameters: {
       rebalanceBars,
       entryFloor,
@@ -97,8 +97,8 @@ export function createRelativeStrengthRotationStrategy(params?: {
         signal,
         conviction: score,
         decisionTime: context.decisionTime,
-        decisionTimeframe: "15m",
-        executionTimeframe: "5m",
+        decisionTimeframe: "1h",
+        executionTimeframe: "1h",
         reason,
         stages: {
           universe_eligible: true,

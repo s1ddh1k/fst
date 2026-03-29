@@ -17,8 +17,8 @@ function makeEvaluation(overrides?: Partial<CandidateBacktestEvaluation>): Candi
   return {
     candidate: {
       candidateId: "test-candidate-01",
-      familyId: "block:rotation-15m-trend-up",
-      strategyName: "block:rotation-15m-trend-up",
+      familyId: "block:rotation-1h-trend-up",
+      strategyName: "block:rotation-1h-trend-up",
       thesis: "test",
       parameters: {
         rebalanceBars: 5,
@@ -95,8 +95,8 @@ function makeEvaluation(overrides?: Partial<CandidateBacktestEvaluation>): Candi
 
 function makeFamilyDef(): StrategyFamilyDefinition {
   return {
-    familyId: "block:rotation-15m-trend-up",
-    strategyName: "block:rotation-15m-trend-up",
+    familyId: "block:rotation-1h-trend-up",
+    strategyName: "block:rotation-1h-trend-up",
     title: "15m Rotation Block",
     thesis: "test",
     timeframe: "15m",
@@ -119,16 +119,16 @@ describe("block-catalog", () => {
     const block = await promoteToValidatedBlock({
       evaluation,
       familyDef: makeFamilyDef(),
-      blockFamilyId: "block:rotation-15m-trend-up"
+      blockFamilyId: "block:rotation-1h-trend-up"
     });
-    assert.ok(block.blockId.startsWith("block:rotation-15m-trend-up:"));
+    assert.ok(block.blockId.startsWith("block:rotation-1h-trend-up:"));
     assert.equal(block.decisionTimeframe, "15m");
     assert.equal(block.executionTimeframe, "5m");
     assert.equal(block.family, "trend");
     assert.equal(block.performance.netReturn, 0.08);
     assert.equal(block.performance.tradeCount, 20);
     assert.deepEqual(block.regimeGate.allowedRegimes, ["trend_up"]);
-    assert.equal(block.sourceFamilyId, "block:rotation-15m-trend-up");
+    assert.equal(block.sourceFamilyId, "block:rotation-1h-trend-up");
   });
 
   it("appends block to catalog", async () => {
@@ -136,11 +136,11 @@ describe("block-catalog", () => {
     const block = await promoteToValidatedBlock({
       evaluation: makeEvaluation(),
       familyDef: makeFamilyDef(),
-      blockFamilyId: "block:rotation-15m-trend-up"
+      blockFamilyId: "block:rotation-1h-trend-up"
     });
     const updated = appendValidatedBlock(catalog, block);
     assert.equal(updated.blocks.length, 1);
-    assert.equal(updated.blocks[0]!.sourceFamilyId, "block:rotation-15m-trend-up");
+    assert.equal(updated.blocks[0]!.sourceFamilyId, "block:rotation-1h-trend-up");
   });
 
   it("replaces block when better score found for same family", async () => {
@@ -148,7 +148,7 @@ describe("block-catalog", () => {
     const block1 = await promoteToValidatedBlock({
       evaluation: makeEvaluation(),
       familyDef: makeFamilyDef(),
-      blockFamilyId: "block:rotation-15m-trend-up"
+      blockFamilyId: "block:rotation-1h-trend-up"
     });
     catalog = appendValidatedBlock(catalog, block1);
 
@@ -162,7 +162,7 @@ describe("block-catalog", () => {
     const block2 = await promoteToValidatedBlock({
       evaluation: betterEval,
       familyDef: makeFamilyDef(),
-      blockFamilyId: "block:rotation-15m-trend-up"
+      blockFamilyId: "block:rotation-1h-trend-up"
     });
     catalog = appendValidatedBlock(catalog, block2);
 
@@ -175,7 +175,7 @@ describe("block-catalog", () => {
     const block = await promoteToValidatedBlock({
       evaluation: makeEvaluation(),
       familyDef: makeFamilyDef(),
-      blockFamilyId: "block:rotation-15m-trend-up"
+      blockFamilyId: "block:rotation-1h-trend-up"
     });
     catalog = appendValidatedBlock(catalog, block);
 
