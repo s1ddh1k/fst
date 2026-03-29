@@ -49,6 +49,7 @@ export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum"
 export type ExternalSignals = {
   fearGreed?: Record<string, number>;     // date string → 0-100 value
   kimchiPremium?: Record<string, number>; // date string → % premium (-0.05 to +0.15)
+  fundingRate?: Record<string, number>;   // date string → daily avg funding rate (-0.001 to +0.002)
 };
 
 export type RegimeSwitchingConfig = {
@@ -496,6 +497,24 @@ function detectRegimeAtBar(
       if (kp > 0.08) score -= 3;       // >8% premium → extreme overheating
       else if (kp > 0.04) score -= 1;  // >4% premium → mild overheating
       else if (kp < -0.02) score += 2; // Negative premium → pessimism → bounce
+    }
+
+    // Funding Rate (+/- 3, strongest contrarian signal from derivatives market)
+    const fr = ext?.fundingRate?.[dateStr];
+    if (fr !== undefined) {
+      // 7-day average funding rate for smoothing
+      let frSum = 0, frCount = 0;
+      for (let d = 0; d < 7; d++) {
+        const pastDate = new Date(candles[index].candleTimeUtc.getTime() - d * 86400000).toISOString().slice(0, 10);
+        const pastFr = ext?.fundingRate?.[pastDate];
+        if (pastFr !== undefined) { frSum += pastFr; frCount++; }
+      }
+      const avgFr = frCount > 0 ? frSum / frCount : fr;
+
+      if (avgFr > 0.0008) score -= 3;      // Extreme long bias → crash imminent
+      else if (avgFr > 0.0004) score -= 1;  // Elevated long bias
+      else if (avgFr < -0.0003) score += 3; // Short bias → squeeze incoming
+      else if (avgFr < -0.0001) score += 1; // Mild short bias → potential bottom
     }
 
     // ── ASYMMETRIC THRESHOLDS ──
