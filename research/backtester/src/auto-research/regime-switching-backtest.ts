@@ -43,7 +43,7 @@ export type RegimeStrategyMap = Partial<Record<RegimeType, RegimeStrategyEntry>>
 // undefined = stay in cash
 // { strategy: ..., timeframe: "15m" } = run strategy on 15m candles
 
-export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum";
+export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum" | "microstructure" | "momentum-micro";
 
 export type RegimeSwitchingConfig = {
   strategies: RegimeStrategyMap;
@@ -168,6 +168,123 @@ function detectRegimeAtBar(
     if (weekRoc > 0.03 && monthRoc > 0.10) return "trend_up";
     // Both negative and strong → trend_down
     if (weekRoc < -0.03 && monthRoc < -0.10) return "trend_down";
+    return "range";
+  }
+
+  if (mode === "microstructure") {
+    if (index < 336) return "range"; // need 2 weeks history
+
+    const close = candles[index].closePrice;
+
+    // 1. Volume acceleration: compare recent 24h avg volume to 7d avg volume
+    let vol24h = 0, vol7d = 0;
+    for (let j = index - 23; j <= index; j++) vol24h += candles[j].volume;
+    for (let j = index - 167; j <= index; j++) vol7d += candles[j].volume;
+    vol24h /= 24;
+    vol7d /= 168;
+    const volumeAccel = vol7d > 0 ? vol24h / vol7d : 1;
+
+    // 2. Buying pressure: (close - low) / (high - low), averaged over 24 bars
+    let buyPressure = 0;
+    for (let j = index - 23; j <= index; j++) {
+      const range = candles[j].highPrice - candles[j].lowPrice;
+      buyPressure += range > 0 ? (candles[j].closePrice - candles[j].lowPrice) / range : 0.5;
+    }
+    buyPressure /= 24;
+
+    // 3. Trend strength: 7d return + 30d return
+    const weekAgo = candles[index - 168]?.closePrice ?? close;
+    const monthAgo = candles[index - Math.min(720, index)]?.closePrice ?? close;
+    const weekReturn = (close - weekAgo) / weekAgo;
+    const monthReturn = (close - monthAgo) / monthAgo;
+
+    // 4. Volatility compression: 24h range vs 7d range
+    let high24 = 0, low24 = Infinity, high7d = 0, low7d = Infinity;
+    for (let j = index - 23; j <= index; j++) {
+      high24 = Math.max(high24, candles[j].highPrice);
+      low24 = Math.min(low24, candles[j].lowPrice);
+    }
+    for (let j = index - 167; j <= index; j++) {
+      high7d = Math.max(high7d, candles[j].highPrice);
+      low7d = Math.min(low7d, candles[j].lowPrice);
+    }
+    const range24 = close > 0 ? (high24 - low24) / close : 0;
+    const range7d = close > 0 ? (high7d - low7d) / close : 0;
+    const volCompression = range7d > 0 ? range24 / range7d : 1;
+
+    // 5. Consecutive direction: count recent up vs down bars (48h)
+    let upBars = 0;
+    for (let j = index - 47; j <= index; j++) {
+      if (candles[j].closePrice > candles[j].openPrice) upBars++;
+    }
+    const upRatio = upBars / 48;
+
+    // Scoring: combine signals
+    let bullScore = 0;
+    let bearScore = 0;
+
+    // Volume spike + buying pressure = accumulation (bullish)
+    if (volumeAccel > 1.5 && buyPressure > 0.6) bullScore += 2;
+    // Volume spike + selling pressure = distribution (bearish)
+    if (volumeAccel > 1.5 && buyPressure < 0.4) bearScore += 2;
+
+    // Trend confirmation
+    if (weekReturn > 0.03 && monthReturn > 0.05) bullScore += 2;
+    if (weekReturn < -0.03 && monthReturn < -0.05) bearScore += 2;
+
+    // Momentum
+    if (upRatio > 0.6) bullScore += 1;
+    if (upRatio < 0.4) bearScore += 1;
+
+    // Volatility compression = range-bound
+    if (volCompression < 0.3) return "range";
+
+    // Strong signals needed for trend calls
+    if (bullScore >= 3 && bearScore <= 1) return "trend_up";
+    if (bearScore >= 3 && bullScore <= 1) return "trend_down";
+    return "range";
+  }
+
+  if (mode === "momentum-micro") {
+    // Hybrid: momentum for primary direction, micro for confirmation
+    if (index < 336) return "range";
+
+    const close = candles[index].closePrice;
+    const weekAgo = candles[index - 168]?.closePrice ?? close;
+    const monthAgo = candles[index - Math.min(720, index)]?.closePrice ?? close;
+    const weekRoc = (close - weekAgo) / weekAgo;
+    const monthRoc = (close - monthAgo) / monthAgo;
+
+    // Micro signals for confirmation
+    let vol24h = 0, vol7d = 0;
+    for (let j = index - 23; j <= index; j++) vol24h += candles[j].volume;
+    for (let j = index - 167; j <= index; j++) vol7d += candles[j].volume;
+    vol24h /= 24; vol7d /= 168;
+    const volumeAccel = vol7d > 0 ? vol24h / vol7d : 1;
+
+    let buyPressure = 0;
+    for (let j = index - 47; j <= index; j++) {
+      const range = candles[j].highPrice - candles[j].lowPrice;
+      buyPressure += range > 0 ? (candles[j].closePrice - candles[j].lowPrice) / range : 0.5;
+    }
+    buyPressure /= 48;
+
+    // Momentum says trend_up: need micro confirmation (buying pressure > 0.5)
+    if (weekRoc > 0.03 && monthRoc > 0.10 && buyPressure > 0.5) return "trend_up";
+    // Momentum says trend_up but micro says caution: stay range
+    if (weekRoc > 0.03 && monthRoc > 0.10 && buyPressure <= 0.5) return "range";
+
+    // Momentum says trend_down: confirm with selling pressure OR volume spike
+    if (weekRoc < -0.03 && monthRoc < -0.10 && (buyPressure < 0.5 || volumeAccel > 1.5)) return "trend_down";
+    // Momentum says trend_down but micro says buying: possibly bottoming → range
+    if (weekRoc < -0.03 && monthRoc < -0.10 && buyPressure >= 0.5 && volumeAccel <= 1.5) return "range";
+
+    // Early warning: volume spike + momentum divergence = potential transition
+    // Momentum still neutral but volume exploding + strong selling = early bear signal
+    if (volumeAccel > 2.0 && buyPressure < 0.35 && weekRoc < 0) return "trend_down";
+    // Volume spike + strong buying + positive week = early bull signal
+    if (volumeAccel > 2.0 && buyPressure > 0.65 && weekRoc > 0) return "trend_up";
+
     return "range";
   }
 
