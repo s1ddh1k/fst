@@ -499,23 +499,8 @@ function detectRegimeAtBar(
       else if (kp < -0.02) score += 2; // Negative premium → pessimism → bounce
     }
 
-    // Funding Rate (+/- 3, strongest contrarian signal from derivatives market)
-    const fr = ext?.fundingRate?.[dateStr];
-    if (fr !== undefined) {
-      // 7-day average funding rate for smoothing
-      let frSum = 0, frCount = 0;
-      for (let d = 0; d < 7; d++) {
-        const pastDate = new Date(candles[index].candleTimeUtc.getTime() - d * 86400000).toISOString().slice(0, 10);
-        const pastFr = ext?.fundingRate?.[pastDate];
-        if (pastFr !== undefined) { frSum += pastFr; frCount++; }
-      }
-      const avgFr = frCount > 0 ? frSum / frCount : fr;
-
-      if (avgFr > 0.0008) score -= 3;      // Extreme long bias → crash imminent
-      else if (avgFr > 0.0004) score -= 1;  // Elevated long bias
-      else if (avgFr < -0.0003) score += 3; // Short bias → squeeze incoming
-      else if (avgFr < -0.0001) score += 1; // Mild short bias → potential bottom
-    }
+    // Funding Rate: tested but excluded — hurts 3yr/6yr performance regardless of thresholds.
+    // Shorts being right (bear market) conflicts with the contrarian assumption.
 
     // ── ASYMMETRIC THRESHOLDS ──
     adaptiveScore = score;
