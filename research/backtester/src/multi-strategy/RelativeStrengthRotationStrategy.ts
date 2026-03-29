@@ -61,11 +61,13 @@ export function createRelativeStrengthRotationStrategy(params?: {
       );
 
       const rebalancePass = context.featureView.decisionIndex % rebalanceBars === 0;
-      const regimePass =
-        regimeScore >= 0 &&
-        aboveTrendRatio >= minAboveTrendRatio &&
-        compositeTrendScore >= minCompositeTrend;
-      const liquidityPass = liquidityScore >= minLiquidityScore;
+      // Use composite regime from market state as primary gate.
+      // When adaptive regime is enabled, this correctly uses SMA(720) classification.
+      // aboveTrendRatio and compositeTrendScore are secondary — too strict with adaptive.
+      const compositeRegime = (marketState as any)?.composite?.regime;
+      const regimePass = compositeRegime === "trend_up" ||
+        (regimeScore >= 0 && aboveTrendRatio >= minAboveTrendRatio && compositeTrendScore >= minCompositeTrend);
+      const liquidityPass = liquidityScore >= minLiquidityScore || compositeRegime === "trend_up";
       const heldScore = existingPosition ? score : undefined;
 
       let signal: StrategySignal["signal"] = "HOLD";

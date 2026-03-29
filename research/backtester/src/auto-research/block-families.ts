@@ -289,9 +289,9 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       { name: "entryFloor", description: "Rotation entry floor.", min: 0.72, max: 0.92 },
       { name: "exitFloor", description: "Rotation exit floor.", min: 0.42, max: 0.72 },
       { name: "switchGap", description: "Switch threshold.", min: 0.06, max: 0.18 },
-      { name: "minAboveTrendRatio", description: "Breadth above-trend floor.", min: 0.55, max: 0.86 },
-      { name: "minLiquidityScore", description: "Liquidity floor.", min: 0.02, max: 0.25 },
-      { name: "minCompositeTrend", description: "Composite trend floor.", min: -0.05, max: 0.18 },
+      { name: "minAboveTrendRatio", description: "Breadth above-trend floor (lowered for adaptive regime).", min: 0.20, max: 0.70 },
+      { name: "minLiquidityScore", description: "Liquidity floor.", min: 0.01, max: 0.15 },
+      { name: "minCompositeTrend", description: "Composite trend floor (lowered for adaptive regime).", min: -0.30, max: 0.10 },
       ...REGIME_GATE_TREND_UP_SPECS
     ],
     guardrails: [
