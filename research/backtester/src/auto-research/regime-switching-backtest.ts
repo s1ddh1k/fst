@@ -59,6 +59,10 @@ export type RegimeSwitchingConfig = {
   initialCapital: number;
   feePct?: number; // per-side fee (default: 0.025%)
   switchCooldownBars?: number; // min bars between regime switches (default: 168 = 1 week on 1h)
+  /** Portfolio trailing stop: force to cash if equity drops this % from peak (default: disabled) */
+  portfolioStopPct?: number;
+  /** Bars to wait before re-entering after portfolio stop (default: 72) */
+  portfolioStopCooldown?: number;
 };
 
 export type RegimeSwitchingResult = {
@@ -333,6 +337,8 @@ export function runRegimeSwitchingBacktest(config: RegimeSwitchingConfig): Regim
   let barsSinceSwitch = cooldown; // allow immediate first switch
   let hasPosition = false;
   let totalTrades = 0;
+  let peakEquity = config.initialCapital;
+  let portfolioStopUntilBar = 0;
   let regimeSwitches = 0;
   let feesPaid = 0;
   const equityCurve: number[] = [config.initialCapital];
@@ -453,8 +459,21 @@ export function runRegimeSwitchingBacktest(config: RegimeSwitchingConfig): Regim
       }
     }
 
-    // Mark-to-market
+    // Portfolio trailing stop: force to cash if equity drops from peak
     const equity = cash + (hasPosition ? positionQty * close : 0);
+    if (config.portfolioStopPct && equity > peakEquity) peakEquity = equity;
+    if (config.portfolioStopPct && hasPosition && peakEquity > 0) {
+      const drawdown = (peakEquity - equity) / peakEquity;
+      if (drawdown >= config.portfolioStopPct) {
+        closePosition(close);
+        portfolioStopUntilBar = i + (config.portfolioStopCooldown ?? 72);
+      }
+    }
+    // Block re-entry during portfolio stop cooldown
+    if (portfolioStopUntilBar > 0 && i < portfolioStopUntilBar && hasPosition) {
+      closePosition(close);
+    }
+
     equityCurve.push(equity);
   }
 
