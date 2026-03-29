@@ -43,7 +43,7 @@ export type RegimeStrategyMap = Partial<Record<RegimeType, RegimeStrategyEntry>>
 // undefined = stay in cash
 // { strategy: ..., timeframe: "15m" } = run strategy on 15m candles
 
-export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum" | "microstructure" | "momentum-micro" | "adaptive" | "adaptive-v2";
+export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum" | "microstructure" | "momentum-micro" | "adaptive" | "adaptive-v2" | "hybrid";
 
 /** External signal data (daily resolution) */
 export type ExternalSignals = {
@@ -261,6 +261,73 @@ function detectRegimeAtBar(
     if (bullScore >= 3 && bearScore <= 1) return "trend_up";
     if (bearScore >= 3 && bullScore <= 1) return "trend_down";
     return "range";
+  }
+
+  if (mode === "hybrid") {
+    // Hybrid: default is B&H (trend_up). Only exit when MULTIPLE signals agree on bear.
+    // Re-entry: trailing stop logic (recovery from trough).
+    // Key insight: spend MORE time in B&H, only exit when very confident about bear.
+    if (index < 720) return "trend_up"; // default: B&H
+
+    const close = candles[index].closePrice;
+
+    // Run full adaptive scoring
+    const sma50v = sma(candles, index, 50)!;
+    const sma200v = sma(candles, index, 200)!;
+    const lookback = 336;
+    let obvNow = 0, obvHalf = 0;
+    for (let j = index - lookback + 1; j <= index; j++) {
+      const dir = candles[j].closePrice > candles[j - 1]?.closePrice ? 1 : -1;
+      if (j <= index - 168) obvHalf += dir * candles[j].volume;
+      obvNow += dir * candles[j].volume;
+    }
+    const pSlope = close - (candles[index - lookback]?.closePrice ?? close);
+    const bearDiv = pSlope > 0 && (obvNow - obvHalf) < 0;
+
+    const weekAgo = candles[index - 168]?.closePrice ?? close;
+    const monthAgo = candles[index - 720]?.closePrice ?? close;
+    const weekRet = (close - weekAgo) / weekAgo;
+    const monthRet = (close - monthAgo) / monthAgo;
+
+    // Trailing stop state for re-entry
+    if (!trailingState) {
+      trailingState = { peak: close, trough: close, currentRegime: "trend_up" };
+    }
+    if (close > trailingState.peak) trailingState.peak = close;
+    if (close < trailingState.trough) trailingState.trough = close;
+
+    const dropPct = config?.trailingStopDropPct ?? 0.20;
+    const recoverPct = config?.trailingStopRecoverPct ?? 0.25;
+    const dropFromPeak = (trailingState.peak - close) / trailingState.peak;
+    const riseFromTrough = (close - trailingState.trough) / trailingState.trough;
+
+    if (trailingState.currentRegime === "trend_up") {
+      // EXIT conditions: need BOTH trailing stop AND fundamental deterioration
+      const trailTriggered = dropFromPeak >= dropPct;
+      const fundamentalBear = (
+        (!close || close < sma200v) &&        // below long-term SMA
+        weekRet < -0.03 &&                     // negative week momentum
+        monthRet < -0.05                       // negative month momentum
+      );
+      const divWarning = bearDiv;              // volume divergence
+
+      // Exit only when trailing stop + at least one fundamental signal
+      if (trailTriggered && (fundamentalBear || divWarning)) {
+        trailingState.currentRegime = "trend_down";
+        trailingState.trough = close;
+        return "trend_down";
+      }
+
+      return "trend_up";
+    } else {
+      // RE-ENTRY: recovery from trough (same as trailing stop)
+      if (riseFromTrough >= recoverPct) {
+        trailingState.currentRegime = "trend_up";
+        trailingState.peak = close;
+        return "trend_up";
+      }
+      return "trend_down";
+    }
   }
 
   if (mode === "adaptive-v2" as string) { // disabled — breadth signals hurt performance
