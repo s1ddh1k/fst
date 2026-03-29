@@ -604,10 +604,14 @@ function getMarketFeatureSet(
   };
 
   if (options?.useAdaptiveRegime) {
+    // Adaptive regime uses longer SMA(200) and momentum(72) for crypto
+    // SMA(720) = 30 days on 1h bars, momentum(168) = 7 days
+    const adaptiveSma = config.trendWindow >= 720 ? smaByIndex : buildRollingAverage(closePrices, 720);
+    const adaptiveMomentum = config.momentumLookback >= 168 ? featureSet.momentumByIndex : buildMomentumSeries(closePrices, 168);
     featureSet.regimeByIndex = buildAdaptiveRegimeSeries({
       closePrices,
-      smaByIndex,
-      momentumByIndex: featureSet.momentumByIndex
+      smaByIndex: adaptiveSma,
+      momentumByIndex: adaptiveMomentum
     });
   } else {
     featureSet.regimeByIndex = buildRegimeSeries({
