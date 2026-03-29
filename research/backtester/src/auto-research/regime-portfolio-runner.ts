@@ -18,7 +18,7 @@ import {
   withRegimeGate,
   adaptScoredStrategy
 } from "../multi-strategy/index.js";
-import type { RegimeGateConfig } from "../multi-strategy/RegimeGatedStrategy.js";
+import { withCryptoRegimeGate, resetCryptoRegimeCache } from "./crypto-regime-gate.js";
 import {
   createDonchianBreakoutStrategy,
   createVolumeExhaustionBounce15mStrategy,
@@ -37,58 +37,74 @@ export type RegimePortfolioConfig = {
 
 export function runRegimePortfolioBacktest(config: RegimePortfolioConfig) {
   const { candlesByTimeframeAndMarket, initialCapital, marketCodes } = config;
+  resetCryptoRegimeCache();
 
-  // All strategies run WITHOUT regime gate — let every strategy trade in all conditions.
-  // The strategies themselves have internal logic (RSI thresholds, volume conditions)
-  // that naturally filter when to enter. The portfolio engine coordinates capital.
-  //
-  // This is simpler and avoids the broken market-state.ts regime detection.
+  // Use BTC as regime benchmark for all markets
+  const btcCandles = candlesByTimeframeAndMarket["1h"]?.["KRW-BTC"] ?? [];
 
-  const trendUpStrategy = adaptScoredStrategy({
-    strategyId: "regime-donchian-1h",
-    sleeveId: "trend",
-    family: "breakout",
-    decisionTimeframe: "1h",
-    executionTimeframe: "1h",
-    scoredStrategy: createDonchianBreakoutStrategy({
-      entryLookback: 20,
-      exitLookback: 10,
-      stopAtrMult: 2.0,
-      maxHoldBars: 96,
-      minChannelWidth: 0.02
-    })
+  // Uses crypto-regime-gate.ts for regime detection — bypasses market-state.ts's
+  // broken volatile classification. Same adaptive scoring as regime-switching-backtest.ts.
+
+  const trendUpStrategy = withCryptoRegimeGate({
+    strategy: adaptScoredStrategy({
+      strategyId: "regime-donchian-1h",
+      sleeveId: "trend",
+      family: "breakout",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createDonchianBreakoutStrategy({
+        entryLookback: 20,
+        exitLookback: 10,
+        stopAtrMult: 2.0,
+        maxHoldBars: 96,
+        minChannelWidth: 0.02
+      })
+    }),
+    allowedRegimes: ["trend_up"],
+    exitOnDisallow: true,
+    benchmarkCandles: btcCandles
   });
 
-  const trendDownStrategy = adaptScoredStrategy({
-    strategyId: "regime-vex-1h",
-    sleeveId: "micro",
-    family: "meanreversion",
-    decisionTimeframe: "1h",
-    executionTimeframe: "1h",
-    scoredStrategy: createVolumeExhaustionBounceStrategy({
-      dropLookback: 5,
-      dropThresholdPct: 0.06,
-      volumeWindow: 20,
-      volumeSpikeMult: 2.5,
-      rsiPeriod: 14,
-      rsiEntry: 20,
-      profitTargetPct: 0.025
-    })
+  const trendDownStrategy = withCryptoRegimeGate({
+    strategy: adaptScoredStrategy({
+      strategyId: "regime-vex-1h",
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createVolumeExhaustionBounceStrategy({
+        dropLookback: 5,
+        dropThresholdPct: 0.06,
+        volumeWindow: 20,
+        volumeSpikeMult: 2.5,
+        rsiPeriod: 14,
+        rsiEntry: 20,
+        profitTargetPct: 0.025
+      })
+    }),
+    allowedRegimes: ["trend_down"],
+    exitOnDisallow: true,
+    benchmarkCandles: btcCandles
   });
 
-  const rangeStrategy = adaptScoredStrategy({
-    strategyId: "regime-rsi-1h",
-    sleeveId: "micro",
-    family: "meanreversion",
-    decisionTimeframe: "1h",
-    executionTimeframe: "1h",
-    scoredStrategy: createSimpleRsiReversionStrategy({
-      rsiPeriod: 14,
-      oversold: 30,
-      overbought: 70,
-      stopLossPct: 0.05,
-      maxHoldBars: 48
-    })
+  const rangeStrategy = withCryptoRegimeGate({
+    strategy: adaptScoredStrategy({
+      strategyId: "regime-rsi-1h",
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createSimpleRsiReversionStrategy({
+        rsiPeriod: 14,
+        oversold: 30,
+        overbought: 70,
+        stopLossPct: 0.05,
+        maxHoldBars: 48
+      })
+    }),
+    allowedRegimes: ["range"],
+    exitOnDisallow: true,
+    benchmarkCandles: btcCandles
   });
 
   return runMultiStrategyBacktest({
