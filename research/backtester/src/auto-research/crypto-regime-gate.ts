@@ -26,6 +26,8 @@ export type CryptoRegimeGateConfig = {
   exitOnDisallow?: boolean;
   /** Use BTC candles for regime detection instead of per-market candles */
   benchmarkCandles?: Array<{ closePrice: number; openPrice: number; highPrice: number; lowPrice: number; volume: number; candleTimeUtc: Date }>;
+  /** Minimum bars between regime transitions (default: 72 = 3 days on 1h) */
+  cooldownBars?: number;
 };
 
 function sma(candles: Array<{ closePrice: number }>, endIndex: number, period: number): number | null {
@@ -101,10 +103,14 @@ function detectCryptoRegime(candles: Array<{ closePrice: number; openPrice: numb
 // Cache: compute regime once per bar, reuse for all markets
 let cachedRegimeTime = 0;
 let cachedRegime: CryptoRegime = "range";
+let lastRegimeChangeTime = 0;
+let stableRegime: CryptoRegime = "range";
 
 export function resetCryptoRegimeCache() {
   cachedRegimeTime = 0;
   cachedRegime = "range";
+  lastRegimeChangeTime = 0;
+  stableRegime = "range";
 }
 
 export function withCryptoRegimeGate(config: CryptoRegimeGateConfig): Strategy {
@@ -150,7 +156,20 @@ export function withCryptoRegimeGate(config: CryptoRegimeGateConfig): Strategy {
         cachedRegime = detectCryptoRegime(candles, regimeIndex);
       }
 
-      const regime = cachedRegime;
+      // Apply cooldown: don't switch regime too frequently
+      const cooldown = config.cooldownBars ?? 72;
+      const currentTime = context.decisionTime?.getTime() ?? 0;
+      const barMs = 3600000; // 1h
+      if (cachedRegime !== stableRegime) {
+        if ((currentTime - lastRegimeChangeTime) / barMs >= cooldown) {
+          stableRegime = cachedRegime;
+          lastRegimeChangeTime = currentTime;
+        }
+      } else if (lastRegimeChangeTime === 0) {
+        lastRegimeChangeTime = currentTime;
+      }
+
+      const regime = stableRegime;
       const allowed = allowedRegimes.includes(regime);
 
       if (!allowed) {

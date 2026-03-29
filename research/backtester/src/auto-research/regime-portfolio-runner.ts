@@ -12,17 +12,17 @@
  */
 
 import type { Candle } from "../types.js";
-import type { StrategyTimeframe } from "../../../../packages/shared/src/index.js";
+import type { Strategy, StrategyTimeframe } from "../../../../packages/shared/src/index.js";
 import {
   runMultiStrategyBacktest,
-  withRegimeGate,
   adaptScoredStrategy
 } from "../multi-strategy/index.js";
 import { withCryptoRegimeGate, resetCryptoRegimeCache } from "./crypto-regime-gate.js";
 import {
-  createRelativeStrengthRotationStrategy,
-  createBollingerMeanReversionMultiStrategy,
-  createRelativeMomentumPullbackMultiStrategy,
+  createVolumeExhaustionBounceStrategy
+} from "../../../strategies/src/simple-strategies.js";
+import {
+  createRelativeStrengthRotationStrategy
 } from "../multi-strategy/index.js";
 
 type CandleMap = Record<string, Candle[]>;
@@ -41,72 +41,62 @@ export function runRegimePortfolioBacktest(config: RegimePortfolioConfig) {
   // Use BTC as regime benchmark for all markets
   const btcCandles = candlesByTimeframeAndMarket["1h"]?.["KRW-BTC"] ?? [];
 
-  // Multi-market strategies designed for universe-wide trading,
-  // gated by our crypto regime detection (BTC benchmark).
+  // Same proven strategy as BTC single-market, applied to each coin:
+  //   trend_up:   donchian breakout (trend following on each coin)
+  //   trend_down: volume-exhaustion (catch capitulation bounces on each coin)
+  //   range:      cash (no trading)
 
-  // trend_up: relative strength rotation — buys the strongest coins, rotates
+  // trend_up: relative strength rotation
+  // 유니버스에서 아직 덜 오른(상대적 약세) 종목 매수 → 충분히 오르면 매도 → 다른 종목으로 교체
   const trendUpStrategy = withCryptoRegimeGate({
     strategy: createRelativeStrengthRotationStrategy({
-      strategyId: "regime-rotation-1h",
+      strategyId: "regime-rotation",
       rebalanceBars: 5,
-      entryFloor: 0.80,
+      entryFloor: 0.70,         // 상대강도 70% 이상이면 진입
       reEntryCooldownBars: 3,
-      exitFloor: 0.56,
-      switchGap: 0.12,
-      minAboveTrendRatio: 0.40,  // very low — crypto regime gate handles macro
-      minLiquidityScore: 0.03,
-      minCompositeTrend: -0.20   // very low — regime gate already filters
+      exitFloor: 0.50,          // 상대강도 50% 이하면 교체
+      switchGap: 0.10,          // 현재 vs 대체 종목 gap
+      minAboveTrendRatio: 0.0,  // 완전 비활성 — crypto regime gate만 사용
+      minLiquidityScore: 0.0,
+      minCompositeTrend: -1.0   // 완전 비활성
     }),
     allowedRegimes: ["trend_up"],
     exitOnDisallow: true,
-    benchmarkCandles: btcCandles
+    benchmarkCandles: btcCandles,
+    cooldownBars: 72
   });
 
-  // trend_down+range: BB mean reversion — uses best params from auto-research hourly run
+  // trend_down: volume-exhaustion — catches capitulation bounces on individual coins
   const trendDownStrategy = withCryptoRegimeGate({
-    strategy: createBollingerMeanReversionMultiStrategy({
-      strategyId: "regime-bb-reversion-1h",
-      bbWindow: 16,
-      bbMultiplier: 2.6,
-      rsiPeriod: 23,
-      entryRsiThreshold: 25.259,
-      requireRsiConfirmation: false,
-      requireReclaimConfirmation: true,
-      reclaimLookbackBars: 5,
-      reclaimPercentBThreshold: 0.36,
-      reclaimMinCloseBouncePct: 0.011,
-      reclaimBandWidthFactor: 0.18,
-      deepTouchEntryPercentB: -0.068,
-      deepTouchRsiThreshold: 10.354,
-      exitRsi: 39.2,
-      stopLossPct: 0.113,
-      maxHoldBars: 36,
-      entryPercentB: -0.066,
-      minBandWidth: 0.012
+    strategy: adaptScoredStrategy({
+      strategyId: "regime-vex-1h",
+      sleeveId: "micro",
+      family: "meanreversion",
+      decisionTimeframe: "1h",
+      executionTimeframe: "1h",
+      scoredStrategy: createVolumeExhaustionBounceStrategy({
+        dropLookback: 5,
+        dropThresholdPct: 0.06,
+        volumeWindow: 20,
+        volumeSpikeMult: 2.5,
+        rsiPeriod: 14,
+        rsiEntry: 20,
+        profitTargetPct: 0.025
+      })
     }),
-    allowedRegimes: ["trend_down"],  // bear only — range stays cash
+    allowedRegimes: ["trend_down"],
     exitOnDisallow: true,
-    benchmarkCandles: btcCandles
+    benchmarkCandles: btcCandles,
+    cooldownBars: 72
   });
 
-  // range: momentum pullback — buys dips in strong coins during sideways
-  const rangeStrategy = withCryptoRegimeGate({
-    strategy: createRelativeMomentumPullbackMultiStrategy({
-      strategyId: "regime-pullback-1h",
-      minStrengthPct: 0.65,
-      minRiskOn: -0.05,   // allow entries even in mildly negative market
-      pullbackZ: 0.9,
-      trailAtrMult: 2.2
-    }),
-    allowedRegimes: ["range"],
-    exitOnDisallow: true,
-    benchmarkCandles: btcCandles
-  });
+  // range: no strategy (cash)
+  const rangeStrategy = null;
 
   return runMultiStrategyBacktest({
     universeName: "krw-top",
     initialCapital,
-    strategies: [trendUpStrategy, trendDownStrategy, rangeStrategy],
+    strategies: [trendUpStrategy, trendDownStrategy].filter(Boolean),
     sleeves: [
       { sleeveId: "trend", capitalBudgetPct: 0.45, maxOpenPositions: 3, maxSinglePositionPct: 0.25, priority: 10 },
       { sleeveId: "micro", capitalBudgetPct: 0.45, maxOpenPositions: 3, maxSinglePositionPct: 0.25, priority: 9 },
