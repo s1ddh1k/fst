@@ -45,12 +45,20 @@ export type RegimeStrategyMap = Partial<Record<RegimeType, RegimeStrategyEntry>>
 
 export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum" | "microstructure" | "momentum-micro" | "adaptive" | "adaptive-v2";
 
+/** External signal data (daily resolution) */
+export type ExternalSignals = {
+  fearGreed?: Record<string, number>;     // date string → 0-100 value
+  kimchiPremium?: Record<string, number>; // date string → % premium (-0.05 to +0.15)
+};
+
 export type RegimeSwitchingConfig = {
   strategies: RegimeStrategyMap;
   /** Candles by timeframe by market. E.g. { "1h": { "KRW-BTC": [...] }, "15m": { "KRW-BTC": [...] } } */
   candlesByTimeframeAndMarket: Record<string, Record<string, Candle[]>>;
   /** Primary timeframe for regime detection and bar-by-bar stepping */
   primaryTimeframe: "1h" | "15m";
+  /** External signal data for regime detection */
+  externalSignals?: ExternalSignals;
   regimeDetector: RegimeDetectorMode;
   /** Trailing stop: switch from bull to bear when price drops this % from peak */
   trailingStopDropPct?: number;  // default: 0.15 (15%)
@@ -468,10 +476,29 @@ function detectRegimeAtBar(
       if (weekReturn > 0.02) score += 1;
     }
 
+    // ── EXTERNAL SIGNALS (if available) ──
+    const dateStr = candles[index].candleTimeUtc.toISOString().slice(0, 10);
+    const ext = config?.externalSignals;
+
+    // Fear & Greed Index: use as trend CONFIRMATION, not contrarian
+    // High greed in uptrend confirms bull, high fear in downtrend confirms bear
+    const fng = ext?.fearGreed?.[dateStr];
+    if (fng !== undefined) {
+      if (fng >= 70 && monthReturn > 0.05) score += 1;   // Greed + uptrend = confirmed bull
+      if (fng >= 80 && monthReturn < 0) score -= 2;      // Greed + declining = top signal
+      if (fng <= 25 && monthReturn < -0.05) score -= 1;  // Fear + downtrend = confirmed bear
+      if (fng <= 15 && monthReturn > 0) score += 2;      // Extreme fear + rising = bottom signal
+    }
+
+    // Kimchi Premium (+/- 3, strong contrarian signal)
+    const kp = ext?.kimchiPremium?.[dateStr];
+    if (kp !== undefined) {
+      if (kp > 0.08) score -= 3;       // >8% premium → extreme overheating
+      else if (kp > 0.04) score -= 1;  // >4% premium → mild overheating
+      else if (kp < -0.02) score += 2; // Negative premium → pessimism → bounce
+    }
+
     // ── ASYMMETRIC THRESHOLDS ──
-    // Bull→Bear: fast (score <= -2, protect capital)
-    // Bear→Bull: medium (score >= +4)
-    // Range is default for uncertain signals
     adaptiveScore = score;
     if (score >= 4) return "trend_up";
     if (score <= -2) return "trend_down";
