@@ -53,38 +53,38 @@ export function runRegimePortfolioBacktest(config: RegimePortfolioConfig) {
       reEntryCooldownBars: 3,
       exitFloor: 0.56,
       switchGap: 0.12,
-      minAboveTrendRatio: 0.50,  // lowered — our regime gate handles macro filtering
-      minLiquidityScore: 0.04,
-      minCompositeTrend: -0.10   // lowered — regime gate already filters
+      minAboveTrendRatio: 0.40,  // very low — crypto regime gate handles macro
+      minLiquidityScore: 0.03,
+      minCompositeTrend: -0.20   // very low — regime gate already filters
     }),
     allowedRegimes: ["trend_up"],
     exitOnDisallow: true,
     benchmarkCandles: btcCandles
   });
 
-  // trend_down: BB mean reversion — proven strategy, +3.88% in previous tests
+  // trend_down+range: BB mean reversion — uses best params from auto-research hourly run
   const trendDownStrategy = withCryptoRegimeGate({
     strategy: createBollingerMeanReversionMultiStrategy({
       strategyId: "regime-bb-reversion-1h",
-      bbWindow: 24,
-      bbMultiplier: 2.1,
-      rsiPeriod: 14,
-      entryRsiThreshold: 30,
+      bbWindow: 16,
+      bbMultiplier: 2.6,
+      rsiPeriod: 23,
+      entryRsiThreshold: 25.259,
       requireRsiConfirmation: false,
       requireReclaimConfirmation: true,
-      reclaimLookbackBars: 4,
-      reclaimPercentBThreshold: 0.18,
-      reclaimMinCloseBouncePct: 0.004,
-      reclaimBandWidthFactor: 0.12,
-      deepTouchEntryPercentB: -0.05,
-      deepTouchRsiThreshold: 18,
-      exitRsi: 40,
-      stopLossPct: 0.09,
-      maxHoldBars: 24,
-      entryPercentB: -0.02,
-      minBandWidth: 0.015
+      reclaimLookbackBars: 5,
+      reclaimPercentBThreshold: 0.36,
+      reclaimMinCloseBouncePct: 0.011,
+      reclaimBandWidthFactor: 0.18,
+      deepTouchEntryPercentB: -0.068,
+      deepTouchRsiThreshold: 10.354,
+      exitRsi: 39.2,
+      stopLossPct: 0.113,
+      maxHoldBars: 36,
+      entryPercentB: -0.066,
+      minBandWidth: 0.012
     }),
-    allowedRegimes: ["trend_down", "range"],  // works in both bear and sideways
+    allowedRegimes: ["trend_down"],  // bear only — range stays cash
     exitOnDisallow: true,
     benchmarkCandles: btcCandles
   });
@@ -93,8 +93,8 @@ export function runRegimePortfolioBacktest(config: RegimePortfolioConfig) {
   const rangeStrategy = withCryptoRegimeGate({
     strategy: createRelativeMomentumPullbackMultiStrategy({
       strategyId: "regime-pullback-1h",
-      minStrengthPct: 0.75,
-      minRiskOn: 0.05,
+      minStrengthPct: 0.65,
+      minRiskOn: -0.05,   // allow entries even in mildly negative market
       pullbackZ: 0.9,
       trailAtrMult: 2.2
     }),
