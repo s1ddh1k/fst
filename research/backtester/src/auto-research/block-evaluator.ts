@@ -125,6 +125,16 @@ function buildBlockGateConfig(familyId: string, params: Record<string, number>):
     return gate;
   }
 
+  // Rotation strategies handle regime gating internally via minAboveTrendRatio
+  // and minCompositeTrend. Adding an external regime gate creates double-gating
+  // that's too restrictive, especially with adaptive regime where composite regime
+  // is more discriminating. Allow all regimes and let the strategy decide.
+  if (familyId.includes("rotation")) {
+    gate.allowedRegimes = ["trend_up", "trend_down", "range", "volatile"];
+    gate.allowUnknownRegime = true;
+    return gate;
+  }
+
   if (familyId.includes("rangedown") || familyId.includes("reversion")) {
     gate.allowedRegimes = ["range", "trend_down", "volatile"];
     gate.maxRiskOnScore = clamp(finiteOrDefault(params.gateMaxRiskOnScore, 0.2), -0.2, 0.35);
