@@ -278,6 +278,8 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   {
     familyId: "block:rotation-15m-trend-up",
     strategyName: "block:rotation-15m-trend-up",
+    sleeveId: "trend",
+    family: "trend",
     title: "15m Rotation Block (trend_up)",
     thesis: "Relative strength rotation on 15m decision, 5m execution, gated to trend-up regime.",
     timeframe: "15m",
