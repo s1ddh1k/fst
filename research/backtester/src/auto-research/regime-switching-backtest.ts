@@ -43,7 +43,7 @@ export type RegimeStrategyMap = Partial<Record<RegimeType, RegimeStrategyEntry>>
 // undefined = stay in cash
 // { strategy: ..., timeframe: "15m" } = run strategy on 15m candles
 
-export type RegimeDetectorMode = "oracle" | "lagged";
+export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum";
 
 export type RegimeSwitchingConfig = {
   strategies: RegimeStrategyMap;
@@ -52,7 +52,10 @@ export type RegimeSwitchingConfig = {
   /** Primary timeframe for regime detection and bar-by-bar stepping */
   primaryTimeframe: "1h" | "15m";
   regimeDetector: RegimeDetectorMode;
-  regimeLookback?: number; // bars for lagged detector (default: 55)
+  /** Trailing stop: switch from bull to bear when price drops this % from peak */
+  trailingStopDropPct?: number;  // default: 0.15 (15%)
+  /** Trailing stop: switch from bear to bull when price rises this % from trough */
+  trailingStopRecoverPct?: number; // default: 0.20 (20%)
   initialCapital: number;
   feePct?: number; // per-side fee (default: 0.025%)
   switchCooldownBars?: number; // min bars between regime switches (default: 168 = 1 week on 1h)
@@ -89,59 +92,98 @@ function sma(candles: Candle[], endIndex: number, period: number): number | null
   return sum / period;
 }
 
+// Stateful detector for trailing-stop mode
+type TrailingStopState = {
+  peak: number;
+  trough: number;
+  currentRegime: RegimeType;
+};
+
+let trailingState: TrailingStopState | null = null;
+
+function resetTrailingState() {
+  trailingState = null;
+}
+
 function detectRegimeAtBar(
   candles: Candle[],
   index: number,
   candlesByMarket: Record<string, Candle[]>,
-  mode: RegimeDetectorMode
+  mode: RegimeDetectorMode,
+  config?: RegimeSwitchingConfig
 ): RegimeType {
-  if (index < 200) return "range"; // need 200 bars for reliable detection
+  const close = candles[index].closePrice;
 
   if (mode === "oracle") {
-    // Oracle: use forward-looking window (theoretical upper bound)
-    const lookForward = Math.min(72, candles.length - index - 1); // 3 days ahead
+    if (index < 56) return "range";
+    const lookForward = Math.min(72, candles.length - index - 1);
     if (lookForward < 24) return "range";
-    const futureReturn = (candles[index + lookForward].closePrice - candles[index].closePrice) / candles[index].closePrice;
+    const futureReturn = (candles[index + lookForward].closePrice - close) / close;
     if (futureReturn > 0.08) return "trend_up";
     if (futureReturn < -0.08) return "trend_down";
     return "range";
   }
 
-  // Lagged: multi-timeframe confirmation for robust regime detection
-  const close = candles[index].closePrice;
+  if (mode === "trailing-stop") {
+    const dropPct = config?.trailingStopDropPct ?? 0.15;
+    const recoverPct = config?.trailingStopRecoverPct ?? 0.20;
 
-  // Long-term trend: SMA(168) = 1 week on 1h bars
+    if (!trailingState) {
+      trailingState = { peak: close, trough: close, currentRegime: "trend_up" };
+    }
+
+    // Update peak and trough
+    if (close > trailingState.peak) trailingState.peak = close;
+    if (close < trailingState.trough) trailingState.trough = close;
+
+    const dropFromPeak = (trailingState.peak - close) / trailingState.peak;
+    const riseFromTrough = (close - trailingState.trough) / trailingState.trough;
+
+    if (trailingState.currentRegime === "trend_up" && dropFromPeak >= dropPct) {
+      // Bull → Bear: price dropped enough from peak
+      trailingState.currentRegime = "trend_down";
+      trailingState.trough = close; // reset trough
+    } else if (trailingState.currentRegime === "trend_down" && riseFromTrough >= recoverPct) {
+      // Bear → Bull: price recovered enough from trough
+      trailingState.currentRegime = "trend_up";
+      trailingState.peak = close; // reset peak
+    }
+
+    return trailingState.currentRegime;
+  }
+
+  if (mode === "momentum") {
+    if (index < 168) return "range";
+
+    // 7-day ROC
+    const weekAgo = candles[index - 168]?.closePrice;
+    // 30-day ROC
+    const monthAgo = candles[index - Math.min(720, index)]?.closePrice;
+    if (!weekAgo || !monthAgo) return "range";
+
+    const weekRoc = (close - weekAgo) / weekAgo;
+    const monthRoc = (close - monthAgo) / monthAgo;
+
+    // Both positive and strong → trend_up
+    if (weekRoc > 0.03 && monthRoc > 0.10) return "trend_up";
+    // Both negative and strong → trend_down
+    if (weekRoc < -0.03 && monthRoc < -0.10) return "trend_down";
+    return "range";
+  }
+
+  // "sma" mode: original SMA-based detection
+  if (index < 200) return "range";
+
   const smaLong = sma(candles, index, 168);
-  // Medium-term trend: SMA(72) = 3 days
   const smaMid = sma(candles, index, 72);
   if (!smaLong || !smaMid) return "range";
 
-  // 7-day momentum (168 bars on 1h)
-  const weekAgoClose = candles[index - 168]?.closePrice;
-  // 30-day momentum (720 bars on 1h)
   const monthAgoClose = candles[index - Math.min(720, index)]?.closePrice;
-  if (!weekAgoClose || !monthAgoClose) return "range";
-
-  const weekReturn = (close - weekAgoClose) / weekAgoClose;
+  if (!monthAgoClose) return "range";
   const monthReturn = (close - monthAgoClose) / monthAgoClose;
 
-  // Trend up: price above both SMAs + month return strongly positive
-  const aboveBothSma = close > smaLong && close > smaMid;
-  const goldenCross = smaMid > smaLong;
-
-  if (aboveBothSma && goldenCross && monthReturn > 0.10) {
-    return "trend_up";
-  }
-
-  // Trend down: price below both SMAs + month return strongly negative
-  const belowBothSma = close < smaLong && close < smaMid;
-  const deathCross = smaMid < smaLong;
-
-  if (belowBothSma && deathCross && monthReturn < -0.10) {
-    return "trend_down";
-  }
-
-  // Range: no strong trend in either direction
+  if (close > smaLong && close > smaMid && smaMid > smaLong && monthReturn > 0.10) return "trend_up";
+  if (close < smaLong && close < smaMid && smaMid < smaLong && monthReturn < -0.10) return "trend_down";
   return "range";
 }
 
@@ -159,6 +201,7 @@ export function runRegimeSwitchingBacktest(config: RegimeSwitchingConfig): Regim
   if (!candles || candles.length < 100) {
     throw new Error("Need at least 100 candles");
   }
+  resetTrailingState();
 
   // Helper: get candles for a specific timeframe and market
   const getCandlesForTimeframe = (tf: string): Candle[] => {
@@ -210,7 +253,7 @@ export function runRegimeSwitchingBacktest(config: RegimeSwitchingConfig): Regim
     const close = candles[i].closePrice;
 
     // Detect regime
-    const detectedRegime = detectRegimeAtBar(candles, i, primaryCandles, config.regimeDetector);
+    const detectedRegime = detectRegimeAtBar(candles, i, primaryCandles, config.regimeDetector, config);
 
     // Regime switch?
     if (detectedRegime !== currentRegime && barsSinceSwitch >= cooldown) {
