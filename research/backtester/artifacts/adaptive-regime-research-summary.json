@@ -1,0 +1,87 @@
+{
+  "generatedAt": "2026-03-30T01:10:00.000Z",
+  "title": "Adaptive Regime Integration + Rotation Strategy Auto-Research",
+  "summary": "Integrated adaptive regime detection (SMA200, momentum72, no volatile override) into market-state.ts. Ran auto-research for rotation-15m-trend-up block family across the full data period (2020-10 to 2026-03).",
+
+  "phase1_changes": {
+    "description": "Added buildAdaptiveRegimeSeries to market-state.ts with opt-in useAdaptiveRegime flag",
+    "key_findings": {
+      "default_regime_distribution": {
+        "volatile": "46.4%",
+        "trend_down": "46.0%",
+        "trend_up": "7.6%",
+        "problem": "Default SMA(55) + volatilityThreshold(0.03) classifies nearly half of crypto data as volatile"
+      },
+      "adaptive_regime_distribution": {
+        "volatile": "0%",
+        "trend_down": "76.0%",
+        "trend_up": "16.4%",
+        "range": "7.6%",
+        "improvement": "Eliminates useless volatile classification, doubles trend_up detection"
+      }
+    },
+    "files_modified": [
+      "research/strategies/src/market-state.ts",
+      "research/strategies/src/types.ts",
+      "research/backtester/src/types.ts",
+      "research/backtester/src/multi-strategy/MultiStrategyBacktestEngine.ts",
+      "research/backtester/src/multi-strategy/types.ts",
+      "research/backtester/src/auto-research/regime-portfolio-runner.ts",
+      "research/backtester/src/auto-research/block-evaluator.ts",
+      "research/backtester/src/auto-research/block-families.ts"
+    ],
+    "tests_added": "research/backtester/test/adaptive-regime.test.ts (7 tests, all passing)"
+  },
+
+  "phase2_results": {
+    "family": "block:rotation-15m-trend-up",
+    "period": "full (2020-10 to 2026-03)",
+    "iterations_completed": 4,
+    "iterations_max": 8,
+    "retired_reason": "stagnation (3 consecutive no-improvement iterations)",
+    "best_candidate": {
+      "id": "block:rotation-15m-trend-up-initial-05",
+      "net_return": "0.70%",
+      "max_drawdown": "0.88%",
+      "risk_adjusted_score": 0.128,
+      "trade_count": 61.4,
+      "buy_and_hold_return": "15.76%",
+      "excess_return": "-15.05%",
+      "parameters": {
+        "rebalanceBars": 4,
+        "entryFloor": 0.72,
+        "exitFloor": 0.42,
+        "switchGap": 0.06,
+        "minAboveTrendRatio": 0.55,
+        "minLiquidityScore": 0.02,
+        "minCompositeTrend": -0.03
+      }
+    },
+    "notes": [
+      "Positive net return (0.70%) with very low drawdown (0.88%)",
+      "Strategy correctly trades only during adaptive regime trend_up periods (16.4% of time)",
+      "Underperforms buy-and-hold because it's in cash during most of the market's trend periods",
+      "The rotation strategy needs to be combined with other regime strategies (trend_down, range) in a portfolio for full market coverage",
+      "Engine seed mutations converged quickly, suggesting the parameter space has a clear optimum"
+    ]
+  },
+
+  "bugs_found_and_fixed": [
+    {
+      "issue": "DEFAULT_MARKET_STATE_CONFIG type didn't omit useAdaptiveRegime",
+      "fix": "Added useAdaptiveRegime to the Omit<> type parameter"
+    },
+    {
+      "issue": "block-evaluator ran runMultiStrategyBacktest without marketStateConfig, preventing adaptive regime from taking effect",
+      "fix": "Added marketStateConfig: { useAdaptiveRegime: true } for rotation families"
+    },
+    {
+      "issue": "Rotation strategy had double regime gating (internal + external withRegimeGate)",
+      "fix": "Made rotation families use allowAllRegimes in block gate, letting strategy's own checks handle gating"
+    },
+    {
+      "issue": "Rotation block family was missing sleeveId: 'trend' causing ConflictResolver to block all signals as 'unknown_sleeve'",
+      "fix": "Added sleeveId: 'trend' and family: 'trend' to the rotation block family definition"
+    }
+  ]
+}
