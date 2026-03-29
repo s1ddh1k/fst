@@ -43,7 +43,7 @@ export type RegimeStrategyMap = Partial<Record<RegimeType, RegimeStrategyEntry>>
 // undefined = stay in cash
 // { strategy: ..., timeframe: "15m" } = run strategy on 15m candles
 
-export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum" | "microstructure" | "momentum-micro";
+export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum" | "microstructure" | "momentum-micro" | "adaptive";
 
 export type RegimeSwitchingConfig = {
   strategies: RegimeStrategyMap;
@@ -246,6 +246,118 @@ function detectRegimeAtBar(
     // Strong signals needed for trend calls
     if (bullScore >= 3 && bearScore <= 1) return "trend_up";
     if (bearScore >= 3 && bullScore <= 1) return "trend_down";
+    return "range";
+  }
+
+  if (mode === "adaptive") {
+    if (index < 720) return "range";
+
+    const close = candles[index].closePrice;
+
+    // ── 1. PRICE STRUCTURE (lagging but reliable) ──
+    const sma50 = sma(candles, index, 50)!;
+    const sma200 = sma(candles, index, 200)!;
+    const priceAboveSma200 = close > sma200;
+    const goldenCross = sma50 > sma200;
+
+    // ── 2. VOLUME-PRICE DIVERGENCE (leading) ──
+    // Compare price slope vs OBV slope over 2 weeks
+    const lookback = 336; // 14 days
+    const halfLookback = 168;
+    let obvNow = 0, obvHalf = 0;
+    for (let j = index - lookback + 1; j <= index; j++) {
+      const dir = candles[j].closePrice > candles[j - 1]?.closePrice ? 1 : -1;
+      if (j <= index - halfLookback) obvHalf += dir * candles[j].volume;
+      obvNow += dir * candles[j].volume;
+    }
+    const obvSlope = obvNow - obvHalf; // positive = volume supporting price move
+    const priceSlope = close - (candles[index - lookback]?.closePrice ?? close);
+    // Divergence: price up but OBV down = distribution (bearish leading)
+    const bearishDivergence = priceSlope > 0 && obvSlope < 0;
+    // Divergence: price down but OBV up = accumulation (bullish leading)
+    const bullishDivergence = priceSlope < 0 && obvSlope > 0;
+
+    // ── 3. VOLATILITY REGIME (leading for transitions) ──
+    // Bollinger width compression: low = squeeze = breakout imminent
+    let sumClose = 0, sumSq = 0;
+    for (let j = index - 19; j <= index; j++) { sumClose += candles[j].closePrice; }
+    const mean20 = sumClose / 20;
+    for (let j = index - 19; j <= index; j++) { sumSq += (candles[j].closePrice - mean20) ** 2; }
+    const bbWidth = (2 * Math.sqrt(sumSq / 19)) / mean20; // normalized BB width
+
+    // ATR acceleration: current 7d ATR vs 30d ATR
+    let atr7d = 0, atr30d = 0;
+    for (let j = index - 167; j <= index; j++) {
+      const tr = Math.max(
+        candles[j].highPrice - candles[j].lowPrice,
+        Math.abs(candles[j].highPrice - (candles[j-1]?.closePrice ?? candles[j].openPrice)),
+        Math.abs(candles[j].lowPrice - (candles[j-1]?.closePrice ?? candles[j].openPrice))
+      );
+      if (j > index - 168) atr7d += tr;
+      atr30d += tr;
+    }
+    atr7d /= 168; atr30d /= 168;
+    // Use more recent 24h for 7d approximation
+    let atr24h = 0;
+    for (let j = index - 23; j <= index; j++) {
+      atr24h += Math.max(candles[j].highPrice - candles[j].lowPrice, 0);
+    }
+    atr24h /= 24;
+    const volAccel = atr30d > 0 ? atr24h / atr30d : 1;
+
+    // ── 4. CANDLE STRUCTURE (micro-leading) ──
+    // Upper wick ratio = distribution, lower wick ratio = accumulation
+    let upperWickSum = 0, lowerWickSum = 0, bodySum = 0;
+    for (let j = index - 47; j <= index; j++) {
+      const body = Math.abs(candles[j].closePrice - candles[j].openPrice);
+      const upper = candles[j].highPrice - Math.max(candles[j].openPrice, candles[j].closePrice);
+      const lower = Math.min(candles[j].openPrice, candles[j].closePrice) - candles[j].lowPrice;
+      upperWickSum += upper;
+      lowerWickSum += lower;
+      bodySum += body;
+    }
+    const upperWickRatio = bodySum > 0 ? upperWickSum / bodySum : 1;
+    const lowerWickRatio = bodySum > 0 ? lowerWickSum / bodySum : 1;
+
+    // ── 5. MOMENTUM (confirmation) ──
+    const weekAgo = candles[index - 168]?.closePrice ?? close;
+    const monthAgo = candles[index - 720]?.closePrice ?? close;
+    const weekReturn = (close - weekAgo) / weekAgo;
+    const monthReturn = (close - monthAgo) / monthAgo;
+
+    // ── SCORING ──
+    let score = 0;
+
+    // Price structure (+/- 2)
+    if (priceAboveSma200 && goldenCross) score += 2;
+    else if (!priceAboveSma200 && !goldenCross) score -= 2;
+
+    // Volume divergence (+/- 3, leading signal gets higher weight)
+    if (bullishDivergence) score += 3;
+    if (bearishDivergence) score -= 3;
+
+    // Momentum (+/- 2)
+    if (weekReturn > 0.03 && monthReturn > 0.05) score += 2;
+    else if (weekReturn < -0.03 && monthReturn < -0.05) score -= 2;
+
+    // Candle structure (+/- 1)
+    if (lowerWickRatio > upperWickRatio * 1.5) score += 1; // accumulation
+    if (upperWickRatio > lowerWickRatio * 1.5) score -= 1; // distribution
+
+    // Volatility warning: extreme vol acceleration = transition happening
+    if (volAccel > 2.0) {
+      // High vol + negative momentum = crash
+      if (weekReturn < -0.02) score -= 2;
+      // High vol + positive momentum = breakout
+      if (weekReturn > 0.02) score += 1;
+    }
+
+    // ── ASYMMETRIC THRESHOLDS ──
+    // Bull→Bear: fast (score <= -2, protect capital)
+    // Bear→Bull: medium (score >= +4)
+    // Range is default for uncertain signals
+    if (score >= 4) return "trend_up";
+    if (score <= -2) return "trend_down";
     return "range";
   }
 
