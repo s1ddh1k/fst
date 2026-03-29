@@ -43,7 +43,7 @@ export type RegimeStrategyMap = Partial<Record<RegimeType, RegimeStrategyEntry>>
 // undefined = stay in cash
 // { strategy: ..., timeframe: "15m" } = run strategy on 15m candles
 
-export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum" | "microstructure" | "momentum-micro" | "adaptive";
+export type RegimeDetectorMode = "oracle" | "sma" | "trailing-stop" | "momentum" | "microstructure" | "momentum-micro" | "adaptive" | "adaptive-v2";
 
 export type RegimeSwitchingConfig = {
   strategies: RegimeStrategyMap;
@@ -104,6 +104,7 @@ type TrailingStopState = {
 };
 
 let trailingState: TrailingStopState | null = null;
+let adaptiveScore = 0; // exposed for confidence weighting in main loop
 
 function resetTrailingState() {
   trailingState = null;
@@ -249,6 +250,117 @@ function detectRegimeAtBar(
     return "range";
   }
 
+  if (mode === "adaptive-v2" as string) { // disabled — breadth signals hurt performance
+    if (index < 720) return "range";
+
+    const close = candles[index].closePrice;
+
+    // ── 1. MULTI-MARKET BREADTH (strongest leading signal) ──
+    // Count how many markets are above/below their own SMA(168)
+    const allMarkets = Object.entries(candlesByMarket);
+    let marketsAboveSma = 0;
+    let marketsTotal = 0;
+    let marketMomentumSum = 0;
+    for (const [, mktCandles] of allMarkets) {
+      if (mktCandles.length < 200) continue;
+      // Find the candle at or before current time
+      const currentTime = candles[index].candleTimeUtc.getTime();
+      let mktIdx = -1;
+      for (let j = Math.min(index, mktCandles.length - 1); j >= 0; j--) {
+        if (mktCandles[j].candleTimeUtc.getTime() <= currentTime) { mktIdx = j; break; }
+      }
+      if (mktIdx < 168) continue;
+
+      const mktClose = mktCandles[mktIdx].closePrice;
+      const mktSma168 = sma(mktCandles, mktIdx, 168);
+      if (!mktSma168) continue;
+
+      marketsTotal++;
+      if (mktClose > mktSma168) marketsAboveSma++;
+
+      const mktWeekAgo = mktCandles[mktIdx - 168]?.closePrice;
+      if (mktWeekAgo) marketMomentumSum += (mktClose - mktWeekAgo) / mktWeekAgo;
+    }
+    const breadthRatio = marketsTotal > 0 ? marketsAboveSma / marketsTotal : 0.5;
+    const avgMarketMomentum = marketsTotal > 0 ? marketMomentumSum / marketsTotal : 0;
+
+    // ── 2. BTC-specific signals (same as adaptive v1) ──
+    const sma50 = sma(candles, index, 50)!;
+    const sma200 = sma(candles, index, 200)!;
+    const priceAboveSma200 = close > sma200;
+    const goldenCross = sma50 > sma200;
+
+    // Volume-price divergence
+    const lookback = 336;
+    const halfLookback = 168;
+    let obvNow = 0, obvHalf = 0;
+    for (let j = index - lookback + 1; j <= index; j++) {
+      const dir = candles[j].closePrice > candles[j - 1]?.closePrice ? 1 : -1;
+      if (j <= index - halfLookback) obvHalf += dir * candles[j].volume;
+      obvNow += dir * candles[j].volume;
+    }
+    const obvSlope = obvNow - obvHalf;
+    const priceSlope = close - (candles[index - lookback]?.closePrice ?? close);
+    const bearishDivergence = priceSlope > 0 && obvSlope < 0;
+    const bullishDivergence = priceSlope < 0 && obvSlope > 0;
+
+    // Volatility
+    let atr24h = 0, atr7d = 0;
+    for (let j = index - 23; j <= index; j++) atr24h += candles[j].highPrice - candles[j].lowPrice;
+    for (let j = index - 167; j <= index; j++) atr7d += candles[j].highPrice - candles[j].lowPrice;
+    atr24h /= 24; atr7d /= 168;
+    const volAccel = atr7d > 0 ? atr24h / atr7d : 1;
+
+    // Momentum
+    const weekAgo = candles[index - 168]?.closePrice ?? close;
+    const monthAgo = candles[index - 720]?.closePrice ?? close;
+    const weekReturn = (close - weekAgo) / weekAgo;
+    const monthReturn = (close - monthAgo) / monthAgo;
+
+    // Candle structure
+    let upperWickSum = 0, lowerWickSum = 0, bodySum = 0;
+    for (let j = index - 47; j <= index; j++) {
+      const body = Math.abs(candles[j].closePrice - candles[j].openPrice);
+      upperWickSum += candles[j].highPrice - Math.max(candles[j].openPrice, candles[j].closePrice);
+      lowerWickSum += Math.min(candles[j].openPrice, candles[j].closePrice) - candles[j].lowPrice;
+      bodySum += body;
+    }
+    const upperWickRatio = bodySum > 0 ? upperWickSum / bodySum : 1;
+    const lowerWickRatio = bodySum > 0 ? lowerWickSum / bodySum : 1;
+
+    // ── SCORING (v2: breadth signal added with high weight) ──
+    let score = 0;
+
+    // Market breadth (+/- 2, pure confirmation — most markets agree)
+    if (breadthRatio > 0.60 && avgMarketMomentum > 0.01) score += 2;
+    else if (breadthRatio < 0.40 && avgMarketMomentum < -0.01) score -= 2;
+
+    // Volume divergence (+/- 3)
+    if (bullishDivergence) score += 3;
+    if (bearishDivergence) score -= 3;
+
+    // Price structure (+/- 2)
+    if (priceAboveSma200 && goldenCross) score += 2;
+    else if (!priceAboveSma200 && !goldenCross) score -= 2;
+
+    // Momentum (+/- 2)
+    if (weekReturn > 0.03 && monthReturn > 0.05) score += 2;
+    else if (weekReturn < -0.03 && monthReturn < -0.05) score -= 2;
+
+    // Candle structure (+/- 1)
+    if (lowerWickRatio > upperWickRatio * 1.5) score += 1;
+    if (upperWickRatio > lowerWickRatio * 1.5) score -= 1;
+
+    // Vol spike warning (+/- 2)
+    if (volAccel > 2.0 && weekReturn < -0.02) score -= 2;
+    if (volAccel > 2.0 && weekReturn > 0.02) score += 1;
+
+    // Asymmetric: fast exit, slow entry
+    if (score >= 5) return "trend_up";
+    if (score <= -2) return "trend_down";
+    return "range";
+  }
+
   if (mode === "adaptive") {
     if (index < 720) return "range";
 
@@ -356,6 +468,7 @@ function detectRegimeAtBar(
     // Bull→Bear: fast (score <= -2, protect capital)
     // Bear→Bull: medium (score >= +4)
     // Range is default for uncertain signals
+    adaptiveScore = score;
     if (score >= 4) return "trend_up";
     if (score <= -2) return "trend_down";
     return "range";
@@ -469,10 +582,11 @@ export function runRegimeSwitchingBacktest(config: RegimeSwitchingConfig): Regim
     totalTrades++;
   };
 
-  // Helper: open position
-  const openPosition = (price: number) => {
+  // Helper: open position with confidence-weighted allocation
+  const openPosition = (price: number, allocationPct?: number) => {
     if (hasPosition) return;
-    const investable = cash * 0.95; // keep 5% buffer
+    const pct = allocationPct ?? 0.95;
+    const investable = cash * pct;
     const fee = investable * feePct;
     const qty = (investable - fee) / price;
     positionQty = qty;
