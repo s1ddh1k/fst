@@ -358,6 +358,10 @@ export async function evaluateBlockCandidate(params: {
     "1m": candles1m as CandleMap
   };
 
+  // Use adaptive regime for rotation strategies — crypto-optimized regime detection
+  // that doesn't suppress valid signals with the volatile override
+  const useAdaptiveRegime = candidate.familyId.includes("rotation");
+
   const runBacktest = (range: { start: Date; end: Date }) =>
     runMultiStrategyBacktest({
       universeName: config.universeName,
@@ -370,6 +374,7 @@ export async function evaluateBlockCandidate(params: {
       executionCandles: Object.fromEntries(
         Object.entries(executionCandles).map(([tf, cm]) => [tf, filterCandlesByRange(cm ?? {}, range)])
       ),
+      ...(useAdaptiveRegime ? { marketStateConfig: { useAdaptiveRegime: true } } : {}),
       universeConfig: {
         topN: Math.min(config.marketLimit, marketCodes.length),
         lookbackBars: 28,
