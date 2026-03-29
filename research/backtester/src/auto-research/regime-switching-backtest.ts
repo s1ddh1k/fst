@@ -59,6 +59,10 @@ export type RegimeSwitchingConfig = {
   initialCapital: number;
   feePct?: number; // per-side fee (default: 0.025%)
   switchCooldownBars?: number; // min bars between regime switches (default: 168 = 1 week on 1h)
+  /** Separate cooldown for bull→bear transition (faster protection, default: same as switchCooldownBars) */
+  bearExitCooldownBars?: number;
+  /** Intra-regime trailing stop: exit trend_up if price drops this % from regime-period peak */
+  intraRegimeStopPct?: number;
   /** Portfolio trailing stop: force to cash if equity drops this % from peak (default: disabled) */
   portfolioStopPct?: number;
   /** Bars to wait before re-entering after portfolio stop (default: 72) */
@@ -564,6 +568,7 @@ export function runRegimeSwitchingBacktest(config: RegimeSwitchingConfig): Regim
   let totalTrades = 0;
   let peakEquity = config.initialCapital;
   let portfolioStopUntilBar = 0;
+  let regimePeakPrice = 0;
   let regimeSwitches = 0;
   let feesPaid = 0;
   const equityCurve: number[] = [config.initialCapital];
@@ -604,8 +609,26 @@ export function runRegimeSwitchingBacktest(config: RegimeSwitchingConfig): Regim
     // Detect regime
     const detectedRegime = detectRegimeAtBar(candles, i, primaryCandles, config.regimeDetector, config);
 
+    // Intra-regime trailing stop: if in B&H and price drops from regime-period peak
+    if (config.intraRegimeStopPct && hasPosition && currentRegime === "trend_up") {
+      if (close > regimePeakPrice) regimePeakPrice = close;
+      const dropFromPeak = (regimePeakPrice - close) / regimePeakPrice;
+      if (dropFromPeak >= config.intraRegimeStopPct) {
+        closePosition(close);
+        currentRegime = "range";
+        barsSinceSwitch = 0;
+        regimeSwitches++;
+        regimePeakPrice = 0;
+      }
+    }
+
+    // Asymmetric cooldown: faster exit from bull, slower entry to bull
+    const effectiveCooldown = (detectedRegime === "trend_down" || detectedRegime === "range") && currentRegime === "trend_up"
+      ? (config.bearExitCooldownBars ?? cooldown) // fast exit
+      : cooldown; // normal for other transitions
+
     // Regime switch?
-    if (detectedRegime !== currentRegime && barsSinceSwitch >= cooldown) {
+    if (detectedRegime !== currentRegime && barsSinceSwitch >= effectiveCooldown) {
       // Record period
       if (i > periodStart) {
         const startPrice = candles[periodStart].closePrice;
@@ -631,6 +654,7 @@ export function runRegimeSwitchingBacktest(config: RegimeSwitchingConfig): Regim
       barsSinceSwitch = 0;
       regimeSwitches++;
       periodStart = i;
+      regimePeakPrice = close; // reset for intra-regime trailing stop
 
       // Resolve: null entry or { strategy: null } = B&H
       const isBuyAndHold = currentStrategyEntry === null ||
