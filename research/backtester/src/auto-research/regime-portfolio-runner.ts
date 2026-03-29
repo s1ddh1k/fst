@@ -20,11 +20,10 @@ import {
 } from "../multi-strategy/index.js";
 import { withCryptoRegimeGate, resetCryptoRegimeCache } from "./crypto-regime-gate.js";
 import {
-  createDonchianBreakoutStrategy,
-  createVolumeExhaustionBounce15mStrategy,
-  createSimpleRsiReversionStrategy,
-  createVolumeExhaustionBounceStrategy
-} from "../../../strategies/src/simple-strategies.js";
+  createRelativeStrengthRotationStrategy,
+  createBollingerMeanReversionMultiStrategy,
+  createRelativeMomentumPullbackMultiStrategy,
+} from "../multi-strategy/index.js";
 
 type CandleMap = Record<string, Candle[]>;
 
@@ -42,65 +41,62 @@ export function runRegimePortfolioBacktest(config: RegimePortfolioConfig) {
   // Use BTC as regime benchmark for all markets
   const btcCandles = candlesByTimeframeAndMarket["1h"]?.["KRW-BTC"] ?? [];
 
-  // Uses crypto-regime-gate.ts for regime detection — bypasses market-state.ts's
-  // broken volatile classification. Same adaptive scoring as regime-switching-backtest.ts.
+  // Multi-market strategies designed for universe-wide trading,
+  // gated by our crypto regime detection (BTC benchmark).
 
+  // trend_up: relative strength rotation — buys the strongest coins, rotates
   const trendUpStrategy = withCryptoRegimeGate({
-    strategy: adaptScoredStrategy({
-      strategyId: "regime-donchian-1h",
-      sleeveId: "trend",
-      family: "breakout",
-      decisionTimeframe: "1h",
-      executionTimeframe: "1h",
-      scoredStrategy: createDonchianBreakoutStrategy({
-        entryLookback: 20,
-        exitLookback: 10,
-        stopAtrMult: 2.0,
-        maxHoldBars: 96,
-        minChannelWidth: 0.02
-      })
+    strategy: createRelativeStrengthRotationStrategy({
+      strategyId: "regime-rotation-1h",
+      rebalanceBars: 5,
+      entryFloor: 0.80,
+      reEntryCooldownBars: 3,
+      exitFloor: 0.56,
+      switchGap: 0.12,
+      minAboveTrendRatio: 0.50,  // lowered — our regime gate handles macro filtering
+      minLiquidityScore: 0.04,
+      minCompositeTrend: -0.10   // lowered — regime gate already filters
     }),
     allowedRegimes: ["trend_up"],
     exitOnDisallow: true,
     benchmarkCandles: btcCandles
   });
 
+  // trend_down: BB mean reversion — proven strategy, +3.88% in previous tests
   const trendDownStrategy = withCryptoRegimeGate({
-    strategy: adaptScoredStrategy({
-      strategyId: "regime-vex-1h",
-      sleeveId: "micro",
-      family: "meanreversion",
-      decisionTimeframe: "1h",
-      executionTimeframe: "1h",
-      scoredStrategy: createVolumeExhaustionBounceStrategy({
-        dropLookback: 5,
-        dropThresholdPct: 0.06,
-        volumeWindow: 20,
-        volumeSpikeMult: 2.5,
-        rsiPeriod: 14,
-        rsiEntry: 20,
-        profitTargetPct: 0.025
-      })
+    strategy: createBollingerMeanReversionMultiStrategy({
+      strategyId: "regime-bb-reversion-1h",
+      bbWindow: 24,
+      bbMultiplier: 2.1,
+      rsiPeriod: 14,
+      entryRsiThreshold: 30,
+      requireRsiConfirmation: false,
+      requireReclaimConfirmation: true,
+      reclaimLookbackBars: 4,
+      reclaimPercentBThreshold: 0.18,
+      reclaimMinCloseBouncePct: 0.004,
+      reclaimBandWidthFactor: 0.12,
+      deepTouchEntryPercentB: -0.05,
+      deepTouchRsiThreshold: 18,
+      exitRsi: 40,
+      stopLossPct: 0.09,
+      maxHoldBars: 24,
+      entryPercentB: -0.02,
+      minBandWidth: 0.015
     }),
-    allowedRegimes: ["trend_down"],
+    allowedRegimes: ["trend_down", "range"],  // works in both bear and sideways
     exitOnDisallow: true,
     benchmarkCandles: btcCandles
   });
 
+  // range: momentum pullback — buys dips in strong coins during sideways
   const rangeStrategy = withCryptoRegimeGate({
-    strategy: adaptScoredStrategy({
-      strategyId: "regime-rsi-1h",
-      sleeveId: "micro",
-      family: "meanreversion",
-      decisionTimeframe: "1h",
-      executionTimeframe: "1h",
-      scoredStrategy: createSimpleRsiReversionStrategy({
-        rsiPeriod: 14,
-        oversold: 30,
-        overbought: 70,
-        stopLossPct: 0.05,
-        maxHoldBars: 48
-      })
+    strategy: createRelativeMomentumPullbackMultiStrategy({
+      strategyId: "regime-pullback-1h",
+      minStrengthPct: 0.75,
+      minRiskOn: 0.05,
+      pullbackZ: 0.9,
+      trailAtrMult: 2.2
     }),
     allowedRegimes: ["range"],
     exitOnDisallow: true,
