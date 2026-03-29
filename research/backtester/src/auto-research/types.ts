@@ -95,6 +95,20 @@ export type StrategyFamilyDefinition = {
   parameterSpecs: ResearchParameterSpec[];
   guardrails: string[];
   composition?: ResolvedStrategyFamilyComposition;
+  /**
+   * Sleeve assignment for portfolio allocation.
+   * When set, the evaluator uses this directly instead of heuristic substring matching.
+   */
+  sleeveId?: "trend" | "breakout" | "micro";
+  /** Strategy family type for portfolio allocation */
+  family?: "trend" | "breakout" | "meanreversion";
+  /** Scored strategy constructor — takes clamped params, returns ScoredStrategy */
+  create?: (params: Record<string, number>) => import("../../../strategies/src/types.js").ScoredStrategy;
+  /**
+   * Full strategy factory — called by the evaluator.
+   * Auto-generated from `create` + `sleeveId` + `timeframe` when not explicitly set.
+   */
+  createStrategy?: (candidateId: string, params: Record<string, number>) => Promise<import("../../../../packages/shared/src/index.js").Strategy>;
 };
 
 export type CandidateProposal = {

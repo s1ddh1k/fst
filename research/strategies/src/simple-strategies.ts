@@ -13,6 +13,7 @@ import { getDonchianChannel } from "./factors/trend.js";
 import { getMomentum } from "./factors/momentum.js";
 import { getBollingerBands } from "./factors/oscillators.js";
 import { getVolumeSpikeRatio } from "./factors/volume.js";
+import { getObvSlope } from "./factors/volume-trend.js";
 import type { MarketStateConfig, ScoredStrategy, StrategyContext, SignalResult, MarketStateContext } from "./types.js";
 import { buy, hold, sell } from "./scored-signal.js";
 
@@ -1138,6 +1139,667 @@ export function createMomentumBurst5mStrategy(params?: {
       // Entry: strong momentum burst + volume confirmation
       if (momPct >= momentumThresholdPct && volSpike >= volumeSpikeMult) {
         return buy(0.85, "5m_momentum_burst");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 16. OBV Accumulation Bounce — 7 params
+//    Bear-market strategy. Detects accumulation: price drops but OBV slope
+//    is positive (smart money buying). Combined with RSI oversold for timing.
+//    OBV divergence is one of the most reliable bear market signals.
+// ---------------------------------------------------------------------------
+
+export function createObvAccumulationBounceStrategy(params?: {
+  obvLookback?: number;
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  dropLookback?: number;
+  minDropPct?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+}): ScoredStrategy {
+  const obvLookback = params?.obvLookback ?? 10;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 35;
+  const dropLookback = params?.dropLookback ?? 10;
+  const minDropPct = params?.minDropPct ?? 0.03;
+  const profitTargetPct = params?.profitTargetPct ?? 0.025;
+  const stopLossPct = params?.stopLossPct ?? 0.03;
+
+  const parameters: Record<string, number> = {
+    obvLookback, rsiPeriod, rsiEntry, dropLookback, minDropPct, profitTargetPct, stopLossPct
+  };
+
+  return {
+    name: "obv-accumulation-bounce",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      if (index < Math.max(obvLookback, dropLookback) + 1) return hold("insufficient_data");
+
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const obvSlope = getObvSlope(candles, index, obvLookback);
+      const pastClose = candles[index - dropLookback]?.closePrice;
+
+      if (close === undefined || rsi === null || obvSlope === null || pastClose === undefined || pastClose === 0) {
+        return hold("insufficient_data");
+      }
+
+      const priceDrop = (pastClose - close) / pastClose;
+
+      // Exit
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) {
+          return sell(0.9, "profit_target");
+        }
+
+        if (pnl < -stopLossPct) {
+          return sell(0.9, "stop_loss");
+        }
+
+        if (currentPosition.barsHeld >= 24) {
+          return sell(0.6, "max_hold");
+        }
+
+        if (rsi > 55 && pnl > 0) {
+          return sell(0.7, "rsi_recovered");
+        }
+
+        return hold("hold_position");
+      }
+
+      // Entry: price dropping + OBV rising (accumulation) + RSI oversold
+      if (priceDrop >= minDropPct && obvSlope > 0 && rsi <= rsiEntry) {
+        return buy(0.85, "obv_accumulation_divergence");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 17. Consecutive Red Bounce — 6 params
+//    Bear-market strategy. Counts consecutive red (close < open) candles.
+//    After N+ red candles in a row, buy the expected bounce.
+//    Simple, observable pattern — works because extended selling exhausts
+//    supply and triggers mean reversion.
+// ---------------------------------------------------------------------------
+
+export function createConsecutiveRedBounceStrategy(params?: {
+  minRedCandles?: number;
+  rsiPeriod?: number;
+  rsiMaxEntry?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+  maxHoldBars?: number;
+}): ScoredStrategy {
+  const minRedCandles = params?.minRedCandles ?? 5;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiMaxEntry = params?.rsiMaxEntry ?? 40;
+  const profitTargetPct = params?.profitTargetPct ?? 0.02;
+  const stopLossPct = params?.stopLossPct ?? 0.025;
+  const maxHoldBars = params?.maxHoldBars ?? 12;
+
+  const parameters: Record<string, number> = {
+    minRedCandles, rsiPeriod, rsiMaxEntry, profitTargetPct, stopLossPct, maxHoldBars
+  };
+
+  return {
+    name: "consecutive-red-bounce",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      if (index < minRedCandles) return hold("insufficient_data");
+
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+
+      if (close === undefined || rsi === null) {
+        return hold("insufficient_data");
+      }
+
+      // Exit
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) {
+          return sell(0.9, "profit_target");
+        }
+
+        if (pnl < -stopLossPct) {
+          return sell(0.9, "stop_loss");
+        }
+
+        if (currentPosition.barsHeld >= maxHoldBars) {
+          return sell(0.6, "max_hold");
+        }
+
+        // RSI recovered
+        if (rsi > 50 && pnl > 0) {
+          return sell(0.7, "rsi_recovered");
+        }
+
+        return hold("hold_position");
+      }
+
+      // Count consecutive red candles ending at current bar
+      let redCount = 0;
+      for (let i = index; i >= 0; i--) {
+        const c = candles[i];
+        if (c && c.closePrice < c.openPrice) {
+          redCount++;
+        } else {
+          break;
+        }
+      }
+
+      // Entry: N+ consecutive red candles + RSI in oversold zone
+      if (redCount >= minRedCandles && rsi <= rsiMaxEntry) {
+        const conviction = redCount >= minRedCandles + 2 ? 0.9 : 0.8;
+        return buy(conviction, `${redCount}_consecutive_red_bounce`);
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 18. OBV Accumulation Bounce 5m — 7 params
+//    5m version: catch micro-accumulation. Same logic but tighter targets,
+//    shorter holds. 12x more opportunities than 1h.
+// ---------------------------------------------------------------------------
+
+export function createObvAccumulationBounce5mStrategy(params?: {
+  obvLookback?: number;
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  dropLookback?: number;
+  minDropPct?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+}): ScoredStrategy {
+  const obvLookback = params?.obvLookback ?? 12;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 30;
+  const dropLookback = params?.dropLookback ?? 12;
+  const minDropPct = params?.minDropPct ?? 0.015;
+  const profitTargetPct = params?.profitTargetPct ?? 0.008;
+  const stopLossPct = params?.stopLossPct ?? 0.012;
+
+  const parameters: Record<string, number> = {
+    obvLookback, rsiPeriod, rsiEntry, dropLookback, minDropPct, profitTargetPct, stopLossPct
+  };
+
+  return {
+    name: "obv-accumulation-5m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      if (index < Math.max(obvLookback, dropLookback) + 1) return hold("insufficient_data");
+
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const obvSlope = getObvSlope(candles, index, obvLookback);
+      const pastClose = candles[index - dropLookback]?.closePrice;
+
+      if (close === undefined || rsi === null || obvSlope === null || pastClose === undefined || pastClose === 0) {
+        return hold("insufficient_data");
+      }
+
+      const priceDrop = (pastClose - close) / pastClose;
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) {
+          return sell(0.9, "profit_target");
+        }
+
+        if (pnl < -stopLossPct) {
+          return sell(0.9, "stop_loss");
+        }
+
+        // 5m: max 36 bars = 3 hours
+        if (currentPosition.barsHeld >= 36) {
+          return sell(0.6, "time_exit");
+        }
+
+        if (rsi > 50 && pnl > 0) {
+          return sell(0.7, "rsi_recovered");
+        }
+
+        return hold("hold_position");
+      }
+
+      if (priceDrop >= minDropPct && obvSlope > 0 && rsi <= rsiEntry) {
+        return buy(0.85, "5m_obv_accumulation");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 19. Consecutive Red Bounce 5m — 6 params
+//    5m version: after N+ red 5m candles, buy micro-bounce.
+//    Tighter targets, faster exits.
+// ---------------------------------------------------------------------------
+
+export function createConsecutiveRedBounce5mStrategy(params?: {
+  minRedCandles?: number;
+  rsiPeriod?: number;
+  rsiMaxEntry?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+  maxHoldBars?: number;
+}): ScoredStrategy {
+  const minRedCandles = params?.minRedCandles ?? 6;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiMaxEntry = params?.rsiMaxEntry ?? 35;
+  const profitTargetPct = params?.profitTargetPct ?? 0.006;
+  const stopLossPct = params?.stopLossPct ?? 0.01;
+  const maxHoldBars = params?.maxHoldBars ?? 24;
+
+  const parameters: Record<string, number> = {
+    minRedCandles, rsiPeriod, rsiMaxEntry, profitTargetPct, stopLossPct, maxHoldBars
+  };
+
+  return {
+    name: "consecutive-red-5m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      if (index < minRedCandles) return hold("insufficient_data");
+
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+
+      if (close === undefined || rsi === null) {
+        return hold("insufficient_data");
+      }
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) {
+          return sell(0.9, "profit_target");
+        }
+
+        if (pnl < -stopLossPct) {
+          return sell(0.9, "stop_loss");
+        }
+
+        if (currentPosition.barsHeld >= maxHoldBars) {
+          return sell(0.6, "max_hold");
+        }
+
+        if (rsi > 50 && pnl > 0) {
+          return sell(0.7, "rsi_recovered");
+        }
+
+        return hold("hold_position");
+      }
+
+      let redCount = 0;
+      for (let i = index; i >= 0; i--) {
+        const c = candles[i];
+        if (c && c.closePrice < c.openPrice) {
+          redCount++;
+        } else {
+          break;
+        }
+      }
+
+      if (redCount >= minRedCandles && rsi <= rsiMaxEntry) {
+        const conviction = redCount >= minRedCandles + 3 ? 0.9 : 0.8;
+        return buy(conviction, `5m_${redCount}_red_bounce`);
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ===========================================================================
+// 15m BEAR-MARKET STRATEGIES
+// 15m = sweet spot between 5m noise and 1h infrequency.
+// 4x more signals than 1h, 1/3 the fee drag of 5m.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 20. Volume Exhaustion Bounce 15m — 7 params
+//    15m capitulation detection. Tuned between 5m and 1h defaults.
+// ---------------------------------------------------------------------------
+
+export function createVolumeExhaustionBounce15mStrategy(params?: {
+  dropLookback?: number;
+  dropThresholdPct?: number;
+  volumeWindow?: number;
+  volumeSpikeMult?: number;
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  profitTargetPct?: number;
+}): ScoredStrategy {
+  const dropLookback = params?.dropLookback ?? 5;
+  const dropThresholdPct = params?.dropThresholdPct ?? 0.04;
+  const volumeWindow = params?.volumeWindow ?? 20;
+  const volumeSpikeMult = params?.volumeSpikeMult ?? 2.0;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 22;
+  const profitTargetPct = params?.profitTargetPct ?? 0.015;
+
+  const parameters: Record<string, number> = {
+    dropLookback, dropThresholdPct, volumeWindow, volumeSpikeMult, rsiPeriod, rsiEntry, profitTargetPct
+  };
+
+  return {
+    name: "volume-exhaustion-15m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      if (index < dropLookback) return hold("insufficient_data");
+
+      const close = candles[index]?.closePrice;
+      const pastClose = candles[index - dropLookback]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const volSpike = getVolumeSpikeRatio(candles, index, volumeWindow);
+
+      if (close === undefined || pastClose === undefined || rsi === null || volSpike === null || pastClose === 0) {
+        return hold("insufficient_data");
+      }
+
+      const dropPct = (pastClose - close) / pastClose;
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) return sell(0.9, "profit_target");
+        if (pnl < -(profitTargetPct * 1.5)) return sell(0.9, "stop_loss");
+        // 15m: max 48 bars = 12 hours
+        if (currentPosition.barsHeld >= 48) return sell(0.6, "time_exit");
+        if (rsi > 50 && pnl > 0) return sell(0.7, "rsi_recovered");
+
+        return hold("hold_position");
+      }
+
+      if (dropPct >= dropThresholdPct && volSpike >= volumeSpikeMult && rsi <= rsiEntry) {
+        return buy(0.85, "15m_volume_exhaustion");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 21. Oversold Bounce Scalp 15m — 6 params
+//    15m extreme oversold bounce. Between 5m scalp and 1h swing.
+// ---------------------------------------------------------------------------
+
+export function createOversoldBounceScalp15mStrategy(params?: {
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  bbWindow?: number;
+  bbMultiplier?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+}): ScoredStrategy {
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 18;
+  const bbWindow = params?.bbWindow ?? 20;
+  const bbMultiplier = params?.bbMultiplier ?? 2.2;
+  const profitTargetPct = params?.profitTargetPct ?? 0.012;
+  const stopLossPct = params?.stopLossPct ?? 0.018;
+
+  const parameters: Record<string, number> = {
+    rsiPeriod, rsiEntry, bbWindow, bbMultiplier, profitTargetPct, stopLossPct
+  };
+
+  return {
+    name: "oversold-bounce-15m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const bb = getBollingerBands(candles, index, bbWindow, bbMultiplier);
+
+      if (close === undefined || rsi === null || bb === null) {
+        return hold("insufficient_data");
+      }
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) return sell(0.9, "profit_target");
+        if (pnl < -stopLossPct) return sell(0.9, "stop_loss");
+        // 15m: max 32 bars = 8 hours
+        if (currentPosition.barsHeld >= 32) return sell(0.7, "time_exit");
+
+        return hold("hold_position");
+      }
+
+      if (rsi <= rsiEntry && close < bb.lower) {
+        return buy(0.8, "15m_oversold_bounce");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 22. Crash Dip Buy 15m — 5 params
+//    15m sharp-drop detection. More responsive than 1h, less noisy than 5m.
+// ---------------------------------------------------------------------------
+
+export function createCrashDipBuy15mStrategy(params?: {
+  atrPeriod?: number;
+  dropAtrMult?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+  maxHoldBars?: number;
+}): ScoredStrategy {
+  const atrPeriod = params?.atrPeriod ?? 14;
+  const dropAtrMult = params?.dropAtrMult ?? 2.5;
+  const profitTargetPct = params?.profitTargetPct ?? 0.01;
+  const stopLossPct = params?.stopLossPct ?? 0.015;
+  const maxHoldBars = params?.maxHoldBars ?? 16;
+
+  const parameters: Record<string, number> = {
+    atrPeriod, dropAtrMult, profitTargetPct, stopLossPct, maxHoldBars
+  };
+
+  return {
+    name: "crash-dip-15m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      const current = candles[index];
+      const previous = candles[index - 1];
+      const atr = getAtr(candles, index, atrPeriod);
+
+      if (!current || !previous || atr === null || atr === 0) {
+        return hold("insufficient_data");
+      }
+
+      const close = current.closePrice;
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) return sell(0.9, "profit_target");
+        if (pnl < -stopLossPct) return sell(0.9, "stop_loss");
+        if (currentPosition.barsHeld >= maxHoldBars) return sell(0.7, "time_exit");
+
+        return hold("hold_position");
+      }
+
+      const barDrop = (previous.closePrice - close) / atr;
+      if (barDrop >= dropAtrMult) {
+        return buy(0.8, "15m_crash_dip");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 23. OBV Accumulation Bounce 15m — 7 params
+//    15m accumulation detection. More granular than 1h OBV.
+// ---------------------------------------------------------------------------
+
+export function createObvAccumulationBounce15mStrategy(params?: {
+  obvLookback?: number;
+  rsiPeriod?: number;
+  rsiEntry?: number;
+  dropLookback?: number;
+  minDropPct?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+}): ScoredStrategy {
+  const obvLookback = params?.obvLookback ?? 12;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiEntry = params?.rsiEntry ?? 32;
+  const dropLookback = params?.dropLookback ?? 8;
+  const minDropPct = params?.minDropPct ?? 0.02;
+  const profitTargetPct = params?.profitTargetPct ?? 0.012;
+  const stopLossPct = params?.stopLossPct ?? 0.018;
+
+  const parameters: Record<string, number> = {
+    obvLookback, rsiPeriod, rsiEntry, dropLookback, minDropPct, profitTargetPct, stopLossPct
+  };
+
+  return {
+    name: "obv-accumulation-15m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      if (index < Math.max(obvLookback, dropLookback) + 1) return hold("insufficient_data");
+
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+      const obvSlope = getObvSlope(candles, index, obvLookback);
+      const pastClose = candles[index - dropLookback]?.closePrice;
+
+      if (close === undefined || rsi === null || obvSlope === null || pastClose === undefined || pastClose === 0) {
+        return hold("insufficient_data");
+      }
+
+      const priceDrop = (pastClose - close) / pastClose;
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) return sell(0.9, "profit_target");
+        if (pnl < -stopLossPct) return sell(0.9, "stop_loss");
+        // 15m: max 48 bars = 12 hours
+        if (currentPosition.barsHeld >= 48) return sell(0.6, "time_exit");
+        if (rsi > 55 && pnl > 0) return sell(0.7, "rsi_recovered");
+
+        return hold("hold_position");
+      }
+
+      if (priceDrop >= minDropPct && obvSlope > 0 && rsi <= rsiEntry) {
+        return buy(0.85, "15m_obv_accumulation");
+      }
+
+      return hold("no_signal");
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 24. Consecutive Red Bounce 15m — 6 params
+//    15m consecutive red candle bounce.
+// ---------------------------------------------------------------------------
+
+export function createConsecutiveRedBounce15mStrategy(params?: {
+  minRedCandles?: number;
+  rsiPeriod?: number;
+  rsiMaxEntry?: number;
+  profitTargetPct?: number;
+  stopLossPct?: number;
+  maxHoldBars?: number;
+}): ScoredStrategy {
+  const minRedCandles = params?.minRedCandles ?? 5;
+  const rsiPeriod = params?.rsiPeriod ?? 14;
+  const rsiMaxEntry = params?.rsiMaxEntry ?? 38;
+  const profitTargetPct = params?.profitTargetPct ?? 0.01;
+  const stopLossPct = params?.stopLossPct ?? 0.015;
+  const maxHoldBars = params?.maxHoldBars ?? 24;
+
+  const parameters: Record<string, number> = {
+    minRedCandles, rsiPeriod, rsiMaxEntry, profitTargetPct, stopLossPct, maxHoldBars
+  };
+
+  return {
+    name: "consecutive-red-15m",
+    parameters,
+    parameterCount: Object.keys(parameters).length,
+
+    generateSignal(context: StrategyContext): SignalResult {
+      const { candles, index, hasPosition, currentPosition } = context;
+      if (index < minRedCandles) return hold("insufficient_data");
+
+      const close = candles[index]?.closePrice;
+      const rsi = getRsi(candles, index, rsiPeriod);
+
+      if (close === undefined || rsi === null) {
+        return hold("insufficient_data");
+      }
+
+      if (hasPosition && currentPosition) {
+        const pnl = (close - currentPosition.entryPrice) / currentPosition.entryPrice;
+
+        if (pnl >= profitTargetPct) return sell(0.9, "profit_target");
+        if (pnl < -stopLossPct) return sell(0.9, "stop_loss");
+        if (currentPosition.barsHeld >= maxHoldBars) return sell(0.6, "max_hold");
+        if (rsi > 50 && pnl > 0) return sell(0.7, "rsi_recovered");
+
+        return hold("hold_position");
+      }
+
+      let redCount = 0;
+      for (let i = index; i >= 0; i--) {
+        const c = candles[i];
+        if (c && c.closePrice < c.openPrice) {
+          redCount++;
+        } else {
+          break;
+        }
+      }
+
+      if (redCount >= minRedCandles && rsi <= rsiMaxEntry) {
+        const conviction = redCount >= minRedCandles + 2 ? 0.9 : 0.8;
+        return buy(conviction, `15m_${redCount}_red_bounce`);
       }
 
       return hold("no_signal");

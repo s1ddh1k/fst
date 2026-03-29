@@ -1,4 +1,75 @@
+import type { Strategy, StrategyTimeframe } from "../../../../packages/shared/src/index.js";
+import type { ScoredStrategy } from "../../../strategies/src/types.js";
 import type { ResearchParameterSpec, StrategyFamilyDefinition } from "./types.js";
+import { adaptScoredStrategy } from "../multi-strategy/index.js";
+import {
+  createMicroBreakoutStrategy,
+  createLeaderPullbackStateMachineMultiStrategy,
+  createRelativeBreakoutRotationMultiStrategy,
+  createRelativeMomentumPullbackMultiStrategy,
+  createResidualReversionMultiStrategy,
+  createRelativeStrengthRotationStrategy,
+  createBollingerMeanReversionMultiStrategy
+} from "../multi-strategy/index.js";
+import {
+  createEmaCrossoverStrategy,
+  createDonchianBreakoutStrategy,
+  createSimpleRsiReversionStrategy,
+  createSimpleBbReversionStrategy,
+  createMomentumRotationStrategy,
+  createOversoldBounceScalpStrategy,
+  createCrashDipBuyStrategy,
+  createVolumeBreakoutRiderStrategy,
+  createVolumeExhaustionBounceStrategy,
+  createBbSqueezeScalpStrategy,
+  createRelativeStrengthBounceStrategy,
+  createTrendAccelerationStrategy,
+  createVolumeExhaustionBounce5mStrategy,
+  createOversoldScalp5mStrategy,
+  createMomentumBurst5mStrategy,
+  createObvAccumulationBounceStrategy,
+  createConsecutiveRedBounceStrategy,
+  createObvAccumulationBounce5mStrategy,
+  createConsecutiveRedBounce5mStrategy,
+  createVolumeExhaustionBounce15mStrategy,
+  createOversoldBounceScalp15mStrategy,
+  createCrashDipBuy15mStrategy,
+  createObvAccumulationBounce15mStrategy,
+  createConsecutiveRedBounce15mStrategy
+} from "../../../strategies/src/simple-strategies.js";
+
+// ---------------------------------------------------------------------------
+// Parameter utilities
+// ---------------------------------------------------------------------------
+
+function clampParams(
+  raw: Record<string, number>,
+  specs: ResearchParameterSpec[]
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const spec of specs) {
+    const value = raw[spec.name];
+    if (value === undefined || !Number.isFinite(value)) {
+      result[spec.name] = (spec.min + spec.max) / 2;
+      continue;
+    }
+    const clamped = Math.max(spec.min, Math.min(spec.max, value));
+    result[spec.name] = spec.name.includes("Pct") || spec.name.includes("Mult") || spec.name.includes("mult") || spec.name.includes("Ratio") || spec.name.includes("ratio") || spec.name.includes("Floor") || spec.name.includes("floor") || spec.name.includes("Width") || spec.name.includes("Multiplier")
+      ? clamped
+      : Math.round(clamped);
+  }
+  return result;
+}
+
+// Generated strategy module paths (dynamic imports)
+const GENERATED_STRATEGY_MODULES: Record<string, string> = {
+  "block:simple-stochastic-rsi-reversion-5m":  "../generated-strategies/generated-block-stochastic-rsi-reversion-5m.js",
+  "block:simple-stochastic-rsi-reversion-1h":  "../generated-strategies/generated-block-stochastic-rsi-reversion-1h.js",
+  "block:simple-macd-histogram-reversal-1h":   "../generated-strategies/generated-block-macd-histogram-reversal-1h.js",
+  "block:simple-ema-macd-trend-15m":           "../generated-strategies/generated-block-ema-macd-trend-15m.js",
+  "block:simple-cci-volume-reversion-5m":      "../generated-strategies/generated-block-cci-volume-reversion-5m.js",
+  "block:simple-cci-volume-reversion-1h":      "../generated-strategies/generated-block-cci-volume-reversion-1h.js",
+};
 
 const REGIME_GATE_TREND_UP_SPECS: ResearchParameterSpec[] = [
   { name: "gateMinRiskOnScore", description: "Regime gate risk-on floor.", min: -0.15, max: 0.25 },
@@ -150,6 +221,59 @@ const BB_MEAN_REVERSION_HOURLY_SPECS: ResearchParameterSpec[] = [
   { name: "exitTimeDecayWeight", description: "Weight for time-decay pressure as the trade ages.", min: 0.0, max: 0.45 }
 ];
 
+function createBbReversionFactory(
+  familyId: string,
+  strategySuffix: string,
+  requireRsiConfirmation: boolean
+): (candidateId: string, params: Record<string, number>) => Promise<import("../../../../packages/shared/src/index.js").Strategy> {
+  return async (candidateId, params) => {
+    const family = BLOCK_FAMILY_CATALOG.find(f => f.familyId === familyId)!;
+    const p = clampParams(params, family.parameterSpecs);
+    return createBollingerMeanReversionMultiStrategy({
+      strategyId: `${candidateId}-${strategySuffix}`,
+      bbWindow: p.bbWindow,
+      bbMultiplier: p.bbMultiplier,
+      rsiPeriod: p.rsiPeriod,
+      entryRsiThreshold: p.entryRsiThreshold,
+      requireRsiConfirmation,
+      requireReclaimConfirmation: true,
+      reclaimLookbackBars: p.reclaimLookbackBars,
+      reclaimPercentBThreshold: p.reclaimPercentBThreshold,
+      reclaimMinCloseBouncePct: p.reclaimMinCloseBouncePct,
+      reclaimBandWidthFactor: p.reclaimBandWidthFactor,
+      deepTouchEntryPercentB: p.deepTouchEntryPercentB,
+      deepTouchRsiThreshold: p.deepTouchRsiThreshold,
+      exitRsi: p.exitRsi,
+      stopLossPct: p.stopLossPct,
+      maxHoldBars: p.maxHoldBars,
+      entryPercentB: p.entryPercentB,
+      minBandWidth: p.minBandWidth,
+      trendUpExitRsiOffset: p.trendUpExitRsiOffset,
+      trendDownExitRsiOffset: p.trendDownExitRsiOffset,
+      rangeExitRsiOffset: p.rangeExitRsiOffset,
+      trendUpExitBandFraction: p.trendUpExitBandFraction,
+      trendDownExitBandFraction: p.trendDownExitBandFraction,
+      volatileExitBandFraction: p.volatileExitBandFraction,
+      profitTakePnlThreshold: p.profitTakePnlThreshold,
+      profitTakeBandWidthFactor: p.profitTakeBandWidthFactor,
+      trendDownProfitTargetScale: p.trendDownProfitTargetScale,
+      volatileProfitTargetScale: p.volatileProfitTargetScale,
+      profitTakeRsiFraction: p.profitTakeRsiFraction,
+      entryBenchmarkLeadWeight: p.entryBenchmarkLeadWeight,
+      entryBenchmarkLeadMinScore: p.entryBenchmarkLeadMinScore,
+      softExitScoreThreshold: p.softExitScoreThreshold,
+      softExitMinPnl: p.softExitMinPnl,
+      softExitMinBandFraction: p.softExitMinBandFraction,
+      exitVolumeFadeWeight: p.exitVolumeFadeWeight,
+      exitReversalWeight: p.exitReversalWeight,
+      exitMomentumDecayWeight: p.exitMomentumDecayWeight,
+      exitBenchmarkWeaknessWeight: p.exitBenchmarkWeaknessWeight,
+      exitRelativeFragilityWeight: p.exitRelativeFragilityWeight,
+      exitTimeDecayWeight: p.exitTimeDecayWeight
+    });
+  };
+}
+
 const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   {
     familyId: "block:rotation-15m-trend-up",
@@ -172,7 +296,22 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "Long-only, point-in-time universe.",
       "Prevent overtrading — minimum 4-bar rebalance cadence.",
       "Keep regime gate for trend_up only."
-    ]
+    ],
+    createStrategy: async (candidateId, params) => {
+      const family = BLOCK_FAMILY_CATALOG.find(f => f.familyId === "block:rotation-15m-trend-up")!;
+      const p = clampParams(params, family.parameterSpecs);
+      return createRelativeStrengthRotationStrategy({
+        strategyId: `${candidateId}-rotation`,
+        rebalanceBars: p.rebalanceBars,
+        entryFloor: p.entryFloor,
+        reEntryCooldownBars: 3,
+        exitFloor: p.exitFloor,
+        switchGap: p.switchGap,
+        minAboveTrendRatio: p.minAboveTrendRatio,
+        minLiquidityScore: p.minLiquidityScore,
+        minCompositeTrend: p.minCompositeTrend
+      });
+    }
   },
   {
     familyId: "block:leader-1h-trend-up",
@@ -191,7 +330,18 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
     guardrails: [
       "Favor clear trend leadership.",
       "Keep regime gate for trend_up."
-    ]
+    ],
+    createStrategy: async (candidateId, params) => {
+      const family = BLOCK_FAMILY_CATALOG.find(f => f.familyId === "block:leader-1h-trend-up")!;
+      const p = clampParams(params, family.parameterSpecs);
+      return createLeaderPullbackStateMachineMultiStrategy({
+        strategyId: `${candidateId}-leader`,
+        strengthFloor: p.strengthFloor,
+        pullbackAtr: p.pullbackAtr,
+        setupExpiryBars: p.setupExpiryBars,
+        trailAtrMult: p.trailAtrMult
+      });
+    }
   },
   {
     familyId: "block:reversion-1h-rangedown",
@@ -210,7 +360,18 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
     guardrails: [
       "Only trade large reversions to overcome costs.",
       "Gate to range and trend_down regimes."
-    ]
+    ],
+    createStrategy: async (candidateId, params) => {
+      const family = BLOCK_FAMILY_CATALOG.find(f => f.familyId === "block:reversion-1h-rangedown")!;
+      const p = clampParams(params, family.parameterSpecs);
+      return createResidualReversionMultiStrategy({
+        strategyId: `${candidateId}-reversion`,
+        entryThreshold: p.entryThreshold,
+        exitThreshold: p.exitThreshold,
+        stopLossPct: p.stopLossPct,
+        maxHoldBars: p.maxHoldBars
+      });
+    }
   },
   {
     familyId: "block:pullback-1h-trend-up",
@@ -229,7 +390,18 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
     guardrails: [
       "Long-only, pullback-and-reclaim semantics.",
       "Gate to trend_up regime."
-    ]
+    ],
+    createStrategy: async (candidateId, params) => {
+      const family = BLOCK_FAMILY_CATALOG.find(f => f.familyId === "block:pullback-1h-trend-up")!;
+      const p = clampParams(params, family.parameterSpecs);
+      return createRelativeMomentumPullbackMultiStrategy({
+        strategyId: `${candidateId}-pullback`,
+        minStrengthPct: p.minStrengthPct,
+        minRiskOn: p.minRiskOn,
+        pullbackZ: p.pullbackZ,
+        trailAtrMult: p.trailAtrMult
+      });
+    }
   },
   {
     familyId: "block:bb-reversion-1h",
@@ -245,7 +417,8 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "Wide stop loss (20-35%) — crypto volatility.",
       "Regime-adaptive exit: trend_up holds longer, trend_down sells faster.",
       "NO regime gate — BB oversold happens in all regimes."
-    ]
+    ],
+    createStrategy: createBbReversionFactory("block:bb-reversion-1h", "bb-weekly", false)
   },
   {
     familyId: "block:bb-rsi-confirmed-reversion-1h",
@@ -261,7 +434,8 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "Wide stop loss (20-35%) — crypto volatility.",
       "Regime-adaptive exit: trend_up holds longer, trend_down sells faster.",
       "NO regime gate — BB oversold happens in all regimes."
-    ]
+    ],
+    createStrategy: createBbReversionFactory("block:bb-rsi-confirmed-reversion-1h", "bb-weekly", true)
   },
   {
     familyId: "block:bb-reversion-1h-daily",
@@ -277,7 +451,8 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "Faster exit than weekly variant — lower RSI target.",
       "Regime-adaptive exit: trend_up holds longer, trend_down sells faster.",
       "NO regime gate — BB oversold happens in all regimes."
-    ]
+    ],
+    createStrategy: createBbReversionFactory("block:bb-reversion-1h-daily", "bb-daily", false)
   },
   {
     familyId: "block:bb-rsi-confirmed-reversion-1h-daily",
@@ -293,7 +468,8 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "Faster exit than weekly variant — lower RSI target.",
       "Regime-adaptive exit: trend_up holds longer, trend_down sells faster.",
       "NO regime gate — BB oversold happens in all regimes."
-    ]
+    ],
+    createStrategy: createBbReversionFactory("block:bb-rsi-confirmed-reversion-1h-daily", "bb-daily", true)
   },
   {
     familyId: "block:bb-reversion-1h-hourly",
@@ -309,7 +485,8 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "Smaller profit targets than daily/weekly, but still above fee drag.",
       "Fast exits and tighter stop loss than slower variants.",
       "NO regime gate — BB oversold happens in all regimes."
-    ]
+    ],
+    createStrategy: createBbReversionFactory("block:bb-reversion-1h-hourly", "bb-hourly", false)
   },
   {
     familyId: "block:bb-rsi-confirmed-reversion-1h-hourly",
@@ -325,7 +502,76 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "Smaller profit targets than daily/weekly, but still above fee drag.",
       "Fast exits and tighter stop loss than slower variants.",
       "NO regime gate — BB oversold happens in all regimes."
-    ]
+    ],
+    createStrategy: createBbReversionFactory("block:bb-rsi-confirmed-reversion-1h-hourly", "bb-hourly", true)
+  },
+  {
+    familyId: "block:micro-breakout-15m-upvol",
+    strategyName: "block:micro-breakout-15m-upvol",
+    title: "15m Micro Breakout Block (trend_up + volatile)",
+    thesis: "Micro breakout on 15m candles, gated to trend-up and volatile regimes.",
+    timeframe: "15m",
+    requiredData: ["15m", "5m"],
+    parameterSpecs: [
+      { name: "lookbackBars", description: "Lookback bars for range detection.", min: 5, max: 18 },
+      { name: "extensionThreshold", description: "Minimum breakout extension.", min: 0.0015, max: 0.009 },
+      { name: "holdingBarsMax", description: "Max hold bars.", min: 4, max: 20 },
+      { name: "stopAtrMult", description: "Stop ATR multiple.", min: 0.8, max: 1.8 },
+      { name: "minVolumeSpike", description: "Min volume spike ratio.", min: 0.8, max: 1.5 },
+      { name: "minRiskOnScore", description: "Regime min risk-on score.", min: -0.02, max: 0.2 },
+      { name: "minLiquidityScore", description: "Regime min liquidity score.", min: 0.02, max: 0.12 },
+      { name: "profitTarget", description: "Profit target %.", min: 0.0015, max: 0.012 },
+      ...REGIME_GATE_VOLATILE_SPECS
+    ],
+    guardrails: [
+      "Long-only, micro breakout.",
+      "Gate to trend_up + volatile regimes."
+    ],
+    createStrategy: async (candidateId, params) => {
+      const family = BLOCK_FAMILY_CATALOG.find(f => f.familyId === "block:micro-breakout-15m-upvol")!;
+      const p = clampParams(params, family.parameterSpecs);
+      return createMicroBreakoutStrategy({
+        strategyId: `${candidateId}-micro`,
+        lookbackBars: p.lookbackBars,
+        extensionThreshold: p.extensionThreshold,
+        holdingBarsMax: p.holdingBarsMax,
+        stopAtrMult: p.stopAtrMult,
+        minVolumeSpike: p.minVolumeSpike,
+        minRiskOnScore: p.minRiskOnScore,
+        minLiquidityScore: p.minLiquidityScore,
+        profitTarget: p.profitTarget
+      });
+    }
+  },
+  {
+    familyId: "block:breakout-1h-trend-up",
+    strategyName: "block:breakout-1h-trend-up",
+    title: "1h Relative Breakout Rotation Block (trend_up)",
+    thesis: "Relative breakout rotation on 1h decision, 5m execution, gated to trend-up regime.",
+    timeframe: "1h",
+    requiredData: ["1h", "5m"],
+    parameterSpecs: [
+      { name: "breakoutLookback", description: "Breakout lookback bars.", min: 12, max: 36 },
+      { name: "strengthFloor", description: "Strength percentile floor.", min: 0.65, max: 0.95 },
+      { name: "maxExtensionAtr", description: "Max extension in ATR.", min: 0.8, max: 2.2 },
+      { name: "trailAtrMult", description: "Trailing ATR multiple.", min: 1.2, max: 3.4 },
+      ...REGIME_GATE_TREND_UP_SPECS
+    ],
+    guardrails: [
+      "Long-only, breakout rotation.",
+      "Gate to trend_up regime."
+    ],
+    createStrategy: async (candidateId, params) => {
+      const family = BLOCK_FAMILY_CATALOG.find(f => f.familyId === "block:breakout-1h-trend-up")!;
+      const p = clampParams(params, family.parameterSpecs);
+      return createRelativeBreakoutRotationMultiStrategy({
+        strategyId: `${candidateId}-breakout`,
+        breakoutLookback: p.breakoutLookback,
+        strengthFloor: p.strengthFloor,
+        maxExtensionAtr: p.maxExtensionAtr,
+        trailAtrMult: p.trailAtrMult
+      });
+    }
   }
 ],
 
@@ -336,6 +582,9 @@ const BLOCK_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
 SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   {
     familyId: "block:simple-ema-crossover-1h",
+    sleeveId: "trend",
+    family: "trend",
+    create: (p) => createEmaCrossoverStrategy(p),
     strategyName: "ema-crossover",
     title: "EMA Crossover Trend Following",
     thesis: "Buy on golden cross (fast EMA > slow EMA), sell on death cross. Classic trend-following with 5 params.",
@@ -356,6 +605,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-donchian-breakout-1h",
+    sleeveId: "breakout",
+    family: "breakout",
+    create: (p) => createDonchianBreakoutStrategy(p),
     strategyName: "donchian-breakout",
     title: "Donchian Channel Breakout",
     thesis: "Buy when price breaks above N-bar high, exit below shorter-period low. Turtle Trading approach with 5 params.",
@@ -376,6 +628,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-rsi-reversion-1h",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createSimpleRsiReversionStrategy(p),
     strategyName: "simple-rsi-reversion",
     title: "Simple RSI Mean Reversion",
     thesis: "Buy when RSI oversold, sell when RSI overbought. Pure mean reversion with 5 params, no filters.",
@@ -396,6 +651,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-bb-reversion-1h",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createSimpleBbReversionStrategy(p),
     strategyName: "simple-bb-reversion",
     title: "Simple Bollinger Mean Reversion",
     thesis: "Buy below lower BB + RSI oversold, sell at middle BB or RSI mean. Same idea as the complex version but with 6 params instead of 41.",
@@ -417,6 +675,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-momentum-1h",
+    sleeveId: "trend",
+    family: "trend",
+    create: (p) => createMomentumRotationStrategy(p),
     strategyName: "momentum-rotation",
     title: "Simple Momentum",
     thesis: "Buy coins with strong positive momentum, sell when momentum reverses. 5 params.",
@@ -436,6 +697,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-oversold-bounce-1h",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createOversoldBounceScalpStrategy(p),
     strategyName: "oversold-bounce-scalp",
     title: "Oversold Bounce Scalp",
     thesis: "Bear-market strategy: enter only on extreme oversold (low RSI + below BB lower), take small profit quickly (1-3%), cut losses fast. Max 12 bars hold.",
@@ -457,6 +721,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-crash-dip-1h",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createCrashDipBuyStrategy(p),
     strategyName: "crash-dip-buy",
     title: "Crash Dip Buy",
     thesis: "Buy after sharp single-bar drops (>N*ATR), ride the dead cat bounce. Very short hold (4-12 bars), tight profit target and stop.",
@@ -477,6 +744,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-volume-breakout-rider-1h",
+    sleeveId: "trend",
+    family: "trend",
+    create: (p) => createVolumeBreakoutRiderStrategy(p),
     strategyName: "volume-breakout-rider",
     title: "Volume Breakout Trend Rider",
     thesis: "Bull-market strategy: enter on EMA golden cross with volume confirmation, ATR trailing stop lets winners run. No fixed profit target — captures full trend moves.",
@@ -499,6 +769,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-volume-exhaustion-1h",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createVolumeExhaustionBounceStrategy(p),
     strategyName: "volume-exhaustion-bounce",
     title: "Volume Exhaustion Bounce",
     thesis: "Bear-market strategy: detects capitulation via multi-bar drop + volume spike + RSI extreme. More reliable than single-bar crash detection. Quick profit-taking.",
@@ -521,6 +794,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-bb-squeeze-1h",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createBbSqueezeScalpStrategy(p),
     strategyName: "bb-squeeze-scalp",
     title: "BB Squeeze Scalp",
     thesis: "Sideways strategy: trade only when BB width is contracted (squeeze). Buy at lower band with RSI oversold, sell at upper band. Inactive during trends.",
@@ -542,6 +818,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-rs-bounce-1h",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createRelativeStrengthBounceStrategy(p),
     strategyName: "relative-strength-bounce",
     title: "Relative Strength Volume Bounce",
     thesis: "All-regime strategy: buy relatively strong coins (high momentum percentile) on RSI oversold + volume spike. ATR trailing stop. Key insight: strong coins bounce harder even in bear markets.",
@@ -564,6 +843,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-trend-accel-1h",
+    sleeveId: "trend",
+    family: "trend",
+    create: (p) => createTrendAccelerationStrategy(p),
     strategyName: "trend-acceleration",
     title: "Trend Acceleration Rider",
     thesis: "Bull-market strategy: enter when a strong coin's momentum is accelerating (not just positive). Volume confirmation + relative strength filter + ATR trailing stop.",
@@ -586,6 +868,7 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-stochastic-rsi-reversion-1h",
+    sleeveId: "micro",
     strategyName: "stochastic-rsi-reversion",
     title: "Stochastic RSI Mean Reversion",
     thesis: "Stochastic %K < 20 + RSI < 35 = oversold extreme. Enter on K crossing above D (bounce confirmation), exit on overbought or ATR stop. 7 params.",
@@ -608,6 +891,7 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-macd-histogram-reversal-1h",
+    sleeveId: "trend",
     strategyName: "macd-histogram-reversal",
     title: "MACD Histogram Momentum Reversal",
     thesis: "MACD histogram crosses zero from below while price above EMA = bearish-to-bullish momentum shift. ATR trailing stop. 7 params.",
@@ -630,6 +914,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-vol-exhaustion-5m",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createVolumeExhaustionBounce5mStrategy(p),
     strategyName: "volume-exhaustion-5m",
     title: "5m Volume Exhaustion Bounce",
     thesis: "5m micro-capitulation: multi-bar drop + volume spike + RSI oversold. Same concept as 1h but 12x more opportunities. Tight profit target 0.5-1.5%.",
@@ -652,6 +939,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-oversold-scalp-5m",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createOversoldScalp5mStrategy(p),
     strategyName: "oversold-scalp-5m",
     title: "5m Oversold Scalp",
     thesis: "5m RSI + BB oversold entry with tight profit target. Quick in-and-out for micro bounces.",
@@ -672,6 +962,9 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-momentum-burst-5m",
+    sleeveId: "breakout",
+    family: "breakout",
+    create: (p) => createMomentumBurst5mStrategy(p),
     strategyName: "momentum-burst-5m",
     title: "5m Momentum Burst",
     thesis: "Catch short-term momentum bursts with volume confirmation. ATR trailing stop lets bursts run. Works in all regimes.",
@@ -692,6 +985,7 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-stochastic-rsi-reversion-5m",
+    sleeveId: "micro",
     strategyName: "stochastic-rsi-reversion-5m",
     title: "5m Stochastic RSI Scalp Reversion",
     thesis: "5m oversold stochastic + RSI bounce = micro-reversion scalp. Tight stop, fast exit. 7 params.",
@@ -714,6 +1008,7 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-ema-macd-trend-15m",
+    sleeveId: "trend",
     strategyName: "ema-macd-trend-15m",
     title: "15m EMA + MACD Trend Following",
     thesis: "EMA20 > EMA50 + MACD histogram positive = 15m uptrend. Trail with ATR stop. 7 params.",
@@ -736,6 +1031,7 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-cci-volume-reversion-5m",
+    sleeveId: "micro",
     strategyName: "cci-volume-reversion-5m",
     title: "5m CCI Volume Scalp Reversion",
     thesis: "CCI extreme + volume spike on 5m = micro-capitulation, fast 15-60min reversion. 7 params.",
@@ -758,6 +1054,7 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
   },
   {
     familyId: "block:simple-cci-volume-reversion-1h",
+    sleeveId: "micro",
     strategyName: "cci-volume-reversion",
     title: "CCI Extreme + Volume Spike Reversion",
     thesis: "CCI < -100 with volume spike > 1.5x = capitulation selling. Enter when CCI recovering, exit at CCI mean (0) or on stop. 7 params.",
@@ -777,11 +1074,264 @@ SIMPLE_FAMILY_CATALOG: StrategyFamilyDefinition[] = [
       "7 parameters — volume confirmation filters noise.",
       "No regime gate — capitulation happens in all regimes."
     ]
+  },
+  {
+    familyId: "block:simple-obv-accumulation-bounce-1h",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createObvAccumulationBounceStrategy(p),
+    strategyName: "obv-accumulation-bounce",
+    title: "OBV Accumulation Bounce",
+    thesis: "Bear-market accumulation detection: price drops but OBV slope positive = smart money buying while retail panics. Combined with RSI oversold for timing. Max 24 bar hold.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "obvLookback", description: "OBV slope calculation lookback.", min: 5, max: 20 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI oversold entry.", min: 25, max: 45 },
+      { name: "dropLookback", description: "Bars to measure price drop.", min: 5, max: 20 },
+      { name: "minDropPct", description: "Minimum price drop % to trigger.", min: 0.02, max: 0.08 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.01, max: 0.05 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.015, max: 0.05 }
+    ],
+    guardrails: [
+      "Long-only, bear-market accumulation bounce.",
+      "7 parameters. Triple confirmation: price drop + OBV positive + RSI oversold.",
+      "Max 24 bars hold, exits on RSI recovery above 55."
+    ]
+  },
+  {
+    familyId: "block:simple-consecutive-red-bounce-1h",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createConsecutiveRedBounceStrategy(p),
+    strategyName: "consecutive-red-bounce",
+    title: "Consecutive Red Candle Bounce",
+    thesis: "Bear-market strategy: after N+ consecutive red (close<open) candles, buy the expected mean-reversion bounce. Extended selling exhausts supply. RSI filter prevents entries that are still too high. Quick profit target.",
+    timeframe: "1h",
+    requiredData: ["1h"],
+    parameterSpecs: [
+      { name: "minRedCandles", description: "Minimum consecutive red candles to trigger entry.", min: 3, max: 8 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiMaxEntry", description: "Max RSI to allow entry.", min: 30, max: 50 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.008, max: 0.04 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.01, max: 0.04 },
+      { name: "maxHoldBars", description: "Maximum bars to hold.", min: 6, max: 24 }
+    ],
+    guardrails: [
+      "Long-only, bear-market bounce strategy.",
+      "6 parameters. Simple observable pattern.",
+      "Higher conviction (+0.1) when 2+ extra red candles beyond minimum."
+    ]
+  },
+  {
+    familyId: "block:simple-obv-accumulation-bounce-5m",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createObvAccumulationBounce5mStrategy(p),
+    strategyName: "obv-accumulation-5m",
+    title: "5m OBV Accumulation Bounce",
+    thesis: "5m micro-accumulation: price drops but OBV slope positive = smart money buying on 5m timeframe. RSI oversold timing. Tight 0.5-1.5% profit target. 12x more opportunities than 1h.",
+    timeframe: "5m",
+    requiredData: ["5m"],
+    parameterSpecs: [
+      { name: "obvLookback", description: "OBV slope lookback.", min: 6, max: 24 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI oversold entry.", min: 20, max: 40 },
+      { name: "dropLookback", description: "Bars to measure drop.", min: 6, max: 24 },
+      { name: "minDropPct", description: "Min drop %.", min: 0.008, max: 0.03 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.003, max: 0.015 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.005, max: 0.02 }
+    ],
+    guardrails: [
+      "Long-only, 5m scalp.",
+      "7 parameters. OBV divergence + RSI on 5m.",
+      "Max hold 36 bars (3 hours)."
+    ]
+  },
+  {
+    familyId: "block:simple-vol-exhaustion-15m",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createVolumeExhaustionBounce15mStrategy(p),
+    strategyName: "volume-exhaustion-15m",
+    title: "15m Volume Exhaustion Bounce",
+    thesis: "15m capitulation: multi-bar drop + volume spike + RSI oversold. Sweet spot between 5m noise and 1h infrequency. 4x more opportunities than 1h, 1/3 fee drag vs 5m.",
+    timeframe: "15m",
+    requiredData: ["15m"],
+    parameterSpecs: [
+      { name: "dropLookback", description: "Bars to measure drop.", min: 3, max: 10 },
+      { name: "dropThresholdPct", description: "Min drop % to trigger.", min: 0.02, max: 0.08 },
+      { name: "volumeWindow", description: "Volume average window.", min: 12, max: 30 },
+      { name: "volumeSpikeMult", description: "Volume spike threshold.", min: 1.5, max: 3.5 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI oversold entry.", min: 12, max: 30 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.005, max: 0.03 }
+    ],
+    guardrails: [
+      "Long-only, 15m bear-market bounce.",
+      "7 parameters. Triple confirmation: drop + volume + RSI.",
+      "Adaptive stop = 1.5x profit target. Max hold 48 bars (12 hours)."
+    ]
+  },
+  {
+    familyId: "block:simple-oversold-bounce-15m",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createOversoldBounceScalp15mStrategy(p),
+    strategyName: "oversold-bounce-15m",
+    title: "15m Oversold Bounce Scalp",
+    thesis: "15m RSI + BB extreme oversold entry. Quick profit target, tight stop. Between 5m scalp intensity and 1h selectivity.",
+    timeframe: "15m",
+    requiredData: ["15m"],
+    parameterSpecs: [
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI extreme oversold.", min: 10, max: 25 },
+      { name: "bbWindow", description: "BB window.", min: 14, max: 30 },
+      { name: "bbMultiplier", description: "BB multiplier.", min: 1.8, max: 3.0 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.005, max: 0.025 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.008, max: 0.03 }
+    ],
+    guardrails: [
+      "Long-only, 15m scalp.",
+      "6 parameters. Max hold 32 bars (8 hours)."
+    ]
+  },
+  {
+    familyId: "block:simple-crash-dip-15m",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createCrashDipBuy15mStrategy(p),
+    strategyName: "crash-dip-15m",
+    title: "15m Crash Dip Buy",
+    thesis: "15m single-bar sharp drop detection via ATR. More responsive than 1h, less noisy than 5m. Short hold, tight targets.",
+    timeframe: "15m",
+    requiredData: ["15m"],
+    parameterSpecs: [
+      { name: "atrPeriod", description: "ATR period.", min: 10, max: 20 },
+      { name: "dropAtrMult", description: "Drop size in ATR multiples.", min: 1.5, max: 4.0 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.004, max: 0.02 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.006, max: 0.025 },
+      { name: "maxHoldBars", description: "Max bars to hold.", min: 8, max: 32 }
+    ],
+    guardrails: [
+      "Long-only, 15m crash bounce.",
+      "5 parameters. Quick in-and-out."
+    ]
+  },
+  {
+    familyId: "block:simple-obv-accumulation-15m",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createObvAccumulationBounce15mStrategy(p),
+    strategyName: "obv-accumulation-15m",
+    title: "15m OBV Accumulation Bounce",
+    thesis: "15m accumulation detection: price drops but OBV slope positive. More granular than 1h OBV. RSI timing.",
+    timeframe: "15m",
+    requiredData: ["15m"],
+    parameterSpecs: [
+      { name: "obvLookback", description: "OBV slope lookback.", min: 6, max: 20 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiEntry", description: "RSI oversold entry.", min: 22, max: 42 },
+      { name: "dropLookback", description: "Bars to measure drop.", min: 4, max: 16 },
+      { name: "minDropPct", description: "Min drop %.", min: 0.01, max: 0.04 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.005, max: 0.025 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.008, max: 0.03 }
+    ],
+    guardrails: [
+      "Long-only, 15m accumulation bounce.",
+      "7 parameters. OBV divergence + RSI.",
+      "Max hold 48 bars (12 hours)."
+    ]
+  },
+  {
+    familyId: "block:simple-consecutive-red-15m",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createConsecutiveRedBounce15mStrategy(p),
+    strategyName: "consecutive-red-15m",
+    title: "15m Consecutive Red Bounce",
+    thesis: "15m consecutive red candle bounce. After N+ red 15m candles, buy mean reversion. RSI filter.",
+    timeframe: "15m",
+    requiredData: ["15m"],
+    parameterSpecs: [
+      { name: "minRedCandles", description: "Min consecutive red candles.", min: 3, max: 8 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiMaxEntry", description: "Max RSI to allow entry.", min: 28, max: 48 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.004, max: 0.02 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.006, max: 0.025 },
+      { name: "maxHoldBars", description: "Max bars to hold.", min: 12, max: 48 }
+    ],
+    guardrails: [
+      "Long-only, 15m bear-market bounce.",
+      "6 parameters."
+    ]
+  },
+  {
+    familyId: "block:simple-consecutive-red-bounce-5m",
+    sleeveId: "micro",
+    family: "meanreversion",
+    create: (p) => createConsecutiveRedBounce5mStrategy(p),
+    strategyName: "consecutive-red-5m",
+    title: "5m Consecutive Red Candle Bounce",
+    thesis: "5m version: after N+ consecutive red 5m candles, buy micro-bounce. More signal opportunities, tighter targets. RSI filter for timing.",
+    timeframe: "5m",
+    requiredData: ["5m"],
+    parameterSpecs: [
+      { name: "minRedCandles", description: "Minimum consecutive red candles.", min: 4, max: 12 },
+      { name: "rsiPeriod", description: "RSI period.", min: 7, max: 21 },
+      { name: "rsiMaxEntry", description: "Max RSI to allow entry.", min: 25, max: 45 },
+      { name: "profitTargetPct", description: "Take profit %.", min: 0.002, max: 0.012 },
+      { name: "stopLossPct", description: "Stop loss %.", min: 0.004, max: 0.015 },
+      { name: "maxHoldBars", description: "Max bars to hold.", min: 12, max: 48 }
+    ],
+    guardrails: [
+      "Long-only, 5m scalp.",
+      "6 parameters. Simple pattern, tight targets."
+    ]
   }
 ];
 
+function attachCreateStrategy(family: StrategyFamilyDefinition): StrategyFamilyDefinition {
+  if (family.createStrategy) return family;
+
+  // Simple strategy — use create/sleeveId/family directly from the family definition
+  if (family.create && family.sleeveId) {
+    const tf = family.timeframe as StrategyTimeframe;
+    return {
+      ...family,
+      createStrategy: async (candidateId, params) => {
+        const clamped = clampParams(params, family.parameterSpecs);
+        return adaptScoredStrategy({
+          strategyId: `${candidateId}-${tf}`,
+          sleeveId: family.sleeveId!,
+          family: family.family ?? "meanreversion",
+          decisionTimeframe: tf,
+          executionTimeframe: tf,
+          scoredStrategy: family.create!(clamped)
+        });
+      }
+    };
+  }
+
+  // Generated strategy — dynamic import
+  const generatedPath = GENERATED_STRATEGY_MODULES[family.familyId];
+  if (generatedPath) {
+    return {
+      ...family,
+      createStrategy: async (candidateId, params) => {
+        const mod = await import(generatedPath);
+        return mod.createStrategy({ strategyId: candidateId, parameters: params });
+      }
+    };
+  }
+
+  // No factory available — will fall through to dynamic loader in evaluator
+  return family;
+}
+
 export function getBlockFamilyDefinitions(): StrategyFamilyDefinition[] {
-  return [...BLOCK_FAMILY_CATALOG, ...SIMPLE_FAMILY_CATALOG];
+  return [...BLOCK_FAMILY_CATALOG, ...SIMPLE_FAMILY_CATALOG].map(attachCreateStrategy);
 }
 
 export function getBlockFamilyById(id: string): StrategyFamilyDefinition {
@@ -790,5 +1340,5 @@ export function getBlockFamilyById(id: string): StrategyFamilyDefinition {
   if (!found) {
     throw new Error(`Unknown block family: ${id}`);
   }
-  return found;
+  return attachCreateStrategy(found);
 }

@@ -57,6 +57,16 @@ export function createExecutionSimulator(params?: {
         };
       }
 
+      if (request.nextBar.volume <= 0) {
+        return {
+          status: "REJECTED",
+          side: request.orderIntent.side,
+          market: request.orderIntent.market,
+          orderTimestamp: request.orderIntent.timestamp,
+          reason: "zero_volume_bar"
+        };
+      }
+
       const feeRate =
         policy.defaultFeeSide === "maker"
           ? exchangeAdapter.rules.makerFeeRate

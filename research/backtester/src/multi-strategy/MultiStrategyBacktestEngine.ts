@@ -384,6 +384,7 @@ export function runMultiStrategyBacktest(config: MultiStrategyBacktestConfig): M
   const completedTrades: MultiStrategyBacktestResult["completedTrades"] = [];
   const decisions: MultiStrategyBacktestResult["decisions"] = [];
   const equityCurve: number[] = [config.initialCapital];
+  const latestPriceByMarket = new Map<string, number>();
   const holdBars: number[] = [];
   let turnover = 0;
   let feePaid = 0;
@@ -797,7 +798,10 @@ export function runMultiStrategyBacktest(config: MultiStrategyBacktestConfig): M
           holdBars.push(
             Math.max(
               1,
-              Math.round(((fill.fillTime?.getTime() ?? decisionTime.getTime()) - matchedPosition.entryTime.getTime()) / 60_000)
+              Math.round(
+                ((fill.fillTime?.getTime() ?? decisionTime.getTime()) - matchedPosition.entryTime.getTime()) /
+                Math.max(1, timeframeToMs(strategy.decisionTimeframe))
+              )
             )
           );
           applyExitRiskState({
@@ -850,22 +854,26 @@ export function runMultiStrategyBacktest(config: MultiStrategyBacktestConfig): M
       });
     }
 
+    // Update latest known prices for mark-to-market
+    for (const strategy of config.strategies) {
+      const set = decisionSets[strategy.decisionTimeframe];
+      const lookup = decisionLookups[strategy.decisionTimeframe];
+      const index = lookup?.get(decisionTime.toISOString());
+      if (set && index !== undefined) {
+        for (const [market, candles] of Object.entries(set.candlesByMarket)) {
+          const close = candles?.[index]?.closePrice;
+          if (close !== undefined) {
+            latestPriceByMarket.set(market, close);
+          }
+        }
+      }
+    }
+
     const equity =
       state.cash +
       state.positions.reduce((sum, position) => {
-        for (const strategy of config.strategies) {
-          const set = decisionSets[strategy.decisionTimeframe];
-          const lookup = decisionLookups[strategy.decisionTimeframe];
-          const index = lookup?.get(decisionTime.toISOString());
-          if (set && index !== undefined) {
-            const close = set.candlesByMarket[position.market]?.[index]?.closePrice;
-            if (close !== undefined) {
-              return sum + close * position.quantity;
-            }
-          }
-        }
-
-        return sum + position.entryPrice * position.quantity;
+        const latestPrice = latestPriceByMarket.get(position.market) ?? position.entryPrice;
+        return sum + latestPrice * position.quantity;
       }, 0);
     equityCurve.push(equity);
   }
