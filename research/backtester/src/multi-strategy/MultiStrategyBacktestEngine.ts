@@ -402,6 +402,7 @@ export function runMultiStrategyBacktest(config: MultiStrategyBacktestConfig): M
   const strategyMetrics: MultiStrategyBacktestResult["strategyMetrics"] = {};
   const sleeveMetrics: MultiStrategyBacktestResult["sleeveMetrics"] = {};
   const decisionTimeline = collectDecisionTimeline(config.strategies, decisionSets);
+  const equityTimeline: Date[] = [decisionTimeline[0] ?? new Date(0)];
   const usedDecisionTimeframes = Array.from(
     new Set(config.strategies.map((strategy) => strategy.decisionTimeframe))
   );
@@ -877,6 +878,7 @@ export function runMultiStrategyBacktest(config: MultiStrategyBacktestConfig): M
         return sum + latestPrice * position.quantity;
       }, 0);
     equityCurve.push(equity);
+    equityTimeline.push(decisionTime);
   }
 
   const winningTrades = completedTrades.filter((trade) => trade.netPnl > 0).length;
@@ -940,6 +942,8 @@ export function runMultiStrategyBacktest(config: MultiStrategyBacktestConfig): M
       capitalInUse: state.positions.reduce((sum, position) => sum + position.entryPrice * position.quantity, 0)
     },
     finalPositions: state.positions,
+    equityCurve: equityCurve.slice(),
+    equityTimeline: equityTimeline.slice(),
     rawSignals: captureTraceArtifacts ? allSignals : [],
     universeSnapshots: universeCoverage.snapshots,
     orderIntents

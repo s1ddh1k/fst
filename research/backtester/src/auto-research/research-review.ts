@@ -60,6 +60,7 @@ function promotionGateConfig(config: AutoResearchRunConfig) {
     minNetReturn: config.minNetReturnForPromotion,
     maxDrawdown: config.maxDrawdownForPromotion,
     minPositiveWindowRatio: config.minPositiveWindowRatioForPromotion,
+    minWorstWindowNetReturn: config.minWorstWindowNetReturnForPromotion,
     minRandomPercentile: config.minRandomPercentileForPromotion,
     requireBootstrapSignificance: config.requireBootstrapSignificanceForPromotion
   };

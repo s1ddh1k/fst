@@ -15,6 +15,13 @@ export function createRelativeStrengthRotationStrategy(params?: {
   minLiquidityScore?: number;
   minCompositeTrend?: number;
   reEntryCooldownBars?: number;
+  skipInternalRegimeCheck?: boolean;
+  momentumWeight?: number;
+  returnWeight?: number;
+  spreadWeight?: number;
+  liquidityWeight?: number;
+  trendWeight?: number;
+  aboveTrendWeight?: number;
 }): Strategy {
   const strategyId = params?.strategyId ?? "relative-strength-rotation";
   const sleeveId = params?.sleeveId ?? "trend";
@@ -26,6 +33,15 @@ export function createRelativeStrengthRotationStrategy(params?: {
   const minLiquidityScore = params?.minLiquidityScore ?? 0.05;
   const minCompositeTrend = params?.minCompositeTrend ?? 0;
   const reEntryCooldownBars = params?.reEntryCooldownBars ?? 3;
+  const skipInternalRegimeCheck = params?.skipInternalRegimeCheck ?? false;
+  const momentumWeight = params?.momentumWeight ?? 0.45;
+  const returnWeight = params?.returnWeight ?? 0.35;
+  const spreadWeight = params?.spreadWeight ?? 0.2;
+  const liquidityWeight = params?.liquidityWeight ?? 0;
+  const trendWeight = params?.trendWeight ?? 0;
+  const aboveTrendWeight = params?.aboveTrendWeight ?? 0;
+  const totalWeight = momentumWeight + returnWeight + spreadWeight + liquidityWeight + trendWeight + aboveTrendWeight;
+  const safeTotalWeight = totalWeight > 0 ? totalWeight : 1;
   let lastSellDecisionIndex = -Infinity;
 
   return {
@@ -56,8 +72,18 @@ export function createRelativeStrengthRotationStrategy(params?: {
       const aboveTrendRatio = Number(state.breadth?.aboveTrendRatio ?? 0);
       const liquidityScore = Number(state.breadth?.liquidityScore ?? 0);
       const compositeTrendScore = Number(state.breadth?.compositeTrendScore ?? 0);
+      const spreadScore = clamp01((compositeMomentumSpread + 1) / 2);
+      const trendQuality = clamp01((compositeTrendScore + 1) / 2);
+      const aboveTrendQuality = clamp01(aboveTrendRatio);
       const score = clamp01(
-        0.45 * momentumPercentile + 0.35 * returnPercentile + 0.2 * clamp01((compositeMomentumSpread + 1) / 2)
+        (
+          momentumWeight * momentumPercentile +
+          returnWeight * returnPercentile +
+          spreadWeight * spreadScore +
+          liquidityWeight * liquidityScore +
+          trendWeight * trendQuality +
+          aboveTrendWeight * aboveTrendQuality
+        ) / safeTotalWeight
       );
 
       const rebalancePass = context.featureView.decisionIndex % rebalanceBars === 0;
@@ -65,8 +91,10 @@ export function createRelativeStrengthRotationStrategy(params?: {
       // When adaptive regime is enabled, this correctly uses SMA(720) classification.
       // aboveTrendRatio and compositeTrendScore are secondary — too strict with adaptive.
       const compositeRegime = (marketState as any)?.composite?.regime;
-      const regimePass = compositeRegime === "trend_up" ||
-        (regimeScore >= 0 && aboveTrendRatio >= minAboveTrendRatio && compositeTrendScore >= minCompositeTrend);
+      const regimePass = skipInternalRegimeCheck
+        ? true
+        : compositeRegime === "trend_up" ||
+          (regimeScore >= 0 && aboveTrendRatio >= minAboveTrendRatio && compositeTrendScore >= minCompositeTrend);
       const liquidityPass = liquidityScore >= minLiquidityScore || compositeRegime === "trend_up";
       const heldScore = existingPosition ? score : undefined;
 

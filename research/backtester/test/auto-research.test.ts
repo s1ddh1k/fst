@@ -7,7 +7,7 @@ import {
   calculateAutoResearchMinimumLimit,
   calculateCandidateRiskAdjustedScore,
   compareCandidateEvaluations,
-  createAutoResearchOrchestrator,
+  createAutoResearchOrchestrator as createBaseAutoResearchOrchestrator,
   createComposedScoredStrategy,
   getStrategyFamilies,
   loadLineageSnapshot,
@@ -150,6 +150,17 @@ function buildEvaluation(candidate: NormalizedCandidateProposal, netReturn: numb
   };
 }
 
+function createAutoResearchOrchestrator(
+  deps: Parameters<typeof createBaseAutoResearchOrchestrator>[0]
+) {
+  return createBaseAutoResearchOrchestrator({
+    async resolveCandidateMarkets() {
+      return ["KRW-BTC", "KRW-ETH", "KRW-XRP"];
+    },
+    ...deps
+  });
+}
+
 function buildReferenceCandles(days: number) {
   return Array.from({ length: days + 1 }, (_, index) => ({
     marketCode: "KRW-BTC",
@@ -175,7 +186,7 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
         preparation: [],
         proposedFamilies: [
           {
-            familyId: "momentum-reacceleration-v1",
+            familyId: "relative-momentum-pullback",
             title: "Momentum Reacceleration",
             thesis: "new family proposal",
             timeframe: "1h",
@@ -223,7 +234,7 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
         ],
         candidates: [
           {
-            familyId: "momentum-reacceleration-v1",
+            familyId: "relative-momentum-pullback",
             thesis: "buy strong pullbacks",
             parameters: {
               minStrengthPct: 0.8,
@@ -256,6 +267,9 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
     async evaluateCandidate({ candidate }) {
       return buildEvaluation(candidate, 0.12);
     },
+    async resolveCandidateMarkets() {
+      return ["KRW-BTC", "KRW-ETH", "KRW-XRP"];
+    },
     async prepareActions() {
       return [];
     },
@@ -286,7 +300,7 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
   assert.equal(report.iterations.length, 1);
   assert.equal(report.bestCandidate?.summary.netReturn, 0.12);
   assert.equal(report.bestTradeCandidate?.summary.tradeCount, 20);
-  assert.ok(report.catalog.some((entry) => entry.familyId === "momentum-reacceleration-v1"));
+  assert.ok(report.catalog.some((entry) => entry.familyId === "relative-momentum-pullback"));
 
   const savedReport = JSON.parse(await readFile(path.join(outputDir, "report.json"), "utf8"));
   const savedCatalog = JSON.parse(await readFile(path.join(outputDir, "catalog.json"), "utf8"));
@@ -299,12 +313,12 @@ test("auto research orchestrator iterates, writes artifacts, and promotes best c
   const savedRunLog = await readFile(path.join(outputDir, "run.log"), "utf8");
   const savedHtml = await readFile(path.join(outputDir, "report.html"), "utf8");
 
-  assert.ok(savedCatalog.some((entry: { familyId: string }) => entry.familyId === "momentum-reacceleration-v1"));
+  assert.ok(savedCatalog.some((entry: { familyId: string }) => entry.familyId === "relative-momentum-pullback"));
   assert.ok(savedCatalogSummary.totals.families >= 1);
-  assert.equal(savedReport.bestCandidate.candidate.familyId, "momentum-reacceleration-v1");
+  assert.equal(savedReport.bestCandidate.candidate.familyId, "relative-momentum-pullback");
   assert.match(savedIteration.review.summary, /promote winner/);
   assert.equal(savedStatus.phase, "completed");
-  assert.equal(savedLeaderboard[0].candidateId, "momentum-reacceleration-v1-01");
+  assert.equal(savedLeaderboard[0].candidateId, "relative-momentum-pullback-01");
   assert.match(savedRunLog, /auto-research/);
   assert.match(savedHtml, /Leaderboard/);
   assert.match(savedHtml, /Cross-Checks/);
@@ -345,6 +359,9 @@ test("auto research review failure marks the run failed instead of synthesizing 
     llmClient,
     async evaluateCandidate({ candidate }) {
       return buildEvaluation(candidate, 0.03);
+    },
+    async resolveCandidateMarkets() {
+      return ["KRW-BTC", "KRW-ETH", "KRW-XRP"];
     },
     async prepareActions() {
       return [];
@@ -415,6 +432,9 @@ test("auto research review failure no longer auto-promotes a promotable winner",
     llmClient,
     async evaluateCandidate({ candidate }) {
       return buildEvaluation(candidate, 0.12);
+    },
+    async resolveCandidateMarkets() {
+      return ["KRW-BTC", "KRW-ETH", "KRW-XRP"];
     },
     async prepareActions() {
       return [];
@@ -505,6 +525,9 @@ test("auto research final keep_searching promotes an eligible candidate instead 
     llmClient,
     async evaluateCandidate({ candidate }) {
       return buildEvaluation(candidate, 0.11);
+    },
+    async resolveCandidateMarkets() {
+      return ["KRW-BTC", "KRW-ETH", "KRW-XRP"];
     },
     async prepareActions() {
       return [];
@@ -604,6 +627,9 @@ test("auto research replaces blocked llm promotions with the highest eligible ca
 
       return evaluation;
     },
+    async resolveCandidateMarkets() {
+      return ["KRW-BTC", "KRW-ETH", "KRW-XRP"];
+    },
     async prepareActions() {
       return [];
     },
@@ -682,6 +708,9 @@ test("auto research rejects keep_searching reviews that omit next candidates", a
     llmClient,
     async evaluateCandidate({ candidate }) {
       return buildEvaluation(candidate, candidate.candidateId.includes("fallback") ? 0.03 : 0.02);
+    },
+    async resolveCandidateMarkets() {
+      return ["KRW-BTC", "KRW-ETH", "KRW-XRP"];
     },
     async prepareActions() {
       return [];
@@ -799,6 +828,9 @@ test("auto research dedupes duplicate keep_searching candidates without inventin
     async evaluateCandidate({ candidate }) {
       return buildEvaluation(candidate, candidate.candidateId.includes("fallback") ? 0.04 : 0.02);
     },
+    async resolveCandidateMarkets() {
+      return ["KRW-BTC", "KRW-ETH", "KRW-XRP"];
+    },
     async prepareActions() {
       return [];
     },
@@ -912,6 +944,9 @@ test("auto research review sees only the evaluated candidate batch", async () =>
     llmClient,
     async evaluateCandidate({ candidate }) {
       return buildEvaluation(candidate, 0.03);
+    },
+    async resolveCandidateMarkets() {
+      return ["KRW-BTC", "KRW-ETH", "KRW-XRP"];
     },
     async prepareActions() {
       return [];
@@ -1941,7 +1976,7 @@ test("auto research resume continues from saved run-state", async () => {
   assert.equal(proposeCalls, 1);
   const resumedStatus = JSON.parse(await readFile(path.join(outputDir, "status.json"), "utf8"));
   const resumedLog = await readFile(path.join(outputDir, "run.log"), "utf8");
-  assert.equal(resumedStatus.phase, "partial");
+  assert.equal(resumedStatus.phase, "completed");
   assert.match(resumedLog, /iteration 2\/2/);
 });
 
@@ -2633,6 +2668,36 @@ test("promotion gate blocks fragile candidates and accepts robust ones", () => {
   );
   assert.equal(passesPromotionGate(robust), true);
   assert.equal(passesPromotionGate(weak), false);
+
+  const weakWorstWindow = buildEvaluation(
+    {
+      netReturn: 0.12,
+      maxDrawdown: 0.08,
+      tradeCount: 18,
+      randomPercentile: 0.71,
+      bootstrapSignificant: true
+    },
+    {
+      candidateId: "fragile-worst-window",
+      familyId: "breakout",
+      strategyName: "fragileWorstWindow",
+      thesis: "fragile worst window",
+      parameters: {
+        breakoutLookback: 16,
+        strengthFloor: 0.72,
+        maxExtensionAtr: 1.4,
+        trailAtrMult: 2.1
+      },
+      invalidationSignals: []
+    },
+    0.01
+  );
+  weakWorstWindow.diagnostics.windows.windowCount = 4;
+  weakWorstWindow.diagnostics.windows.positiveWindowRatio = 0.75;
+  weakWorstWindow.diagnostics.windows.worstWindowNetReturn = -0.08;
+  weakWorstWindow.diagnostics.windows.totalClosedTrades = 18;
+
+  assert.equal(passesPromotionGate(weakWorstWindow), false);
 });
 
 test("auto research marks invalid walk-forward configs before the first proposal", async () => {
@@ -3099,6 +3164,111 @@ test("auto research warm-starts iteration one with external artifact seeds", asy
   });
 
   assert.equal(evaluatedOrigins.length, 3);
+  assert.ok(evaluatedOrigins.includes("artifact_seed"));
+});
+
+test("auto research accepts strategy-followup artifacts that use strategyName instead of familyId", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-auto-research-followup-seeded-"));
+  const artifactPath = path.join(outputDir, "followup-report.json");
+  const family = getStrategyFamilies(["relative-momentum-pullback"])[0];
+
+  assert.ok(family);
+
+  await writeFile(
+    artifactPath,
+    `${JSON.stringify({
+      topOverall: [
+        {
+          strategyName: family.familyId,
+          parameters: {
+            minStrengthPct: 0.72,
+            minRiskOn: 0.05,
+            pullbackZ: 0.9,
+            trailAtrMult: 1.8
+          },
+          avgTestReturn: 0.06,
+          executedTradeCount: 18,
+          neighborPositiveRate: 0.67
+        }
+      ]
+    }, null, 2)}\n`
+  );
+
+  const evaluatedOrigins: Array<string | undefined> = [];
+  const llmClient: ResearchLlmClient = {
+    async proposeCandidates() {
+      return {
+        researchSummary: "one llm candidate",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: "llm-only-01",
+            familyId: family.familyId,
+            thesis: "LLM midpoint candidate",
+            parameters: {
+              minStrengthPct: 0.8,
+              minRiskOn: 0.1,
+              pullbackZ: 0.9,
+              trailAtrMult: 2.2
+            },
+            invalidationSignals: ["edge is weak"]
+          }
+        ]
+      };
+    },
+    async reviewIteration() {
+      return {
+        summary: "stop after seeded iteration",
+        verdict: "stop_no_edge",
+        nextPreparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        nextCandidates: [],
+        retireCandidateIds: [],
+        observations: []
+      };
+    }
+  };
+
+  const orchestrator = createAutoResearchOrchestrator({
+    llmClient,
+    async evaluateCandidate({ candidate }) {
+      evaluatedOrigins.push(candidate.origin);
+      return buildEvaluation(candidate, candidate.origin === "artifact_seed" ? 0.03 : 0.01);
+    },
+    async prepareActions() {
+      return [];
+    },
+    codeAgent: {
+      async execute() {
+        return [];
+      }
+    }
+  });
+
+  await orchestrator.run({
+    strategyFamilyIds: [family.familyId],
+    universeName: "krw-top",
+    timeframe: "1h",
+    marketLimit: 3,
+    limit: 2000,
+    holdoutDays: 30,
+    trainingDays: 90,
+    stepDays: 30,
+    iterations: 1,
+    candidatesPerIteration: 2,
+    parallelism: 1,
+    mode: "holdout",
+    outputDir,
+    allowDataCollection: false,
+    allowFeatureCacheBuild: false,
+    allowCodeMutation: false,
+    seedArtifactPaths: [artifactPath],
+    seedCandidatesPerIteration: 1
+  });
+
   assert.ok(evaluatedOrigins.includes("artifact_seed"));
 });
 

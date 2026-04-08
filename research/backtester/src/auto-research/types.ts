@@ -453,6 +453,7 @@ export type AutoResearchRunConfig = {
   minNetReturnForPromotion?: number;
   maxDrawdownForPromotion?: number;
   minPositiveWindowRatioForPromotion?: number;
+  minWorstWindowNetReturnForPromotion?: number;
   minRandomPercentileForPromotion?: number;
   requireBootstrapSignificanceForPromotion?: boolean;
   maxNoTradeIterations?: number;
@@ -546,4 +547,3 @@ export type ValidatedBlockCatalog = {
   blocks: ValidatedBlock[];
   updatedAt: string;
 };
-

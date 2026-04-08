@@ -47,6 +47,37 @@ test("Phase 0: full-grid normalization fills synthetic candles across 15m bars",
   assert.equal(normalized.candlesByMarket["KRW-A"][1]?.closePrice, 100);
 });
 
+test("Phase 0: full-grid normalization keeps earliest timeline and backfills late-listed markets", () => {
+  const longHistory = createCandles({
+    marketCode: "KRW-A",
+    timeframe: "1h",
+    closes: [100, 101, 102, 103],
+    startTime: "2024-01-01T00:00:00.000Z"
+  });
+  const lateListed = createCandles({
+    marketCode: "KRW-B",
+    timeframe: "1h",
+    closes: [200, 201],
+    startTime: "2024-01-01T02:00:00.000Z"
+  });
+
+  const normalized = normalizeToFullGrid({
+    timeframe: "1h",
+    candlesByMarket: {
+      "KRW-A": longHistory,
+      "KRW-B": lateListed
+    }
+  });
+
+  assert.equal(normalized.timeline.length, 4);
+  assert.equal(normalized.timeline[0]?.toISOString(), "2024-01-01T00:00:00.000Z");
+  assert.equal(normalized.candlesByMarket["KRW-B"].length, 4);
+  assert.equal(normalized.candlesByMarket["KRW-B"][0]?.isSynthetic, true);
+  assert.equal(normalized.candlesByMarket["KRW-B"][0]?.volume, 0);
+  assert.equal(normalized.candlesByMarket["KRW-B"][0]?.closePrice, 200);
+  assert.equal(normalized.candlesByMarket["KRW-B"][2]?.isSynthetic, false);
+});
+
 test("Phase 0: point-in-time universe snapshot builder avoids lookahead", () => {
   const candleSet = normalizeToFullGrid({
     timeframe: "15m",
@@ -85,6 +116,95 @@ test("Phase 0: point-in-time universe snapshot builder avoids lookahead", () => 
   );
 });
 
+test("Phase 0: universe snapshot builder excludes late-listed markets until min history is met", () => {
+  const candleSet = normalizeToFullGrid({
+    timeframe: "1h",
+    candlesByMarket: {
+      "KRW-A": createCandles({
+        marketCode: "KRW-A",
+        timeframe: "1h",
+        closes: [100, 101, 102, 103, 104, 105],
+        volumes: [100, 100, 100, 100, 100, 100],
+        startTime: "2024-01-01T00:00:00.000Z"
+      }),
+      "KRW-B": createCandles({
+        marketCode: "KRW-B",
+        timeframe: "1h",
+        closes: [200, 210, 220],
+        volumes: [1000, 1000, 1000],
+        startTime: "2024-01-01T03:00:00.000Z"
+      })
+    }
+  });
+
+  const snapshots = buildUniverseSnapshots({
+    candleSet,
+    config: {
+      topN: 2,
+      lookbackBars: 2,
+      refreshEveryBars: 1,
+      minHistoryBars: 2
+    }
+  });
+
+  assert.deepEqual(
+    snapshots.get("2024-01-01T03:00:00.000Z")?.markets,
+    ["KRW-A"]
+  );
+  assert.deepEqual(
+    snapshots.get("2024-01-01T04:00:00.000Z")?.markets,
+    ["KRW-B", "KRW-A"]
+  );
+});
+
+test("Phase 0: universe snapshot builder can shrink topN by cumulative quote-volume share", () => {
+  const candleSet = normalizeToFullGrid({
+    timeframe: "1h",
+    candlesByMarket: {
+      "KRW-A": createCandles({
+        marketCode: "KRW-A",
+        timeframe: "1h",
+        closes: [100, 100, 100],
+        volumes: [100, 100, 100]
+      }),
+      "KRW-B": createCandles({
+        marketCode: "KRW-B",
+        timeframe: "1h",
+        closes: [100, 100, 100],
+        volumes: [60, 60, 60]
+      }),
+      "KRW-C": createCandles({
+        marketCode: "KRW-C",
+        timeframe: "1h",
+        closes: [100, 100, 100],
+        volumes: [10, 10, 10]
+      }),
+      "KRW-D": createCandles({
+        marketCode: "KRW-D",
+        timeframe: "1h",
+        closes: [100, 100, 100],
+        volumes: [5, 5, 5]
+      })
+    }
+  });
+
+  const snapshots = buildUniverseSnapshots({
+    candleSet,
+    config: {
+      topN: 4,
+      minTopN: 2,
+      targetQuoteVolumeShare: 0.9,
+      lookbackBars: 2,
+      refreshEveryBars: 1
+    }
+  });
+
+  assert.deepEqual(
+    snapshots.get("2024-01-01T01:00:00.000Z")?.markets,
+    ["KRW-A", "KRW-B"]
+  );
+});
+
 test("Phase 1-4: multi-strategy backtest enforces duplicate-market blocking and next-bar fills", () => {
   const result = runMultiStrategyBacktest({
     universeName: "krw-top",
@@ -119,6 +239,18 @@ test("Phase 1-4: multi-strategy backtest enforces duplicate-market blocking and 
       })
     ],
     decisionCandles: {
+      "1h": {
+        "KRW-A": createCandles({
+          marketCode: "KRW-A",
+          timeframe: "1h",
+          closes: [100, 102, 105, 107, 110, 112]
+        }),
+        "KRW-B": createCandles({
+          marketCode: "KRW-B",
+          timeframe: "1h",
+          closes: [100, 100, 101, 101, 101, 101]
+        })
+      },
       "15m": {
         "KRW-A": createCandles({
           marketCode: "KRW-A",
@@ -157,6 +289,18 @@ test("Phase 1-4: multi-strategy backtest enforces duplicate-market blocking and 
       }
     },
     executionCandles: {
+      "1h": {
+        "KRW-A": createCandles({
+          marketCode: "KRW-A",
+          timeframe: "1h",
+          closes: [100, 102, 105, 107, 110, 112]
+        }),
+        "KRW-B": createCandles({
+          marketCode: "KRW-B",
+          timeframe: "1h",
+          closes: [100, 100, 101, 101, 101, 101]
+        })
+      },
       "5m": {
         "KRW-A": createCandles({
           marketCode: "KRW-A",

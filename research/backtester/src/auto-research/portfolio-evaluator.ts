@@ -27,6 +27,15 @@ type PortfolioCandleData = {
   referenceCandles: Candle[];
 };
 
+type PortfolioWindowEvaluation = {
+  result: MultiStrategyBacktestResult;
+  summary: MultiStrategyBacktestResult["metrics"];
+  completedTrades: MultiStrategyBacktestResult["completedTrades"];
+  decisionCoverage: MultiStrategyBacktestResult["decisionCoverageSummary"];
+  universeCoverage: MultiStrategyBacktestResult["universeCoverageSummary"];
+  ghostSignalCount: number;
+};
+
 function selectPortfolioEvaluationMarkets(params: {
   marketCodes: string[];
   requiredTimeframes: StrategyTimeframe[];
@@ -348,10 +357,11 @@ function runPortfolioRangeBacktest(params: {
   config: AutoResearchRunConfig;
   runtime: PortfolioRuntime;
   candleData: PortfolioCandleData;
-  range: { start: Date; end: Date };
+  simulationRange: { start: Date; end: Date };
+  evaluationRange: { start: Date; end: Date };
   candidate: NormalizedCandidateProposal;
   blockCatalog?: ValidatedBlockCatalog;
-}): MultiStrategyBacktestResult {
+}): PortfolioWindowEvaluation {
   const slicedSetCache = new Map<FullGridCandleSet, FullGridCandleSet>();
   const getSlicedSet = (candleSet: FullGridCandleSet | undefined): FullGridCandleSet | undefined => {
     if (!candleSet) {
@@ -363,7 +373,7 @@ function runPortfolioRangeBacktest(params: {
       return cached;
     }
 
-    const sliced = sliceFullGridCandleSetByRange(candleSet, params.range);
+    const sliced = sliceFullGridCandleSetByRange(candleSet, params.simulationRange);
     slicedSetCache.set(candleSet, sliced);
     return sliced;
   };
@@ -376,7 +386,12 @@ function runPortfolioRangeBacktest(params: {
       .filter((entry): entry is readonly [string, FullGridCandleSet] => entry !== undefined)
   ) as Partial<Record<StrategyTimeframe, FullGridCandleSet>>;
   const executionSets = Object.fromEntries(
-    Object.entries(params.candleData.normalizedExecutionSets)
+    Array.from(
+      new Map([
+        ...Object.entries(params.candleData.normalizedExecutionSets),
+        ...Object.entries(decisionSets)
+      ]).entries()
+    )
       .map(([timeframe, candleSet]) => {
         const sliced = getSlicedSet(candleSet);
         return sliced ? ([timeframe, sliced] as const) : undefined;
@@ -397,7 +412,7 @@ function runPortfolioRangeBacktest(params: {
     normalizedDecisionSets: decisionSets
   });
 
-  return runMultiStrategyBacktest({
+  const rawResult = runMultiStrategyBacktest({
     universeName: params.config.universeName,
     initialCapital: 1_000_000,
     sleeves: params.runtime.sleeves,
@@ -411,7 +426,7 @@ function runPortfolioRangeBacktest(params: {
     preNormalizedDecisionSets: decisionSets,
     preNormalizedExecutionSets: executionSets,
     precomputedUniverseSnapshotsByTf: universeSnapshotsByTf,
-    captureTraceArtifacts: false,
+    captureTraceArtifacts: true,
     captureUniverseSnapshots: false,
     universeConfig: {
       topN: Math.min(params.runtime.universeTopN, params.config.marketLimit, referenceMarketCount),
@@ -422,6 +437,12 @@ function runPortfolioRangeBacktest(params: {
     maxCapitalUsagePct: params.runtime.maxCapitalUsagePct,
     cooldownBarsAfterLoss: params.runtime.cooldownBarsAfterLoss,
     minBarsBetweenEntries: params.runtime.minBarsBetweenEntries
+  });
+
+  return evaluatePortfolioWindow({
+    result: rawResult,
+    evaluationRange: params.evaluationRange,
+    universeSnapshotsByTf
   });
 }
 
@@ -460,6 +481,179 @@ function universeSizeSummary(result: MultiStrategyBacktestResult): {
   };
 }
 
+function calculateDrawdown(equityCurve: number[]): number {
+  let peak = equityCurve[0] ?? 0;
+  let maxDrawdown = 0;
+
+  for (const equity of equityCurve) {
+    peak = Math.max(peak, equity);
+    const drawdown = peak === 0 ? 0 : (peak - equity) / peak;
+    maxDrawdown = Math.max(maxDrawdown, drawdown);
+  }
+
+  return maxDrawdown;
+}
+
+function sliceEquityWindow(params: {
+  equityCurve: number[];
+  equityTimeline: Date[];
+  evaluationRange: { start: Date; end: Date };
+}): number[] {
+  const startMs = params.evaluationRange.start.getTime();
+  const endMs = params.evaluationRange.end.getTime();
+  let startIndex = 0;
+
+  for (let index = 0; index < params.equityTimeline.length; index += 1) {
+    const timeMs = params.equityTimeline[index]?.getTime() ?? Number.POSITIVE_INFINITY;
+    if (timeMs <= startMs) {
+      startIndex = index;
+      continue;
+    }
+    break;
+  }
+
+  let endIndex = params.equityTimeline.length - 1;
+  for (let index = startIndex; index < params.equityTimeline.length; index += 1) {
+    const timeMs = params.equityTimeline[index]?.getTime() ?? Number.NEGATIVE_INFINITY;
+    if (timeMs > endMs) {
+      endIndex = Math.max(startIndex, index - 1);
+      break;
+    }
+  }
+
+  return params.equityCurve.slice(startIndex, endIndex + 1);
+}
+
+function summarizeUniverseCoverageForRange(params: {
+  universeSnapshotsByTf: Partial<Record<StrategyTimeframe, Map<string, UniverseSnapshot>>>;
+  evaluationRange: { start: Date; end: Date };
+}): MultiStrategyBacktestResult["universeCoverageSummary"] {
+  const startMs = params.evaluationRange.start.getTime();
+  const endMs = params.evaluationRange.end.getTime();
+  let total = 0;
+  let min = Number.POSITIVE_INFINITY;
+  let max = 0;
+  let observationCount = 0;
+
+  for (const snapshotMap of Object.values(params.universeSnapshotsByTf)) {
+    if (!snapshotMap) {
+      continue;
+    }
+
+    for (const snapshot of snapshotMap.values()) {
+      const timeMs = snapshot.asOf.getTime();
+      if (timeMs < startMs || timeMs > endMs) {
+        continue;
+      }
+      const size = snapshot.markets.length;
+      total += size;
+      min = Math.min(min, size);
+      max = Math.max(max, size);
+      observationCount += 1;
+    }
+  }
+
+  return {
+    avg: observationCount === 0 ? 0 : total / observationCount,
+    min: Number.isFinite(min) ? min : 0,
+    max: observationCount === 0 ? 0 : max,
+    observationCount
+  };
+}
+
+function evaluatePortfolioWindow(params: {
+  result: MultiStrategyBacktestResult;
+  evaluationRange: { start: Date; end: Date };
+  universeSnapshotsByTf: Partial<Record<StrategyTimeframe, Map<string, UniverseSnapshot>>>;
+}): PortfolioWindowEvaluation {
+  const startMs = params.evaluationRange.start.getTime();
+  const endMs = params.evaluationRange.end.getTime();
+  const completedTrades = params.result.completedTrades.filter(
+    (trade) => trade.exitTime.getTime() >= startMs && trade.exitTime.getTime() <= endMs
+  );
+  const rawSignals = params.result.rawSignals.filter((signal) => {
+    const timeMs = signal.decisionTime.getTime();
+    return timeMs >= startMs && timeMs <= endMs;
+  });
+  const decisions = params.result.decisions.filter((decision) => {
+    const timeMs = decision.time.getTime();
+    return timeMs >= startMs && timeMs <= endMs;
+  });
+  const fills = params.result.fills.filter((fill) => {
+    const timeMs = fill.fillTime?.getTime();
+    return timeMs !== undefined && timeMs >= startMs && timeMs <= endMs;
+  });
+  const equityCurve = sliceEquityWindow({
+    equityCurve: params.result.equityCurve,
+    equityTimeline: params.result.equityTimeline,
+    evaluationRange: params.evaluationRange
+  });
+  const startEquity = equityCurve[0] ?? 0;
+  const endEquity = equityCurve[equityCurve.length - 1] ?? startEquity;
+  const filledNotional = fills.reduce((sum, fill) => sum + (fill.filledNotional ?? 0), 0);
+  const feePaid = fills.reduce((sum, fill) => sum + fill.feePaid, 0);
+  const slippagePaid = fills.reduce((sum, fill) => sum + fill.slippagePaid, 0);
+  const rawBuySignals = rawSignals.filter((signal) => signal.signal === "BUY").length;
+  const rawSellSignals = rawSignals.filter((signal) => signal.signal === "SELL").length;
+  const rawHoldSignals = rawSignals.filter((signal) => signal.signal === "HOLD").length;
+  const blockedSignalCount = decisions.reduce((sum, decision) => sum + decision.blockedSignals.length, 0);
+  const cooldownSkipsCount = decisions.reduce(
+    (sum, decision) =>
+      sum +
+      decision.blockedSignals.filter((signal) => /cooldown/i.test(signal.reason)).length,
+    0
+  );
+  const rejectedOrdersCount = fills.filter((fill) => fill.status === "REJECTED").length;
+  const winningTrades = completedTrades.filter((trade) => trade.netPnl > 0).length;
+  const holdBars = completedTrades.map((trade) => {
+    const diffMs = trade.exitTime.getTime() - trade.entryTime.getTime();
+    return diffMs / (60 * 60 * 1000);
+  });
+  const universeCoverage = summarizeUniverseCoverageForRange({
+    universeSnapshotsByTf: params.universeSnapshotsByTf,
+    evaluationRange: params.evaluationRange
+  });
+
+  return {
+    result: params.result,
+    summary: {
+      grossReturn: startEquity === 0 ? 0 : (endEquity + feePaid + slippagePaid - startEquity) / startEquity,
+      netReturn: startEquity === 0 ? 0 : (endEquity - startEquity) / startEquity,
+      turnover: startEquity === 0 ? 0 : filledNotional / startEquity,
+      winRate: completedTrades.length === 0 ? 0 : winningTrades / completedTrades.length,
+      avgHoldBars: holdBars.length === 0 ? 0 : holdBars.reduce((sum, value) => sum + value, 0) / holdBars.length,
+      maxDrawdown: calculateDrawdown(equityCurve),
+      feePaid,
+      slippagePaid,
+      rejectedOrdersCount,
+      cooldownSkipsCount,
+      signalCount: rawSignals.length,
+      blockedSignalCount,
+      openPositionCount: params.result.finalPositions.length
+    },
+    completedTrades,
+    decisionCoverage: {
+      observationCount: decisions.length,
+      rawBuySignals,
+      rawSellSignals,
+      rawHoldSignals,
+      avgConsideredBuys: decisions.length === 0
+        ? 0
+        : decisions.reduce((sum, decision) => sum + decision.intents.filter((intent) => intent.side === "BUY").length, 0) /
+          decisions.length,
+      avgEligibleBuys: decisions.length === 0
+        ? 0
+        : decisions.reduce(
+          (sum, decision) =>
+            sum + decision.intents.filter((intent) => intent.side === "BUY").length,
+          0
+        ) / decisions.length
+    },
+    universeCoverage,
+    ghostSignalCount: rawSignals.filter((signal) => signal.signal === "BUY").length
+  };
+}
+
 function buildWalkForwardCrossCheck(
   evaluation: CandidateBacktestEvaluation
 ): CandidateBacktestEvaluation["diagnostics"]["crossChecks"][number] {
@@ -484,14 +678,14 @@ function buildWalkForwardCrossCheck(
 
 function shouldSkipPortfolioHoldoutCrossCheck(params: {
   requiredTimeframes: StrategyTimeframe[];
-  testResult: MultiStrategyBacktestResult;
+  testResult: PortfolioWindowEvaluation;
 }): { skip: boolean; reason?: string } {
   if (!params.requiredTimeframes.includes("1m")) {
     return { skip: false };
   }
 
   const tradeCount = params.testResult.completedTrades.length;
-  const netReturn = params.testResult.metrics.netReturn;
+  const netReturn = params.testResult.summary.netReturn;
 
   if (tradeCount === 0) {
     return {
@@ -535,32 +729,32 @@ function buildHoldoutEvaluation(params: {
   availableSpan: ReturnType<typeof summarizeReferenceCandleSpan>;
   trainRange: { start: Date; end: Date };
   testRange: { start: Date; end: Date };
-  testResult: MultiStrategyBacktestResult;
+  testResult: PortfolioWindowEvaluation;
   crossChecks?: CandidateBacktestEvaluation["diagnostics"]["crossChecks"];
   crossCheckWindows?: Partial<CandidateBacktestEvaluation["diagnostics"]["windows"]>;
 }): CandidateBacktestEvaluation {
-  const testUniverse = universeSizeSummary(params.testResult);
-  const signalCount = params.testResult.metrics.signalCount;
-  const ghostSignalCount = toGhostSignalCount(params.testResult);
-  const decisionCoverage = params.testResult.decisionCoverageSummary;
+  const testUniverse = params.testResult.universeCoverage;
+  const signalCount = params.testResult.summary.signalCount;
+  const ghostSignalCount = params.testResult.ghostSignalCount;
+  const decisionCoverage = params.testResult.decisionCoverage;
 
   return {
     candidate: params.candidate,
     mode: "holdout",
     status: "completed",
     summary: {
-      totalReturn: params.testResult.metrics.netReturn,
-      grossReturn: params.testResult.metrics.grossReturn,
-      netReturn: params.testResult.metrics.netReturn,
-      maxDrawdown: params.testResult.metrics.maxDrawdown,
-      turnover: params.testResult.metrics.turnover,
-      winRate: params.testResult.metrics.winRate,
-      avgHoldBars: params.testResult.metrics.avgHoldBars,
+      totalReturn: params.testResult.summary.netReturn,
+      grossReturn: params.testResult.summary.grossReturn,
+      netReturn: params.testResult.summary.netReturn,
+      maxDrawdown: params.testResult.summary.maxDrawdown,
+      turnover: params.testResult.summary.turnover,
+      winRate: params.testResult.summary.winRate,
+      avgHoldBars: params.testResult.summary.avgHoldBars,
       tradeCount: params.testResult.completedTrades.length,
-      feePaid: params.testResult.metrics.feePaid,
-      slippagePaid: params.testResult.metrics.slippagePaid,
-      rejectedOrdersCount: params.testResult.metrics.rejectedOrdersCount,
-      cooldownSkipsCount: params.testResult.metrics.cooldownSkipsCount,
+      feePaid: params.testResult.summary.feePaid,
+      slippagePaid: params.testResult.summary.slippagePaid,
+      rejectedOrdersCount: params.testResult.summary.rejectedOrdersCount,
+      cooldownSkipsCount: params.testResult.summary.cooldownSkipsCount,
       signalCount,
       ghostSignalCount
     },
@@ -569,8 +763,8 @@ function buildHoldoutEvaluation(params: {
         tradeCount: params.testResult.completedTrades.length,
         signalCount,
         ghostSignalCount,
-        rejectedOrdersCount: params.testResult.metrics.rejectedOrdersCount,
-        cooldownSkipsCount: params.testResult.metrics.cooldownSkipsCount,
+        rejectedOrdersCount: params.testResult.summary.rejectedOrdersCount,
+        cooldownSkipsCount: params.testResult.summary.cooldownSkipsCount,
         rawBuySignals: decisionCoverage.rawBuySignals,
         rawSellSignals: decisionCoverage.rawSellSignals,
         rawHoldSignals: decisionCoverage.rawHoldSignals,
@@ -581,20 +775,20 @@ function buildHoldoutEvaluation(params: {
         avgEligibleBuys: decisionCoverage.avgEligibleBuys
       },
       reasons: {
-        strategy: flattenFunnel(params.testResult),
+        strategy: flattenFunnel(params.testResult.result),
         strategyTags: {},
         coordinator: {
-          blocked_signals: params.testResult.metrics.blockedSignalCount
+          blocked_signals: params.testResult.summary.blockedSignalCount
         },
         execution: {
-          rejected_orders: params.testResult.metrics.rejectedOrdersCount
+          rejected_orders: params.testResult.summary.rejectedOrdersCount
         },
         risk: {}
       },
       costs: {
-        feePaid: params.testResult.metrics.feePaid,
-        slippagePaid: params.testResult.metrics.slippagePaid,
-        totalCostsPaid: params.testResult.metrics.feePaid + params.testResult.metrics.slippagePaid
+        feePaid: params.testResult.summary.feePaid,
+        slippagePaid: params.testResult.summary.slippagePaid,
+        totalCostsPaid: params.testResult.summary.feePaid + params.testResult.summary.slippagePaid
       },
       robustness: {},
       crossChecks: params.crossChecks ?? [],
@@ -658,34 +852,38 @@ function buildPortfolioWalkForwardEvaluation(params: {
       config: params.config,
       runtime: params.runtime,
       candleData: params.candleData,
-      range: window.testRange,
+      simulationRange: {
+        start: window.trainRange.start,
+        end: window.testRange.end
+      },
+      evaluationRange: window.testRange,
       candidate: params.candidate,
       blockCatalog: params.blockCatalog
     })
   }));
 
-  const testReturns = results.map((window) => window.test.metrics.netReturn);
-  const testDrawdowns = results.map((window) => window.test.metrics.maxDrawdown);
+  const testReturns = results.map((window) => window.test.summary.netReturn);
+  const testDrawdowns = results.map((window) => window.test.summary.maxDrawdown);
   const positiveWindowCount = testReturns.filter((value) => value > 0).length;
   const negativeWindowCount = testReturns.filter((value) => value < 0).length;
   const totalClosedTrades = results.reduce((sum, window) => sum + window.test.completedTrades.length, 0);
-  const signalCount = results.reduce((sum, window) => sum + window.test.metrics.signalCount, 0);
-  const ghostSignalCount = results.reduce((sum, window) => sum + toGhostSignalCount(window.test), 0);
+  const signalCount = results.reduce((sum, window) => sum + window.test.summary.signalCount, 0);
+  const ghostSignalCount = results.reduce((sum, window) => sum + window.test.ghostSignalCount, 0);
   const rejectedOrdersCount = results.reduce(
-    (sum, window) => sum + window.test.metrics.rejectedOrdersCount,
+    (sum, window) => sum + window.test.summary.rejectedOrdersCount,
     0
   );
   const cooldownSkipsCount = results.reduce(
-    (sum, window) => sum + window.test.metrics.cooldownSkipsCount,
+    (sum, window) => sum + window.test.summary.cooldownSkipsCount,
     0
   );
-  const feePaid = results.reduce((sum, window) => sum + window.test.metrics.feePaid, 0);
-  const slippagePaid = results.reduce((sum, window) => sum + window.test.metrics.slippagePaid, 0);
+  const feePaid = results.reduce((sum, window) => sum + window.test.summary.feePaid, 0);
+  const slippagePaid = results.reduce((sum, window) => sum + window.test.summary.slippagePaid, 0);
   const totalDecisionObservations = results.reduce(
-    (sum, window) => sum + window.test.decisionCoverageSummary.observationCount,
+    (sum, window) => sum + window.test.decisionCoverage.observationCount,
     0
   );
-  const universeStats = results.map((window) => universeSizeSummary(window.test));
+  const universeStats = results.map((window) => window.test.universeCoverage);
   const totalUniverseObservations = universeStats.reduce(
     (sum, window) => sum + window.observationCount,
     0
@@ -708,15 +906,15 @@ function buildPortfolioWalkForwardEvaluation(params: {
     maxUniverseSize = Math.max(maxUniverseSize, window.max);
   }
   const rawBuySignals = results.reduce(
-    (sum, window) => sum + window.test.decisionCoverageSummary.rawBuySignals,
+    (sum, window) => sum + window.test.decisionCoverage.rawBuySignals,
     0
   );
   const rawSellSignals = results.reduce(
-    (sum, window) => sum + window.test.decisionCoverageSummary.rawSellSignals,
+    (sum, window) => sum + window.test.decisionCoverage.rawSellSignals,
     0
   );
   const rawHoldSignals = results.reduce(
-    (sum, window) => sum + window.test.decisionCoverageSummary.rawHoldSignals,
+    (sum, window) => sum + window.test.decisionCoverage.rawHoldSignals,
     0
   );
   const avgConsideredBuys = totalDecisionObservations === 0
@@ -724,8 +922,8 @@ function buildPortfolioWalkForwardEvaluation(params: {
     : results.reduce(
       (sum, window) =>
         sum +
-        (window.test.decisionCoverageSummary.avgConsideredBuys *
-          window.test.decisionCoverageSummary.observationCount),
+        (window.test.decisionCoverage.avgConsideredBuys *
+          window.test.decisionCoverage.observationCount),
       0
     ) / totalDecisionObservations;
   const avgEligibleBuys = totalDecisionObservations === 0
@@ -733,8 +931,8 @@ function buildPortfolioWalkForwardEvaluation(params: {
     : results.reduce(
       (sum, window) =>
         sum +
-        (window.test.decisionCoverageSummary.avgEligibleBuys *
-          window.test.decisionCoverageSummary.observationCount),
+        (window.test.decisionCoverage.avgEligibleBuys *
+          window.test.decisionCoverage.observationCount),
       0
     ) / totalDecisionObservations;
 
@@ -774,10 +972,10 @@ function buildPortfolioWalkForwardEvaluation(params: {
     return {
       testStartAt: r.testRange.start.toISOString(),
       testEndAt: r.testRange.end.toISOString(),
-      netReturn: r.test.metrics.netReturn,
-      maxDrawdown: r.test.metrics.maxDrawdown,
+      netReturn: r.test.summary.netReturn,
+      maxDrawdown: r.test.summary.maxDrawdown,
       tradeCount: r.test.completedTrades.length,
-      winRate: r.test.metrics.winRate,
+      winRate: r.test.summary.winRate,
       buyAndHoldReturn: 0,
       dominantRegime,
       regimeDistribution
@@ -791,14 +989,14 @@ function buildPortfolioWalkForwardEvaluation(params: {
     summary: {
       totalReturn: testReturns.reduce((sum, value) => sum + value, 0) / results.length,
       grossReturn:
-        results.reduce((sum, window) => sum + window.test.metrics.grossReturn, 0) / results.length,
+        results.reduce((sum, window) => sum + window.test.summary.grossReturn, 0) / results.length,
       netReturn: testReturns.reduce((sum, value) => sum + value, 0) / results.length,
       maxDrawdown:
-        results.reduce((sum, window) => sum + window.test.metrics.maxDrawdown, 0) / results.length,
-      turnover: results.reduce((sum, window) => sum + window.test.metrics.turnover, 0) / results.length,
-      winRate: results.reduce((sum, window) => sum + window.test.metrics.winRate, 0) / results.length,
+        results.reduce((sum, window) => sum + window.test.summary.maxDrawdown, 0) / results.length,
+      turnover: results.reduce((sum, window) => sum + window.test.summary.turnover, 0) / results.length,
+      winRate: results.reduce((sum, window) => sum + window.test.summary.winRate, 0) / results.length,
       avgHoldBars:
-        results.reduce((sum, window) => sum + window.test.metrics.avgHoldBars, 0) / results.length,
+        results.reduce((sum, window) => sum + window.test.summary.avgHoldBars, 0) / results.length,
       tradeCount: totalClosedTrades / results.length,
       feePaid,
       slippagePaid,
@@ -825,13 +1023,13 @@ function buildPortfolioWalkForwardEvaluation(params: {
       },
       reasons: {
         strategy: results.reduce(
-          (accumulator, window) => mergeReasonMaps(accumulator, flattenFunnel(window.test)),
+          (accumulator, window) => mergeReasonMaps(accumulator, flattenFunnel(window.test.result)),
           {} as Record<string, number>
         ),
         strategyTags: {},
         coordinator: {
           blocked_signals: results.reduce(
-            (sum, window) => sum + window.test.metrics.blockedSignalCount,
+            (sum, window) => sum + window.test.summary.blockedSignalCount,
             0
           )
         },
@@ -906,7 +1104,11 @@ export async function evaluatePortfolioCandidate(params: {
       config: params.config,
       runtime,
       candleData,
-      range: testRange,
+      simulationRange: {
+        start: trainRange.start,
+        end: testRange.end
+      },
+      evaluationRange: testRange,
       candidate: params.candidate,
       blockCatalog: params.blockCatalog
     });

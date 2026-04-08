@@ -254,7 +254,7 @@ test("portfolio auto-research runtime builds bounded multi-timeframe sleeves", (
   );
   assert.deepEqual(
     runtime.strategies.map((strategy) => strategy.decisionTimeframe),
-    ["15m", "1h", "1h"]
+    ["1h", "1h", "1h"]
   );
 
   const trendBurstRuntime = buildPortfolioCandidateRuntime(
@@ -518,7 +518,7 @@ test("portfolio auto-research skips walk-forward cross-check for weak holdout ca
   assert.match(evaluation.diagnostics.crossChecks[0]?.failureMessage ?? "", /Skipped walk-forward cross-check/i);
 });
 
-test("portfolio auto-research rebuilds universe snapshots inside each sliced holdout window", async () => {
+test("portfolio auto-research uses warmup-aware universe snapshots inside each holdout window", async () => {
   const data = buildMockCandleData();
   const evaluation = await evaluatePortfolioCandidate({
     config: buildConfig({
@@ -540,9 +540,9 @@ test("portfolio auto-research rebuilds universe snapshots inside each sliced hol
 
   assert.equal(evaluation.status, "completed");
   assert.equal(evaluation.mode, "holdout");
-  assert.equal(evaluation.summary.signalCount, 0);
-  assert.equal(evaluation.diagnostics.coverage.avgUniverseSize, 0);
-  assert.equal(evaluation.diagnostics.coverage.rawBuySignals, 0);
+  assert.ok(evaluation.summary.signalCount > 0);
+  assert.ok(evaluation.diagnostics.coverage.avgUniverseSize > 0);
+  assert.ok(evaluation.diagnostics.coverage.rawBuySignals > 0);
 });
 
 test("portfolio auto-research evaluates walk-forward candidates and preserves window diagnostics", async () => {

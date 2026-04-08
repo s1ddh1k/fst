@@ -328,6 +328,7 @@ function promotionGateConfig(config: AutoResearchRunConfig) {
     minNetReturn: config.minNetReturnForPromotion,
     maxDrawdown: config.maxDrawdownForPromotion,
     minPositiveWindowRatio: config.minPositiveWindowRatioForPromotion,
+    minWorstWindowNetReturn: config.minWorstWindowNetReturnForPromotion,
     minRandomPercentile: config.minRandomPercentileForPromotion,
     requireBootstrapSignificance: config.requireBootstrapSignificanceForPromotion
   };
@@ -694,7 +695,12 @@ function snapshotFromArtifactNode(node: unknown, sourcePath: string): ArtifactSe
   }
 
   const record = node as Record<string, unknown>;
-  const directFamilyId = typeof record.familyId === "string" ? record.familyId : undefined;
+  const directFamilyId =
+    typeof record.familyId === "string"
+      ? record.familyId
+      : typeof record.strategyName === "string"
+        ? record.strategyName
+        : undefined;
   const directParameters = asNumericParameters(record.parameters);
 
   if (directFamilyId && directParameters) {
@@ -702,11 +708,14 @@ function snapshotFromArtifactNode(node: unknown, sourcePath: string): ArtifactSe
       candidateId: typeof record.candidateId === "string" ? record.candidateId : undefined,
       familyId: directFamilyId,
       parameters: directParameters,
-      netReturn: asFiniteNumber(record.netReturn),
+      netReturn: asFiniteNumber(record.netReturn) ?? asFiniteNumber(record.avgTestReturn),
       maxDrawdown: asFiniteNumber(record.maxDrawdown),
-      tradeCount: asFiniteNumber(record.tradeCount),
-      positiveWindowRatio: asFiniteNumber(record.positiveWindowRatio),
-      score: asFiniteNumber(record.score),
+      tradeCount: asFiniteNumber(record.tradeCount) ?? asFiniteNumber(record.executedTradeCount),
+      positiveWindowRatio:
+        asFiniteNumber(record.positiveWindowRatio) ??
+        asFiniteNumber(record.positiveRate) ??
+        asFiniteNumber(record.neighborPositiveRate),
+      score: asFiniteNumber(record.score) ?? asFiniteNumber(record.avgTestReturn) ?? asFiniteNumber(record.netReturn),
       sourcePath
     };
   }
@@ -780,6 +789,18 @@ function scoreArtifactSeed(snapshot: ArtifactSeedSnapshot): number {
   const tradeBoost = Math.min(snapshot.tradeCount ?? 0, 100) * 0.0002;
   const windowBoost = Math.max(0, snapshot.positiveWindowRatio ?? 0) * 0.01;
   return baseScore + tradeBoost + windowBoost;
+}
+
+function isViableArtifactSeed(snapshot: ArtifactSeedSnapshot): boolean {
+  if (Number.isFinite(snapshot.netReturn) && snapshot.netReturn! <= 0) {
+    return false;
+  }
+
+  if (Number.isFinite(snapshot.tradeCount) && snapshot.tradeCount! < 2) {
+    return false;
+  }
+
+  return true;
 }
 
 function calculateCandidateParameterDistance(
@@ -1466,6 +1487,10 @@ async function buildArtifactSeedCandidates(params: {
     collectArtifactSeedSnapshots(parsed, seedPath, snapshots);
 
     for (const [index, snapshot] of snapshots.entries()) {
+      if (!isViableArtifactSeed(snapshot)) {
+        continue;
+      }
+
       if (!eligibleFamilyIds.has(snapshot.familyId)) {
         continue;
       }
@@ -2651,9 +2676,13 @@ export function createAutoResearchOrchestrator(deps: {
             iteration,
             hiddenFamilyIds
           });
-          // Filter candidates to only include requested families — prevents LLM from
-          // injecting candidates for families outside the current research scope
-          const requestedFamilyIds = new Set(configuredFamilies.map((f) => f.familyId));
+          // Allow configured families plus families proposed in this iteration so new
+          // executable compositions can be evaluated immediately, while still blocking
+          // arbitrary candidate families outside the reviewed proposal scope.
+          const requestedFamilyIds = new Set([
+            ...configuredFamilies.map((f) => f.familyId),
+            ...proposal.proposedFamilies.map((family) => family.familyId)
+          ]);
           normalizedCandidates = topUpCandidatesForEvaluation({
             candidates: (() => {
               const baseCandidates = dedupeCandidates(normalizeCandidates(proposal.candidates, runtimeFamilies))
@@ -3339,6 +3368,15 @@ export function createAutoResearchOrchestrator(deps: {
         }
 
         if (
+          outcome === "partial" &&
+          !abortRequested &&
+          iterations.length >= config.iterations
+        ) {
+          outcome = "completed";
+          outcomeReason = `Configured iterations exhausted after ${iterations.length} iteration(s). Final review verdict was ${iterations[iterations.length - 1]?.review.verdict ?? "unknown"}.`;
+        }
+
+        if (
           outcome === "completed" &&
           iterations.length < config.iterations &&
           outcomeReason === undefined
@@ -3432,23 +3470,6 @@ export function createAutoResearchOrchestrator(deps: {
           });
         }
 
-        // Auto-promote top candidates to paper-trading DB
-        if (outcome === "completed" && config.autoPromote !== false) {
-          try {
-            const promoteResult = await autoPromoteAndLog({
-              outputDir: config.outputDir,
-              maxCandidates: config.autoPromoteMaxCandidates ?? 5,
-              log: (msg) => log(msg)
-            });
-            if (promoteResult.promoted) {
-              await log(`[auto-research] auto-promoted ${promoteResult.publishedCount} candidates to paper-trading`);
-            }
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            await log(`[auto-research] auto-promote failed (non-fatal): ${msg}`);
-          }
-        }
-
         const finalReport = await queueArtifactWrite(() => persistRunArtifacts({
           outputDir: config.outputDir,
           generatedAt: new Date().toISOString(),
@@ -3474,6 +3495,23 @@ export function createAutoResearchOrchestrator(deps: {
             verification
           }
         }));
+
+        // Auto-promote only after final completed state is fully persisted.
+        if (outcome === "completed" && config.autoPromote !== false) {
+          try {
+            const promoteResult = await autoPromoteAndLog({
+              outputDir: config.outputDir,
+              maxCandidates: config.autoPromoteMaxCandidates ?? 5,
+              log: (msg) => log(msg)
+            });
+            if (promoteResult.promoted) {
+              await log(`[auto-research] auto-promoted ${promoteResult.publishedCount} candidates to paper-trading`);
+            }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await log(`[auto-research] auto-promote failed (non-fatal): ${msg}`);
+          }
+        }
 
         return finalReport;
       } finally {

@@ -23,8 +23,11 @@ export type FullGridCandleSet = {
 
 export type UniverseSnapshotBuilderConfig = {
   topN: number;
+  minTopN: number;
   lookbackBars: number;
   refreshEveryBars: number;
+  minHistoryBars: number;
+  targetQuoteVolumeShare: number;
 };
 
 export type SleeveAllocation = {
@@ -176,6 +179,8 @@ export type MultiStrategyBacktestResult = {
   };
   finalAccount: AccountView;
   finalPositions: PositionView[];
+  equityCurve: number[];
+  equityTimeline: Date[];
   rawSignals: StrategySignal[];
   universeSnapshots: UniverseSnapshot[];
   orderIntents: OrderIntent[];

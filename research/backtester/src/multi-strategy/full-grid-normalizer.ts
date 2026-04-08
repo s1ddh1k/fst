@@ -1,5 +1,4 @@
 import type { Candle, StrategyTimeframe } from "../../../../packages/shared/src/index.js";
-import { timeframeToMs } from "./timeframe.js";
 import type { FullGridCandleSet, MarketTimeframeSeries } from "./types.js";
 
 function sortCandles(candles: Candle[]): Candle[] {
@@ -30,23 +29,26 @@ export function normalizeToFullGrid(params: {
     };
   }
 
-  const startMs = Math.max(...markets.map(([, candles]) => candles[0].candleTimeUtc.getTime()));
-  const endMs = Math.min(
-    ...markets.map(([, candles]) => candles[candles.length - 1].candleTimeUtc.getTime())
-  );
-  const stepMs = timeframeToMs(params.timeframe);
-  const timeline: Date[] = [];
+  // Use the longest market as the reference timeline so late-listed markets do not
+  // collapse the entire backtest window to their listing date.
+  const referenceCandles = markets
+    .slice()
+    .sort(([, left], [, right]) => {
+      if (right.length !== left.length) {
+        return right.length - left.length;
+      }
 
-  for (let ts = startMs; ts <= endMs; ts += stepMs) {
-    timeline.push(new Date(ts));
-  }
+      return left[0].candleTimeUtc.getTime() - right[0].candleTimeUtc.getTime();
+    })[0]?.[1] ?? [];
+  const timeline = referenceCandles.map((candle) => new Date(candle.candleTimeUtc.getTime()));
 
   const normalizedByMarket: MarketTimeframeSeries = {};
 
   for (const [market, candles] of markets) {
     const byTime = new Map(candles.map((candle) => [candle.candleTimeUtc.getTime(), candle]));
     const normalized: Candle[] = [];
-    let previousClose: number | null = null;
+    const firstActual = candles[0];
+    let previousClose: number | null = firstActual?.closePrice ?? null;
 
     for (const time of timeline) {
       const actual = byTime.get(time.getTime());

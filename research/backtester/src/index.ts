@@ -34,7 +34,7 @@ import {
   formatMultiStrategyReport,
   runMultiStrategyBacktest
 } from "./multi-strategy/index.js";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
   CliResearchLlmClient,
@@ -85,6 +85,76 @@ function resolveRequiredLimit(params: {
 
 function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+function followupReportHasReusableSeeds(reportPath: string): boolean {
+  try {
+    const report = parseJson<Record<string, unknown>>(readFileSync(reportPath, "utf8"));
+    const seedCandidates = Array.isArray(report.seedCandidates) ? report.seedCandidates : [];
+
+    if (seedCandidates.length > 0) {
+      return true;
+    }
+
+    const fallbackRows = [
+      ...(Array.isArray(report.topOverall) ? report.topOverall : []),
+      ...(Array.isArray(report.bestByStrategy) ? report.bestByStrategy : [])
+    ];
+
+    return fallbackRows.some((row) => {
+      if (!row || typeof row !== "object") {
+        return false;
+      }
+
+      const record = row as Record<string, unknown>;
+      const avgTestReturn =
+        typeof record.avgTestReturn === "number" && Number.isFinite(record.avgTestReturn)
+          ? record.avgTestReturn
+          : typeof record.netReturn === "number" && Number.isFinite(record.netReturn)
+            ? record.netReturn
+            : undefined;
+      const tradeCount =
+        typeof record.executedTradeCount === "number" && Number.isFinite(record.executedTradeCount)
+          ? record.executedTradeCount
+          : typeof record.tradeCount === "number" && Number.isFinite(record.tradeCount)
+            ? record.tradeCount
+            : undefined;
+
+      return (avgTestReturn ?? 0) >= 0.005 && (tradeCount ?? 0) >= 2;
+    });
+  } catch {
+    return false;
+  }
+}
+
+function resolveDefaultAutoResearchSeedArtifacts(cwd: string): string[] {
+  const candidateDirs = [
+    path.resolve(cwd, "output"),
+    path.resolve(cwd, "research", "backtester", "output")
+  ];
+
+  for (const dir of candidateDirs) {
+    if (!existsSync(dir)) {
+      continue;
+    }
+
+    const filenames = readdirSync(dir)
+      .filter((name) => /^strategy-followup-report.*\.json$/i.test(name))
+      .sort();
+    if (filenames.length === 0) {
+      continue;
+    }
+
+    const seedFiles = filenames
+      .map((name) => path.join(dir, name))
+      .filter((reportPath) => followupReportHasReusableSeeds(reportPath));
+
+    if (seedFiles.length > 0) {
+      return seedFiles;
+    }
+  }
+
+  return [];
 }
 
 function createStrategyCandidate(params: {
@@ -283,6 +353,10 @@ async function main(): Promise<void> {
     .flatMap((value, index, args) => (value === "--auto-research-seed-artifact" ? [args[index + 1]] : []))
     .filter((value): value is string => Boolean(value))
     .map((value) => resolveWorkspaceRelativePath(value, process.cwd()));
+  const resolvedAutoResearchSeedArtifacts =
+    autoResearchSeedArtifacts.length > 0
+      ? autoResearchSeedArtifacts
+      : resolveDefaultAutoResearchSeedArtifacts(process.cwd());
   const autoResearchMode = getOption(process.argv, "--auto-research-mode") === "holdout"
     ? "holdout"
     : "walk-forward";
@@ -508,7 +582,7 @@ async function main(): Promise<void> {
             : undefined,
         researchStage: autoResearchStage,
         blockCatalogPath: autoResearchBlockCatalog,
-        seedArtifactPaths: autoResearchSeedArtifacts,
+        seedArtifactPaths: resolvedAutoResearchSeedArtifacts,
         seedCandidatesPerIteration:
           typeof autoResearchSeedCandidates === "number" ? Math.max(0, autoResearchSeedCandidates) : undefined,
         candidateDiversificationMinDistance:
@@ -575,7 +649,7 @@ async function main(): Promise<void> {
                     : undefined,
                 researchStage: "portfolio",
                 blockCatalogPath,
-                seedArtifactPaths: autoResearchSeedArtifacts,
+                seedArtifactPaths: resolvedAutoResearchSeedArtifacts,
                 seedCandidatesPerIteration:
                   typeof autoResearchSeedCandidates === "number" ? Math.max(0, autoResearchSeedCandidates) : undefined,
                 candidateDiversificationMinDistance:

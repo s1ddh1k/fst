@@ -1,10 +1,11 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildScoredStrategyGrid } from "./parameter-grid.js";
+import { buildScoredStrategyGrid, buildScoredStrategyNeighborGrid } from "./parameter-grid.js";
 import { getCandidateMarketsWithMinimumCandles } from "./db.js";
 import { executeScoredWalkForwardBacktest, preloadMarketData } from "./scored-runner.js";
 import type { GhostTradeHorizonSummary, ScoredBacktestResult } from "./types.js";
+import type { ScoredStrategy } from "../../strategies/src/types.js";
 
 export const DEFAULT_STRATEGY_NAMES = [
   "relative-momentum-pullback",
@@ -93,6 +94,7 @@ export type StrategyFollowupReport = {
     strategyNames: FollowupStrategyName[];
   };
   baselineDiagnosis: EntryVsExitDiagnosis;
+  seedCandidates: FollowupRow[];
   bestByStrategy: FollowupRow[];
   topOverall: FollowupRow[];
   recommendation: FollowupRecommendation;
@@ -155,6 +157,17 @@ function strategySortScore(row: FollowupRow): number {
   );
 }
 
+function stableParameterKey(parameters: Record<string, number>): string {
+  return JSON.stringify(
+    Object.keys(parameters)
+      .sort((left, right) => left.localeCompare(right))
+      .reduce<Record<string, number>>((result, key) => {
+        result[key] = parameters[key] ?? 0;
+        return result;
+      }, {})
+  );
+}
+
 function selectBestRows(rows: FollowupRow[]): FollowupRow[] {
   const byStrategy = new Map<string, FollowupRow>();
 
@@ -167,6 +180,33 @@ function selectBestRows(rows: FollowupRow[]): FollowupRow[] {
   }
 
   return [...byStrategy.values()].sort((left, right) => strategySortScore(right) - strategySortScore(left));
+}
+
+export function isReusableSeedRow(row: FollowupRow): boolean {
+  if (row.avgTestReturn < 0.005) {
+    return false;
+  }
+
+  if (row.executedTradeCount < 2 || row.averageFoldTradeCount < 0.5) {
+    return false;
+  }
+
+  if (row.medianTestReturn < 0) {
+    return false;
+  }
+
+  return (
+    row.bootstrapPassRate > 0 ||
+    row.randomPassRate > 0 ||
+    row.neighborPositiveRate >= 0.25
+  );
+}
+
+function selectReusableSeedRows(rows: FollowupRow[]): FollowupRow[] {
+  return rows
+    .filter((row) => isReusableSeedRow(row))
+    .sort((left, right) => strategySortScore(right) - strategySortScore(left))
+    .slice(0, 10);
 }
 
 function aggregateGhostStudy(windows: ScoredBacktestResult[]): FollowupRow["ghostStudy"] {
@@ -526,6 +566,7 @@ export async function finalizeStrategyFollowupReport(params: {
   const rows = params.rows
     .slice()
     .sort((left, right) => strategySortScore(right) - strategySortScore(left));
+  const seedCandidates = selectReusableSeedRows(rows);
   const bestByStrategy = selectBestRows(rows);
   const baselineBest =
     bestByStrategy.find((row) => row.strategyName === "relative-momentum-pullback") ?? rows[0];
@@ -533,6 +574,7 @@ export async function finalizeStrategyFollowupReport(params: {
     generatedAt: new Date().toISOString(),
     config: params.config,
     baselineDiagnosis: diagnoseEntryVsExit(baselineBest),
+    seedCandidates,
     bestByStrategy,
     topOverall: rows.slice(0, 10),
     recommendation: chooseRecommendation(rows),
@@ -582,18 +624,32 @@ export async function generateStrategyFollowupReport(params: {
     minCandles: params.minCandles
   });
   const rows: FollowupRow[] = [];
-  const strategies = strategyNames.flatMap((strategyName) =>
-    buildScoredStrategyGrid(strategyName).map((strategy) => ({
-      strategyName,
-      strategy
-    }))
+  const seenStrategyParameterKeys = new Set<string>();
+  const registerStrategy = (strategyName: FollowupStrategyName, strategy: ScoredStrategy) => {
+    seenStrategyParameterKeys.add(`${strategyName}:${stableParameterKey(strategy.parameters)}`);
+  };
+  const wasSeenStrategy = (strategyName: FollowupStrategyName, strategy: ScoredStrategy): boolean =>
+    seenStrategyParameterKeys.has(`${strategyName}:${stableParameterKey(strategy.parameters)}`);
+  const baseStrategies = strategyNames.flatMap((strategyName) =>
+    buildScoredStrategyGrid(strategyName).map((strategy) => {
+      registerStrategy(strategyName, strategy);
+      return {
+        strategyName,
+        strategy
+      };
+    })
   );
+  const strategies = [...baseStrategies];
 
-  for (const [index, { strategyName, strategy }] of strategies.entries()) {
-    const pct = (((index + 1) / strategies.length) * 100).toFixed(1);
-    console.log(
-      `[followup ${index + 1}/${strategies.length}] (${pct}%) ${strategyName} ${JSON.stringify(strategy.parameters)}`
-    );
+  async function evaluateStrategy(
+    strategyName: FollowupStrategyName,
+    strategy: ScoredStrategy,
+    label: string,
+    index: number,
+    total: number
+  ): Promise<void> {
+    const pct = (((index + 1) / total) * 100).toFixed(1);
+    console.log(`[followup ${label} ${index + 1}/${total}] (${pct}%) ${strategyName} ${JSON.stringify(strategy.parameters)}`);
 
     const summary = await executeScoredWalkForwardBacktest({
       marketCode: `UNIVERSE:${params.universeName}`,
@@ -681,6 +737,29 @@ export async function generateStrategyFollowupReport(params: {
       folds,
       ghostStudy
     });
+  }
+
+  for (const [index, { strategyName, strategy }] of strategies.entries()) {
+    await evaluateStrategy(strategyName, strategy, "base", index, strategies.length);
+  }
+
+  const refinementCandidates = strategyNames.flatMap((strategyName) =>
+    rows
+      .filter((row) => row.strategyName === strategyName && (row.executedTradeCount > 0 || row.avgTestReturn > -0.01))
+      .sort((left, right) => strategySortScore(right) - strategySortScore(left))
+      .slice(0, 3)
+      .flatMap((row) =>
+        buildScoredStrategyNeighborGrid(strategyName, row.parameters).filter((strategy) => !wasSeenStrategy(strategyName, strategy))
+      )
+      .slice(0, 12)
+      .map((strategy) => {
+        registerStrategy(strategyName, strategy);
+        return { strategyName, strategy };
+      })
+  );
+
+  for (const [index, { strategyName, strategy }] of refinementCandidates.entries()) {
+    await evaluateStrategy(strategyName, strategy, "refine", index, refinementCandidates.length);
   }
 
   for (const row of rows) {

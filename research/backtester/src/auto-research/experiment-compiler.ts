@@ -207,7 +207,12 @@ function snapshotFromArtifactNode(
   }
 
   const record = node as Record<string, unknown>;
-  const directFamilyId = typeof record.familyId === "string" ? record.familyId : undefined;
+  const directFamilyId =
+    typeof record.familyId === "string"
+      ? record.familyId
+      : typeof record.strategyName === "string"
+        ? record.strategyName
+        : undefined;
   const directParameters = asNumericParameters(record.parameters);
 
   if (directFamilyId && directParameters) {
@@ -215,11 +220,14 @@ function snapshotFromArtifactNode(
       candidateId: typeof record.candidateId === "string" ? record.candidateId : undefined,
       familyId: directFamilyId,
       parameters: directParameters,
-      netReturn: asFiniteNumber(record.netReturn),
+      netReturn: asFiniteNumber(record.netReturn) ?? asFiniteNumber(record.avgTestReturn),
       maxDrawdown: asFiniteNumber(record.maxDrawdown),
-      tradeCount: asFiniteNumber(record.tradeCount),
-      positiveWindowRatio: asFiniteNumber(record.positiveWindowRatio),
-      score: asFiniteNumber(record.score),
+      tradeCount: asFiniteNumber(record.tradeCount) ?? asFiniteNumber(record.executedTradeCount),
+      positiveWindowRatio:
+        asFiniteNumber(record.positiveWindowRatio) ??
+        asFiniteNumber(record.positiveRate) ??
+        asFiniteNumber(record.neighborPositiveRate),
+      score: asFiniteNumber(record.score) ?? asFiniteNumber(record.avgTestReturn) ?? asFiniteNumber(record.netReturn),
       sourcePath
     };
   }
@@ -293,6 +301,18 @@ function scoreArtifactSeed(snapshot: ArtifactSeedSnapshot): number {
   const tradeBoost = Math.min(snapshot.tradeCount ?? 0, 100) * 0.0002;
   const windowBoost = Math.max(0, snapshot.positiveWindowRatio ?? 0) * 0.01;
   return baseScore + tradeBoost + windowBoost;
+}
+
+function isViableArtifactSeed(snapshot: ArtifactSeedSnapshot): boolean {
+  if (Number.isFinite(snapshot.netReturn) && snapshot.netReturn! <= 0) {
+    return false;
+  }
+
+  if (Number.isFinite(snapshot.tradeCount) && snapshot.tradeCount! < 2) {
+    return false;
+  }
+
+  return true;
 }
 
 function calculateCandidateParameterDistance(
@@ -909,6 +929,10 @@ export async function buildArtifactSeedCandidates(params: {
     collectArtifactSeedSnapshots(parsed, seedPath, snapshots);
 
     for (const [index, snapshot] of snapshots.entries()) {
+      if (!isViableArtifactSeed(snapshot)) {
+        continue;
+      }
+
       if (!eligibleFamilyIds.has(snapshot.familyId)) {
         continue;
       }

@@ -21,6 +21,8 @@ type LeaderboardEntry = {
   netReturn: number;
   maxDrawdown: number;
   tradeCount: number;
+  buyAndHoldReturn?: number;
+  excessReturn?: number;
   parameters: Record<string, number>;
 };
 
@@ -83,27 +85,37 @@ function buildLeaderboard(
 ): LeaderboardEntry[] {
   return [
     ...iterations.flatMap((iteration) =>
-      iteration.evaluations.map((evaluation) => ({
-        iteration: iteration.iteration,
+      iteration.evaluations.map((evaluation) => {
+        const bh = evaluation.summary.buyAndHoldReturn;
+        return {
+          iteration: iteration.iteration,
+          candidateId: evaluation.candidate.candidateId,
+          familyId: evaluation.candidate.familyId,
+          riskAdjustedScore: calculateCandidateRiskAdjustedScore(evaluation),
+          netReturn: evaluation.summary.netReturn,
+          maxDrawdown: evaluation.summary.maxDrawdown,
+          tradeCount: evaluation.summary.tradeCount,
+          buyAndHoldReturn: bh,
+          excessReturn: bh !== undefined ? evaluation.summary.netReturn - bh : undefined,
+          parameters: evaluation.candidate.parameters
+        };
+      })
+    ),
+    ...liveEvaluations.map((evaluation) => {
+      const bh = evaluation.summary.buyAndHoldReturn;
+      return {
+        iteration: iterations.length + 1,
         candidateId: evaluation.candidate.candidateId,
         familyId: evaluation.candidate.familyId,
         riskAdjustedScore: calculateCandidateRiskAdjustedScore(evaluation),
         netReturn: evaluation.summary.netReturn,
         maxDrawdown: evaluation.summary.maxDrawdown,
         tradeCount: evaluation.summary.tradeCount,
+        buyAndHoldReturn: bh,
+        excessReturn: bh !== undefined ? evaluation.summary.netReturn - bh : undefined,
         parameters: evaluation.candidate.parameters
-      }))
-    ),
-    ...liveEvaluations.map((evaluation) => ({
-      iteration: iterations.length + 1,
-      candidateId: evaluation.candidate.candidateId,
-      familyId: evaluation.candidate.familyId,
-      riskAdjustedScore: calculateCandidateRiskAdjustedScore(evaluation),
-      netReturn: evaluation.summary.netReturn,
-      maxDrawdown: evaluation.summary.maxDrawdown,
-      tradeCount: evaluation.summary.tradeCount,
-      parameters: evaluation.candidate.parameters
-    }))
+      };
+    })
   ].sort((left, right) => {
     if (right.riskAdjustedScore !== left.riskAdjustedScore) {
       return right.riskAdjustedScore - left.riskAdjustedScore;
@@ -447,7 +459,7 @@ function parseOutputDir(argv: string[]): string {
   throw new Error("--output-dir is required");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+async function main() {
   try {
     const outputDir = parseOutputDir(process.argv.slice(2));
     const audit = await writeAutoResearchArtifactAudit(outputDir);
@@ -458,4 +470,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.stderr.write(`${message}\n`);
     process.exitCode = 1;
   }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  void main();
 }

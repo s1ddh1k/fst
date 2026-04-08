@@ -2,8 +2,10 @@ import type { Strategy, StrategyContext, StrategySignal } from "../../../../pack
 import type { CompositeBenchmarkContext } from "../../../strategies/src/types.js";
 
 type MarketRegime = CompositeBenchmarkContext["regime"];
+type RegimeSource = "composite" | "benchmark";
 
 export type RegimeGateConfig = {
+  regimeSource?: RegimeSource;
   allowedRegimes?: MarketRegime[];
   blockedRegimes?: MarketRegime[];
   allowUnknownRegime?: boolean;
@@ -22,6 +24,7 @@ export type RegimeGateConfig = {
 };
 
 type GateMetrics = {
+  regimeSource: RegimeSource;
   regime: MarketRegime;
   riskOnScore: number;
   compositeTrendScore: number;
@@ -31,7 +34,10 @@ type GateMetrics = {
   dispersionScore: number;
 };
 
-function resolveGateMetrics(context: StrategyContext): GateMetrics {
+function resolveGateMetrics(
+  context: StrategyContext,
+  gate: RegimeGateConfig | undefined
+): GateMetrics {
   const marketState = (context.marketState as {
     breadth?: {
       riskOnScore?: number;
@@ -44,15 +50,26 @@ function resolveGateMetrics(context: StrategyContext): GateMetrics {
       trendScore?: number;
       historicalVolatility?: number | null;
     };
+    benchmark?: {
+      regime?: MarketRegime;
+      trendScore?: number;
+      historicalVolatility?: number | null;
+    };
   } | undefined) ?? {};
+  const regimeSource = gate?.regimeSource ?? "composite";
+  const regimeContext =
+    regimeSource === "benchmark"
+      ? marketState.benchmark ?? marketState.composite
+      : marketState.composite;
 
   return {
-    regime: marketState.composite?.regime ?? "unknown",
+    regimeSource,
+    regime: regimeContext?.regime ?? "unknown",
     riskOnScore: Number(marketState.breadth?.riskOnScore ?? 0),
-    compositeTrendScore: Number(marketState.composite?.trendScore ?? marketState.breadth?.riskOnScore ?? 0),
+    compositeTrendScore: Number(regimeContext?.trendScore ?? marketState.breadth?.riskOnScore ?? 0),
     aboveTrendRatio: Number(marketState.breadth?.aboveTrendRatio ?? 0),
     liquidityScore: Number(marketState.breadth?.liquidityScore ?? 0),
-    historicalVolatility: Number(marketState.composite?.historicalVolatility ?? 0),
+    historicalVolatility: Number(regimeContext?.historicalVolatility ?? 0),
     dispersionScore: Number(marketState.breadth?.dispersionScore ?? 0)
   };
 }
@@ -61,6 +78,7 @@ function buildGateMetadata(metrics: GateMetrics, allowed: boolean, reason: strin
   return {
     regimeGateAllowed: allowed,
     regimeGateReason: reason,
+    regimeGateSource: metrics.regimeSource,
     regimeGateRegime: metrics.regime,
     regimeGateRiskOnScore: metrics.riskOnScore,
     regimeGateCompositeTrendScore: metrics.compositeTrendScore,
@@ -72,7 +90,7 @@ function buildGateMetadata(metrics: GateMetrics, allowed: boolean, reason: strin
 }
 
 function evaluateRegimeGate(context: StrategyContext, gate: RegimeGateConfig | undefined) {
-  const metrics = resolveGateMetrics(context);
+  const metrics = resolveGateMetrics(context, gate);
   if (!gate) {
     return {
       allowed: true,

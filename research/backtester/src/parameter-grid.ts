@@ -27,6 +27,104 @@ function cartesianProduct<T>(items: T[][]): T[][] {
   );
 }
 
+type ScoredAxisDefinition = {
+  parameterNames: string[];
+  axisValues: number[][];
+  build: (parameters: Record<string, number>) => ScoredStrategy;
+};
+
+const SCORED_STRATEGY_AXES: Partial<Record<string, ScoredAxisDefinition>> = {
+  "relative-momentum-pullback": {
+    parameterNames: ["minStrengthPct", "minRiskOn", "pullbackZ", "trailAtrMult"],
+    axisValues: [
+      [0.7, 0.8, 0.9],
+      [0.05, 0.15],
+      [0.6, 0.9, 1.2],
+      [1.8, 2.2, 2.6]
+    ],
+    build: (parameters) => createRelativeMomentumPullbackStrategy(parameters)
+  },
+  "leader-pullback-state-machine": {
+    parameterNames: ["strengthFloor", "pullbackAtr", "setupExpiryBars", "trailAtrMult"],
+    axisValues: [
+      [0.6, 0.7, 0.8],
+      [0.5, 0.9, 1.3],
+      [2, 4, 6],
+      [1.8, 2.2, 2.6]
+    ],
+    build: (parameters) => createLeaderPullbackStateMachineStrategy(parameters)
+  },
+  "relative-breakout-rotation": {
+    parameterNames: ["breakoutLookback", "strengthFloor", "maxExtensionAtr", "trailAtrMult"],
+    axisValues: [
+      [10, 20, 30],
+      [0.6, 0.7, 0.8],
+      [0.8, 1.2, 1.6],
+      [1.8, 2.2, 2.6]
+    ],
+    build: (parameters) => createRelativeBreakoutRotationStrategy(parameters)
+  }
+};
+
+function buildScoredStrategyAxisProducts(strategyName: string): number[][] | undefined {
+  const definition = SCORED_STRATEGY_AXES[strategyName];
+  if (!definition) {
+    return undefined;
+  }
+
+  return cartesianProduct<number>(definition.axisValues);
+}
+
+function buildScoredStrategyFromAxisProduct(strategyName: string, product: number[]): ScoredStrategy {
+  const definition = SCORED_STRATEGY_AXES[strategyName];
+  if (!definition) {
+    throw new Error(`Unknown scored strategy grid: ${strategyName}`);
+  }
+
+  const parameters = definition.parameterNames.reduce<Record<string, number>>((result, name, index) => {
+    result[name] = product[index] ?? 0;
+    return result;
+  }, {});
+
+  return definition.build(parameters);
+}
+
+export function buildScoredStrategyNeighborGrid(
+  strategyName: string,
+  parameters: Record<string, number>
+): ScoredStrategy[] {
+  const definition = SCORED_STRATEGY_AXES[strategyName];
+  if (!definition) {
+    throw new Error(`Unknown scored strategy grid: ${strategyName}`);
+  }
+
+  const currentIndices = definition.parameterNames.map((name, axisIndex) => {
+    const axis = definition.axisValues[axisIndex] ?? [];
+    return axis.findIndex((value) => value === parameters[name]);
+  });
+
+  if (currentIndices.some((index) => index < 0)) {
+    return [];
+  }
+
+  const perAxisNeighborIndices = currentIndices.map((currentIndex, axisIndex) => {
+    const axis = definition.axisValues[axisIndex] ?? [];
+    return [currentIndex - 1, currentIndex, currentIndex + 1].filter(
+      (index, position, values) =>
+        index >= 0 && index < axis.length && values.indexOf(index) === position
+    );
+  });
+
+  return cartesianProduct<number>(perAxisNeighborIndices)
+    .filter((combo) => combo.some((axisIndex, index) => axisIndex !== currentIndices[index]))
+    .map((combo) =>
+      buildScoredStrategyFromAxisProduct(
+        strategyName,
+        combo.map((axisValueIndex, axisIndex) => definition.axisValues[axisIndex]?.[axisValueIndex] ?? 0)
+      )
+    );
+}
+
 export function buildStrategyGrid(strategyName: string): Strategy[] {
   switch (strategyName) {
     case "integrated-multi-factor": {
@@ -401,26 +499,12 @@ export function buildStrategyGrid(strategyName: string): Strategy[] {
 }
 
 export function buildScoredStrategyGrid(strategyName: string): ScoredStrategy[] {
+  const sharedProducts = buildScoredStrategyAxisProducts(strategyName);
+  if (sharedProducts) {
+    return sharedProducts.map((product) => buildScoredStrategyFromAxisProduct(strategyName, product));
+  }
+
   switch (strategyName) {
-    case "relative-momentum-pullback": {
-      const products = cartesianProduct<number>([
-        [0.70, 0.80, 0.90],
-        [0.05, 0.15],
-        [0.6, 0.9, 1.2],
-        [1.8, 2.2, 2.6]
-      ]);
-
-      return products.map(
-        ([minStrengthPct, minRiskOn, pullbackZ, trailAtrMult]) =>
-          createRelativeMomentumPullbackStrategy({
-            minStrengthPct,
-            minRiskOn,
-            pullbackZ,
-            trailAtrMult
-          })
-      );
-    }
-
     case "residual-reversion": {
       const products = cartesianProduct<number>([
         [0.15, 0.20, 0.25, 0.30],
@@ -436,44 +520,6 @@ export function buildScoredStrategyGrid(strategyName: string): ScoredStrategy[] 
             exitThreshold,
             stopLossPct,
             maxHoldBars
-          })
-      );
-    }
-
-    case "leader-pullback-state-machine": {
-      const products = cartesianProduct<number>([
-        [0.60, 0.70, 0.80],
-        [0.5, 0.9, 1.3],
-        [2, 4, 6],
-        [1.8, 2.2, 2.6]
-      ]);
-
-      return products.map(
-        ([strengthFloor, pullbackAtr, setupExpiryBars, trailAtrMult]) =>
-          createLeaderPullbackStateMachineStrategy({
-            strengthFloor,
-            pullbackAtr,
-            setupExpiryBars,
-            trailAtrMult
-          })
-      );
-    }
-
-    case "relative-breakout-rotation": {
-      const products = cartesianProduct<number>([
-        [10, 20, 30],
-        [0.60, 0.70, 0.80],
-        [0.8, 1.2, 1.6],
-        [1.8, 2.2, 2.6]
-      ]);
-
-      return products.map(
-        ([breakoutLookback, strengthFloor, maxExtensionAtr, trailAtrMult]) =>
-          createRelativeBreakoutRotationStrategy({
-            breakoutLookback,
-            strengthFloor,
-            maxExtensionAtr,
-            trailAtrMult
           })
       );
     }

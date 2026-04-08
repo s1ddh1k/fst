@@ -2,6 +2,8 @@ import type { CandidateBacktestEvaluation } from "./types.js";
 
 export const DEFAULT_MIN_NET_RETURN_FOR_PROMOTION = 0.05;
 const DEFAULT_MAX_DRAWDOWN_FOR_PROMOTION = 0.35;
+const DEFAULT_MIN_POSITIVE_WINDOW_RATIO_FOR_PROMOTION = 0.5;
+const DEFAULT_MIN_WORST_WINDOW_NET_RETURN_FOR_PROMOTION = -0.05;
 const DEFAULT_MIN_RANDOM_PERCENTILE_FOR_PROMOTION = 0.5;
 
 /**
@@ -109,8 +111,8 @@ export function calculateCandidateRiskAdjustedScore(
 
   let score = evaluation.summary.netReturn;
   score -= maxDrawdown * 1.25;
-  score += positiveWindowRatio(evaluation) * 0.15;
-  score += worstWindowNetReturn(evaluation) * 0.35;
+  score += positiveWindowRatio(evaluation) * 0.25;
+  score += worstWindowNetReturn(evaluation) * 0.55;
   score += Math.min(trades, 50) * 0.002;
   score += Math.min(windows, 12) * 0.003;
 
@@ -139,6 +141,7 @@ export function passesPromotionGate(
     minNetReturn?: number;
     maxDrawdown?: number;
     minPositiveWindowRatio?: number;
+    minWorstWindowNetReturn?: number;
     minRandomPercentile?: number;
     requireBootstrapSignificance?: boolean;
   }
@@ -175,12 +178,18 @@ export function passesPromotionGate(
     return false;
   }
 
-  if (
-    config?.minPositiveWindowRatio !== undefined &&
-    windowCount(evaluation) > 0 &&
-    positiveWindowRatio(evaluation) < config.minPositiveWindowRatio
-  ) {
-    return false;
+  if (windowCount(evaluation) > 0) {
+    const minPositiveWindowRatio =
+      config?.minPositiveWindowRatio ?? DEFAULT_MIN_POSITIVE_WINDOW_RATIO_FOR_PROMOTION;
+    if (positiveWindowRatio(evaluation) < minPositiveWindowRatio) {
+      return false;
+    }
+
+    const minWorstWindowNetReturn =
+      config?.minWorstWindowNetReturn ?? DEFAULT_MIN_WORST_WINDOW_NET_RETURN_FOR_PROMOTION;
+    if (worstWindowNetReturn(evaluation) <= minWorstWindowNetReturn) {
+      return false;
+    }
   }
 
   if (

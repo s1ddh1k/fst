@@ -34,7 +34,13 @@ export type AutoPromoteResult = {
 
 function selectPromotableCandidates(
   iterations: ResearchIterationRecord[],
-  config?: { maxCandidates?: number; minNetReturn?: number; maxDrawdown?: number }
+  config?: {
+    maxCandidates?: number;
+    minNetReturn?: number;
+    maxDrawdown?: number;
+    minPositiveWindowRatio?: number;
+    minWorstWindowNetReturn?: number;
+  }
 ): CandidateBacktestEvaluation[] {
   const allEvaluations = new Map<string, CandidateBacktestEvaluation>();
 
@@ -52,7 +58,9 @@ function selectPromotableCandidates(
     .filter((evaluation) =>
       passesPromotionGate(evaluation, {
         minNetReturn: config?.minNetReturn,
-        maxDrawdown: config?.maxDrawdown
+        maxDrawdown: config?.maxDrawdown,
+        minPositiveWindowRatio: config?.minPositiveWindowRatio,
+        minWorstWindowNetReturn: config?.minWorstWindowNetReturn
       })
     )
     .sort(compareCandidateEvaluations);
@@ -71,6 +79,8 @@ export async function autoPromoteFromRunState(params: {
   maxCandidates?: number;
   minNetReturn?: number;
   maxDrawdown?: number;
+  minPositiveWindowRatio?: number;
+  minWorstWindowNetReturn?: number;
   dryRun?: boolean;
 }): Promise<AutoPromoteResult> {
   const runStatePath = path.join(params.outputDir, "run-state.json");
@@ -91,7 +101,9 @@ export async function autoPromoteFromRunState(params: {
   const candidates = selectPromotableCandidates(state.iterations, {
     maxCandidates: params.maxCandidates,
     minNetReturn: params.minNetReturn,
-    maxDrawdown: params.maxDrawdown
+    maxDrawdown: params.maxDrawdown,
+    minPositiveWindowRatio: params.minPositiveWindowRatio,
+    minWorstWindowNetReturn: params.minWorstWindowNetReturn
   });
 
   if (candidates.length === 0) {
