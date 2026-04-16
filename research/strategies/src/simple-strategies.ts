@@ -6,7 +6,7 @@
  * systematic optimization can find real edge if it exists.
  */
 
-import { getEma, getSma } from "./factors/moving-averages.js";
+import { getEma } from "./factors/moving-averages.js";
 import { getRsi } from "./factors/mean-reversion.js";
 import { getAtr } from "./factors/volatility.js";
 import { getDonchianChannel } from "./factors/trend.js";
@@ -14,7 +14,7 @@ import { getMomentum } from "./factors/momentum.js";
 import { getBollingerBands } from "./factors/oscillators.js";
 import { getVolumeSpikeRatio } from "./factors/volume.js";
 import { getObvSlope } from "./factors/volume-trend.js";
-import type { MarketStateConfig, ScoredStrategy, StrategyContext, SignalResult, MarketStateContext } from "./types.js";
+import type { ScoredStrategy, StrategyContext, SignalResult } from "./types.js";
 import { buy, hold, sell } from "./scored-signal.js";
 
 // ---------------------------------------------------------------------------

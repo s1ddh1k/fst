@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFile, readFile, writeFile, stat, readdir, rm } from "node:fs/promises";
+import { appendFile, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";

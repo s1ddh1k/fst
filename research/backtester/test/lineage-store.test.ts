@@ -192,7 +192,7 @@ test("lineage store appends and reloads ordered JSONL events", async () => {
           candidateId: "cand-a-02",
           familyId: "family-a",
           parameters: { alpha: 1.5 },
-          origin: "novelized",
+          origin: "llm",
           parentCandidateIds: ["cand-a-01"]
         }),
         netReturn: 0.06,
@@ -262,7 +262,7 @@ test("lineage metrics compute drift and stagnation across iterations", () => {
           candidateId: "cand-a-02",
           familyId: "family-a",
           parameters: { alpha: 1.5 },
-          origin: "novelized",
+          origin: "llm",
           parentCandidateIds: ["cand-a-01"]
         }),
         netReturn: 0.06,
@@ -287,7 +287,7 @@ test("lineage metrics compute drift and stagnation across iterations", () => {
           candidateId: "cand-a-03",
           familyId: "family-a",
           parameters: { alpha: 1.75 },
-          origin: "novelized",
+          origin: "llm",
           parentCandidateIds: ["cand-a-02"]
         }),
         netReturn: 0.055,
@@ -346,7 +346,7 @@ test("lineage snapshot persists candidate, family, and metric summaries", async 
           candidateId: "cand-a-02",
           familyId: "family-a",
           parameters: { alpha: 1.25 },
-          origin: "novelized",
+          origin: "llm",
           parentCandidateIds: ["cand-a-01"]
         }),
         netReturn: 0.06,
@@ -420,7 +420,7 @@ test("research lineage state persists and updates from iterations", async () => 
           candidateId: "cand-a-02",
           familyId: "family-a",
           parameters: { alpha: 1.25 },
-          origin: "novelized",
+          origin: "llm",
           parentCandidateIds: ["cand-a-01"]
         }),
         netReturn: 0.06,

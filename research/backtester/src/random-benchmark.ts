@@ -16,7 +16,6 @@ function runSingleRandomTrial(params: {
   const entryProbability = avgTradesPerHundredBars / 100;
   let cash = initialCapital;
   let positionQty = 0;
-  let entryPrice = 0;
 
   for (let i = 1; i < candles.length; i += 1) {
     const price = candles[i].openPrice;
@@ -26,7 +25,6 @@ function runSingleRandomTrial(params: {
         const execPrice = price * (1 + slippageRate);
         const fee = cash * feeRate;
         positionQty = (cash - fee) / execPrice;
-        entryPrice = execPrice;
         cash = 0;
       }
     } else {
@@ -38,7 +36,6 @@ function runSingleRandomTrial(params: {
         const fee = gross * feeRate;
         cash = gross - fee;
         positionQty = 0;
-        entryPrice = 0;
       }
     }
   }

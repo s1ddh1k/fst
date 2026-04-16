@@ -1,12 +1,5 @@
 import type { ResearchLlmClient } from "./llm-adapter.js";
-import {
-  buildDeterministicContinuationProposal,
-  candidateFingerprint
-} from "./experiment-compiler.js";
-import {
-  compareCandidateEvaluations,
-  passesPromotionGate
-} from "./ranking.js";
+import { candidateFingerprint } from "./proposal-utils.js";
 import type {
   AutoResearchRunConfig,
   CandidateBacktestEvaluation,
@@ -20,8 +13,6 @@ import type {
 
 export type ReviewedIterationResult = {
   review: ReviewDecision;
-  reviewFailureMessage?: string;
-  usedObjectiveGovernance: boolean;
 };
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined, label: string): Promise<T> {
@@ -52,163 +43,6 @@ export function appendReviewObservation(review: ReviewDecision, observation: str
     ...review,
     observations: [...review.observations, observation]
   };
-}
-
-function promotionGateConfig(config: AutoResearchRunConfig) {
-  return {
-    minTrades: config.minTradesForPromotion,
-    minNetReturn: config.minNetReturnForPromotion,
-    maxDrawdown: config.maxDrawdownForPromotion,
-    minPositiveWindowRatio: config.minPositiveWindowRatioForPromotion,
-    minWorstWindowNetReturn: config.minWorstWindowNetReturnForPromotion,
-    minRandomPercentile: config.minRandomPercentileForPromotion,
-    requireBootstrapSignificance: config.requireBootstrapSignificanceForPromotion
-  };
-}
-
-function findTopPromotableEvaluation(
-  evaluations: CandidateBacktestEvaluation[],
-  config: AutoResearchRunConfig
-): CandidateBacktestEvaluation | undefined {
-  const gateConfig = promotionGateConfig(config);
-  return evaluations.find((evaluation) => passesPromotionGate(evaluation, gateConfig));
-}
-
-export function governReviewDecision(params: {
-  review: ReviewDecision;
-  evaluations: CandidateBacktestEvaluation[];
-  config: AutoResearchRunConfig;
-  iteration: number;
-  familyStagnationStreak?: Map<string, number>;
-  familyIterationCounts?: Map<string, number>;
-}): ReviewDecision {
-  const { review, evaluations, config, iteration } = params;
-  const isContinuousMode = config.continuousMode === true;
-  const isFinalIteration = !isContinuousMode && iteration >= config.iterations;
-
-  // Anti self-bias: force stop when stagnation is severe and no candidate passes gate
-  if (
-    review.verdict === "keep_searching" &&
-    params.familyStagnationStreak &&
-    params.familyStagnationStreak.size > 0
-  ) {
-    const stagnationThreshold = config.stagnationRetireThreshold ?? 8;
-    const evaluatedFamilies = new Set(evaluations.map((e) => e.candidate.familyId));
-    const allStagnant = [...evaluatedFamilies].every(
-      (fid) => (params.familyStagnationStreak!.get(fid) ?? 0) >= stagnationThreshold
-    );
-    const topPromotable = findTopPromotableEvaluation(evaluations, config);
-
-    if (allStagnant && !topPromotable) {
-      return appendReviewObservation(
-        {
-          ...review,
-          verdict: "stop_no_edge",
-          promotedCandidateId: undefined,
-          nextCandidates: [],
-          summary: `${review.summary} Anti self-bias: all evaluated families stagnant for ${stagnationThreshold}+ iterations with no promotable candidate.`.trim()
-        },
-        `Anti self-bias override: forced stop_no_edge due to universal stagnation across ${evaluatedFamilies.size} families.`
-      );
-    }
-
-    // Force stop on families with negative returns after half their budget
-    if (params.familyIterationCounts) {
-      const budget = config.familyIterationBudget ?? 20;
-      const halfBudget = Math.floor(budget / 2);
-      for (const fid of evaluatedFamilies) {
-        const iterCount = params.familyIterationCounts.get(fid) ?? 0;
-        if (iterCount >= halfBudget) {
-          const familyEvals = evaluations.filter((e) => e.candidate.familyId === fid);
-          const bestReturn = Math.max(...familyEvals.map((e) => e.summary.netReturn));
-          if (bestReturn < 0) {
-            return appendReviewObservation(
-              {
-                ...review,
-                verdict: "stop_no_edge",
-                promotedCandidateId: undefined,
-                nextCandidates: [],
-                summary: `${review.summary} Anti self-bias: family ${fid} negative after half budget.`.trim()
-              },
-              `Anti self-bias override: family ${fid} still negative (best=${(bestReturn * 100).toFixed(2)}%) after ${iterCount} iterations (half-budget=${halfBudget}). Forced stop.`
-            );
-          }
-        }
-      }
-    }
-  }
-  const topPromotable = findTopPromotableEvaluation(evaluations, config);
-  const requestedPromoted = review.promotedCandidateId
-    ? evaluations.find((item) => item.candidate.candidateId === review.promotedCandidateId)
-    : undefined;
-  const requestedPromotedPassesGate = requestedPromoted
-    ? passesPromotionGate(requestedPromoted, promotionGateConfig(config))
-    : false;
-
-  if (review.verdict === "promote_candidate" && topPromotable) {
-    if (
-      review.promotedCandidateId === topPromotable.candidate.candidateId &&
-      requestedPromotedPassesGate
-    ) {
-      return review;
-    }
-
-    const observation =
-      review.promotedCandidateId && requestedPromoted
-        ? `Review promoted ${review.promotedCandidateId}, but objective governance selected ${topPromotable.candidate.candidateId}.`
-        : `Review promotion was incomplete; objective governance selected ${topPromotable.candidate.candidateId}.`;
-
-    return appendReviewObservation(
-      {
-        ...review,
-        verdict: "promote_candidate",
-        promotedCandidateId: topPromotable.candidate.candidateId,
-        summary: `${review.summary} Objective governance promoted ${topPromotable.candidate.candidateId}.`.trim()
-      },
-      observation
-    );
-  }
-
-  if (
-    topPromotable &&
-    (
-      review.verdict === "stop_no_edge" ||
-      (review.verdict === "keep_searching" && isFinalIteration)
-    )
-  ) {
-    const reason = review.verdict === "stop_no_edge"
-      ? `Review returned stop_no_edge, but objective governance promoted ${topPromotable.candidate.candidateId}.`
-      : `Final iteration kept searching, but objective governance promoted ${topPromotable.candidate.candidateId}.`;
-
-    return appendReviewObservation(
-      {
-        ...review,
-        verdict: "promote_candidate",
-        promotedCandidateId: topPromotable.candidate.candidateId,
-        summary: `${review.summary} ${reason}`.trim()
-      },
-      reason
-    );
-  }
-
-  if (review.verdict === "promote_candidate" && !requestedPromotedPassesGate) {
-    const nextVerdict = isFinalIteration ? "stop_no_edge" : "keep_searching";
-    const reason = review.promotedCandidateId
-      ? `Promotion gate blocked ${review.promotedCandidateId}; switching verdict to ${nextVerdict}.`
-      : `Review did not provide a valid promoted candidate; switching verdict to ${nextVerdict}.`;
-
-    return appendReviewObservation(
-      {
-        ...review,
-        verdict: nextVerdict,
-        promotedCandidateId: undefined,
-        summary: `${review.summary} ${reason}`.trim()
-      },
-      reason
-    );
-  }
-
-  return review;
 }
 
 function dedupeCandidateProposals(candidates: CandidateProposal[]): CandidateProposal[] {
@@ -275,6 +109,33 @@ export function ensureNextCandidatesForKeepSearching(params: {
   return nextReview;
 }
 
+export function ensureReviewDecisionReferencesEvaluatedCandidates(params: {
+  review: ReviewDecision;
+  evaluations: CandidateBacktestEvaluation[];
+  iteration: number;
+}): ReviewDecision {
+  if (params.review.verdict !== "promote_candidate") {
+    return params.review;
+  }
+
+  if (!params.review.promotedCandidateId) {
+    throw new Error(
+      `LLM review returned promote_candidate without a promotedCandidateId for iteration ${params.iteration}.`
+    );
+  }
+
+  const promotedExists = params.evaluations.some(
+    (evaluation) => evaluation.candidate.candidateId === params.review.promotedCandidateId
+  );
+  if (promotedExists) {
+    return params.review;
+  }
+
+  throw new Error(
+    `LLM review promoted unknown candidate ${params.review.promotedCandidateId} for iteration ${params.iteration}.`
+  );
+}
+
 export function toReviewProposalBatch(
   proposal: ProposalBatch,
   evaluations: CandidateBacktestEvaluation[]
@@ -290,42 +151,6 @@ export function toReviewProposalBatch(
       parentCandidateIds: evaluation.candidate.parentCandidateIds,
       origin: evaluation.candidate.origin
     }))
-  };
-}
-
-function buildObjectiveReview(params: {
-  config: AutoResearchRunConfig;
-  families: StrategyFamilyDefinition[];
-  history: ResearchIterationRecord[];
-  iteration: number;
-  evaluations: CandidateBacktestEvaluation[];
-  summary: string;
-}): ReviewDecision {
-  const sortedEvaluations = [...params.evaluations].sort(compareCandidateEvaluations);
-  const continuation = buildDeterministicContinuationProposal({
-    evaluations: sortedEvaluations,
-    families: params.families,
-    history: params.history,
-    iteration: params.iteration,
-    candidateLimit: params.config.candidatesPerIteration,
-    summary: params.summary
-  });
-
-  const isContinuousMode = params.config.continuousMode === true;
-  const isFinalIteration = !isContinuousMode && params.iteration >= params.config.iterations;
-
-  return {
-    summary: params.summary,
-    verdict: isFinalIteration ? "stop_no_edge" : "keep_searching",
-    promotedCandidateId: undefined,
-    nextPreparation: continuation.preparation,
-    proposedFamilies: [],
-    codeTasks: [],
-    nextCandidates: isFinalIteration ? [] : continuation.candidates,
-    retireCandidateIds: [],
-    observations: [
-      "Objective governance review was used because the LLM review path did not return a valid response."
-    ]
   };
 }
 
@@ -356,89 +181,37 @@ export async function generateIterationReview(params: {
   }>;
   iteration: number;
   blockCatalog?: ValidatedBlockCatalog;
-  familyStagnationStreak?: Map<string, number>;
-  familyIterationCounts?: Map<string, number>;
 }): Promise<ReviewedIterationResult> {
   let review: ReviewDecision | undefined;
-  let reviewFailureMessage: string | undefined;
-  let usedObjectiveGovernance = false;
   const reviewProposal = toReviewProposalBatch(params.proposal, params.evaluations);
-
-  try {
-    review = await withTimeout(
-      params.llmClient.reviewIteration({
-        config: params.config,
-        families: params.families,
-        history: params.history,
-        latestProposal: reviewProposal,
-        preparationResults: params.preparationResults,
-        codeMutationResults: params.codeMutationResults,
-        validationResults: params.validationResults,
-        evaluations: params.evaluations,
-        blockCatalog: params.blockCatalog
-      }),
-      params.config.llmTimeoutMs,
-      "auto-research review"
-    );
-  } catch (error) {
-    reviewFailureMessage = error instanceof Error ? error.message : String(error);
-  }
-
-  if (!review && params.config.loopVersion === "v2") {
-    usedObjectiveGovernance = true;
-    review = buildObjectiveReview({
+  review = await withTimeout(
+    params.llmClient.reviewIteration({
       config: params.config,
       families: params.families,
       history: params.history,
-      iteration: params.iteration,
+      latestProposal: reviewProposal,
+      preparationResults: params.preparationResults,
+      codeMutationResults: params.codeMutationResults,
+      validationResults: params.validationResults,
       evaluations: params.evaluations,
-      summary: reviewFailureMessage
-        ? `Objective governance continued after review failure: ${reviewFailureMessage}`
-        : "Objective governance continued without an LLM review."
-    });
-  }
+      blockCatalog: params.blockCatalog
+    }),
+    params.config.llmTimeoutMs,
+    "auto-research review"
+  );
 
-  if (!review) {
-    throw new Error(reviewFailureMessage ?? `Missing review for iteration ${params.iteration}.`);
-  }
-
-  try {
-    review = governReviewDecision({
-      review,
-      evaluations: params.evaluations,
-      config: params.config,
-      iteration: params.iteration,
-      familyStagnationStreak: params.familyStagnationStreak,
-      familyIterationCounts: params.familyIterationCounts
-    });
-    review = ensureNextCandidatesForKeepSearching({
-      review,
-      limit: params.config.candidatesPerIteration,
-      iteration: params.iteration
-    });
-  } catch (error) {
-    if (params.config.loopVersion !== "v2") {
-      throw error;
-    }
-
-    usedObjectiveGovernance = true;
-    const message = error instanceof Error ? error.message : String(error);
-    review = appendReviewObservation(
-      buildObjectiveReview({
-        config: params.config,
-        families: params.families,
-        history: params.history,
-        iteration: params.iteration,
-        evaluations: params.evaluations,
-        summary: review.summary
-      }),
-      `Objective compiler supplied a deterministic next batch because review continuation was invalid: ${message}`
-    );
-  }
+  review = ensureReviewDecisionReferencesEvaluatedCandidates({
+    review,
+    evaluations: params.evaluations,
+    iteration: params.iteration
+  });
+  review = ensureNextCandidatesForKeepSearching({
+    review,
+    limit: params.config.candidatesPerIteration,
+    iteration: params.iteration
+  });
 
   return {
-    review,
-    reviewFailureMessage,
-    usedObjectiveGovernance
+    review
   };
 }

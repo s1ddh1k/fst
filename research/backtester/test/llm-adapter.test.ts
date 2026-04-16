@@ -1,7 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import path from "node:path";
 import {
   CliResearchLlmClient,
   type AutoResearchRunConfig,
@@ -154,9 +152,8 @@ test("CliResearchLlmClient preserves explicit model overrides for review prompts
   assert.equal(calls[0]?.hardTimeoutMs, 3_000);
 });
 
-test("CliResearchLlmClient block proposal prompt includes explicit candidates schema", async () => {
+test("CliResearchLlmClient block proposal prompt uses the structured inlined context", async () => {
   const calls: Array<{ prompt: string; options: Record<string, unknown> }> = [];
-  const outputDir = `/tmp/fst-llm-adapter-block-${Date.now()}`;
   const client = new CliResearchLlmClient({
     provider: "codex",
     cwd: "/tmp/fst",
@@ -184,7 +181,6 @@ test("CliResearchLlmClient block proposal prompt includes explicit candidates sc
   await client.proposeCandidates({
     config: {
       ...BASE_CONFIG,
-      outputDir,
       researchStage: "block"
     },
     families: [{
@@ -197,14 +193,9 @@ test("CliResearchLlmClient block proposal prompt includes explicit candidates sc
   });
 
   assert.equal(calls.length, 1);
-  assert.match(calls[0]?.prompt ?? "", /Read these workspace files before answering:/);
-  const contextDir = path.join(outputDir, "iteration-01", "llm-proposal");
-  assert.ok(existsSync(path.join(contextDir, "run-config.json")));
-  assert.ok(existsSync(path.join(contextDir, "families.json")));
-  assert.ok(existsSync(path.join(contextDir, "history-summary.json")));
-  assert.ok(existsSync(path.join(contextDir, "response-schema.json")));
-  assert.match(readFileSync(path.join(contextDir, "response-schema.json"), "utf8"), /"candidates"/);
-  rmSync(outputDir, { recursive: true, force: true });
+  assert.match(calls[0]?.prompt ?? "", /Current run config:/);
+  assert.match(calls[0]?.prompt ?? "", /"candidates": \[/);
+  assert.doesNotMatch(calls[0]?.prompt ?? "", /Read these workspace files before answering:/);
 });
 
 test("CliResearchLlmClient unwraps nested proposal envelopes that contain candidates", async () => {
@@ -322,8 +313,7 @@ test("CliResearchLlmClient repairs keep_searching reviews that omit next candida
   assert.equal(review.nextCandidates[0]?.familyId, BASE_FAMILY.familyId);
 });
 
-test("CliResearchLlmClient repairs non-JSON block review responses using saved raw output", async () => {
-  const outputDir = `/tmp/fst-llm-adapter-review-${Date.now()}`;
+test("CliResearchLlmClient block review fails fast on non-JSON responses", async () => {
   const calls: string[] = [];
   const client = new CliResearchLlmClient({
     provider: "codex",
@@ -353,47 +343,44 @@ test("CliResearchLlmClient repairs non-JSON block review responses using saved r
     }
   });
 
-  const review = await client.reviewIteration({
-    config: {
-      ...BASE_CONFIG,
-      outputDir,
-      researchStage: "block"
-    },
-    families: [{
-      ...BASE_FAMILY,
-      familyId: "block:test",
-      strategyName: "block:test"
-    }],
-    history: [],
-    latestProposal: {
-      researchSummary: "test",
-      preparation: [],
-      proposedFamilies: [],
-      codeTasks: [],
-      candidates: [{
-        candidateId: "candidate-01",
-        familyId: "block:test",
-        thesis: "test",
-        parameters: {
-          minStrengthPct: 0.8
+  await assert.rejects(
+    () =>
+      client.reviewIteration({
+        config: {
+          ...BASE_CONFIG,
+          researchStage: "block"
         },
-        invalidationSignals: []
-      }]
-    },
-    preparationResults: [],
-    codeMutationResults: [],
-    validationResults: [],
-    evaluations: []
-  });
+        families: [{
+          ...BASE_FAMILY,
+          familyId: "block:test",
+          strategyName: "block:test"
+        }],
+        history: [],
+        latestProposal: {
+          researchSummary: "test",
+          preparation: [],
+          proposedFamilies: [],
+          codeTasks: [],
+          candidates: [{
+            candidateId: "candidate-01",
+            familyId: "block:test",
+            thesis: "test",
+            parameters: {
+              minStrengthPct: 0.8
+            },
+            invalidationSignals: []
+          }]
+        },
+        preparationResults: [],
+        codeMutationResults: [],
+        validationResults: [],
+        evaluations: []
+      }),
+    /Failed to extract JSON from LLM response/
+  );
 
-  assert.equal(review.verdict, "stop_no_edge");
-  assert.equal(calls.length, 2);
-  assert.match(calls[0] ?? "", /Read these workspace files before answering:/);
-  assert.match(calls[1] ?? "", /Correction task:/);
-  const contextDir = path.join(outputDir, "iteration-01", "llm-review");
-  assert.ok(existsSync(path.join(contextDir, "response.raw.txt")));
-  assert.ok(existsSync(path.join(contextDir, "response.repaired.raw.txt")));
-  rmSync(outputDir, { recursive: true, force: true });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0] ?? "", /Structured run facts:/);
 });
 
 test("CliResearchLlmClient proposal parse errors expose top-level keys for debugging", async () => {

@@ -42,6 +42,7 @@ import {
   calculateAutoResearchMinimumLimit,
   createAutoResearchOrchestrator
 } from "./auto-research/index.js";
+import type { AutoResearchRunConfig } from "./auto-research/index.js";
 import type { Candle } from "./types.js";
 import type { StrategyRegimePublicationVerification } from "./strategy-regime-verification.js";
 import { resolveWorkspaceRelativePath } from "./workspace-path.js";
@@ -434,7 +435,6 @@ async function main(): Promise<void> {
     autoResearchCandidateDiversificationMinDistanceOption
       ? Number.parseFloat(autoResearchCandidateDiversificationMinDistanceOption)
       : undefined;
-  const autoResearchLoopVersion = getOption(process.argv, "--auto-research-loop") === "v2" ? "v2" : "v1";
   const autoResearchContinuousMode = process.argv.includes("--continuous");
   const autoResearchMaxRunDurationOption = getOption(process.argv, "--max-run-duration-ms");
   const autoResearchMaxRunDurationMs = autoResearchMaxRunDurationOption
@@ -540,7 +540,10 @@ async function main(): Promise<void> {
         cwd: process.cwd()
       });
       const orchestrator = createAutoResearchOrchestrator({ llmClient });
-      const report = await orchestrator.run({
+      const autoResearchConfig: Omit<
+        AutoResearchRunConfig,
+        "outputDir" | "resumeFrom" | "allowStaleData" | "researchStage" | "blockCatalogPath"
+      > = {
         strategyFamilyIds: autoResearchFamilies.length > 0 ? autoResearchFamilies : undefined,
         universeName,
         timeframe: "1h",
@@ -556,12 +559,9 @@ async function main(): Promise<void> {
         llmProvider,
         llmModel,
         llmTimeoutMs: Math.max(0, autoResearchLlmTimeoutMs),
-        outputDir: resolvedAutoResearchOutput,
-        resumeFrom: autoResearchResume,
         allowDataCollection: autoResearchAllowDataCollection,
         allowFeatureCacheBuild: autoResearchAllowFeatureCache,
         allowCodeMutation: autoResearchAllowCodeMutation,
-        allowStaleData: autoResearchAllowStaleData || undefined,
         minTradesForPromotion:
           typeof autoResearchMinTrades === "number" ? Math.max(0, autoResearchMinTrades) : undefined,
         minNetReturnForPromotion: autoResearchMinNetReturn,
@@ -580,8 +580,6 @@ async function main(): Promise<void> {
           typeof autoResearchMaxNoTradeIterations === "number"
             ? Math.max(0, autoResearchMaxNoTradeIterations)
             : undefined,
-        researchStage: autoResearchStage,
-        blockCatalogPath: autoResearchBlockCatalog,
         seedArtifactPaths: resolvedAutoResearchSeedArtifacts,
         seedCandidatesPerIteration:
           typeof autoResearchSeedCandidates === "number" ? Math.max(0, autoResearchSeedCandidates) : undefined,
@@ -590,7 +588,6 @@ async function main(): Promise<void> {
           Number.isFinite(autoResearchCandidateDiversificationMinDistance)
             ? Math.max(0, autoResearchCandidateDiversificationMinDistance)
             : undefined,
-        loopVersion: autoResearchLoopVersion,
         continuousMode: autoResearchContinuousMode || undefined,
         maxRunDurationMs: autoResearchMaxRunDurationMs,
         iterationTimeoutMs: autoResearchIterationTimeoutMs,
@@ -598,6 +595,14 @@ async function main(): Promise<void> {
         stagnationRetireThreshold: autoResearchStagnationRetireThreshold,
         testStartDate,
         testEndDate
+      };
+      const report = await orchestrator.run({
+        ...autoResearchConfig,
+        outputDir: resolvedAutoResearchOutput,
+        resumeFrom: autoResearchResume,
+        allowStaleData: autoResearchAllowStaleData || undefined,
+        researchStage: autoResearchStage === "auto" ? "block" : autoResearchStage,
+        blockCatalogPath: autoResearchBlockCatalog
       });
 
       if (autoResearchStage === "auto") {
@@ -610,61 +615,10 @@ async function main(): Promise<void> {
             if (Array.isArray(catalogContent.blocks) && catalogContent.blocks.length > 0) {
               console.error(`[auto-research] auto chaining: ${catalogContent.blocks.length} validated blocks found, starting portfolio stage`);
               const portfolioReport = await orchestrator.run({
-                strategyFamilyIds: autoResearchFamilies.length > 0 ? autoResearchFamilies : undefined,
-                universeName,
-                timeframe: "1h",
-                marketLimit,
-                limit,
-                holdoutDays,
-                trainingDays,
-                stepDays,
-                iterations: Math.max(1, autoResearchIterations),
-                candidatesPerIteration: Math.max(1, autoResearchCandidates),
-                parallelism: Math.max(1, autoResearchParallelism),
-                mode: autoResearchMode,
-                llmProvider,
-                llmModel,
-                llmTimeoutMs: Math.max(0, autoResearchLlmTimeoutMs),
+                ...autoResearchConfig,
                 outputDir: `${resolvedAutoResearchOutput}-portfolio`,
-                allowDataCollection: autoResearchAllowDataCollection,
-                allowFeatureCacheBuild: autoResearchAllowFeatureCache,
-                allowCodeMutation: autoResearchAllowCodeMutation,
-                minTradesForPromotion:
-                  typeof autoResearchMinTrades === "number" ? Math.max(0, autoResearchMinTrades) : undefined,
-                minNetReturnForPromotion: autoResearchMinNetReturn,
-                maxDrawdownForPromotion:
-                  Number.isFinite(autoResearchMaxDrawdown) ? Math.max(0, autoResearchMaxDrawdown) : undefined,
-                minPositiveWindowRatioForPromotion:
-                  typeof autoResearchMinPositiveWindowRatio === "number"
-                    ? Math.max(0, Math.min(1, autoResearchMinPositiveWindowRatio))
-                    : undefined,
-                minRandomPercentileForPromotion:
-                  Number.isFinite(autoResearchMinRandomPercentile)
-                    ? Math.max(0, Math.min(1, autoResearchMinRandomPercentile))
-                    : undefined,
-                requireBootstrapSignificanceForPromotion: autoResearchRequireBootstrapSignificance,
-                maxNoTradeIterations:
-                  typeof autoResearchMaxNoTradeIterations === "number"
-                    ? Math.max(0, autoResearchMaxNoTradeIterations)
-                    : undefined,
                 researchStage: "portfolio",
                 blockCatalogPath,
-                seedArtifactPaths: resolvedAutoResearchSeedArtifacts,
-                seedCandidatesPerIteration:
-                  typeof autoResearchSeedCandidates === "number" ? Math.max(0, autoResearchSeedCandidates) : undefined,
-                candidateDiversificationMinDistance:
-                  typeof autoResearchCandidateDiversificationMinDistance === "number" &&
-                  Number.isFinite(autoResearchCandidateDiversificationMinDistance)
-                    ? Math.max(0, autoResearchCandidateDiversificationMinDistance)
-                    : undefined,
-                loopVersion: autoResearchLoopVersion,
-                continuousMode: autoResearchContinuousMode || undefined,
-                maxRunDurationMs: autoResearchMaxRunDurationMs,
-                iterationTimeoutMs: autoResearchIterationTimeoutMs,
-                familyIterationBudget: autoResearchFamilyIterationBudget,
-                stagnationRetireThreshold: autoResearchStagnationRetireThreshold,
-                testStartDate,
-                testEndDate
               });
               console.log(JSON.stringify(portfolioReport, null, 2));
               return;

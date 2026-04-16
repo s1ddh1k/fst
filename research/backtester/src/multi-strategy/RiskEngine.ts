@@ -1,4 +1,4 @@
-import type { PositionIntent, PositionView, StrategySignal } from "../../../../packages/shared/src/index.js";
+import type { PositionView, StrategySignal } from "../../../../packages/shared/src/index.js";
 import type { PortfolioEngineConfig, PortfolioEngineState, RiskCheck } from "./types.js";
 
 export function checkRisk(params: {

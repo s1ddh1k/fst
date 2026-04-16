@@ -3,7 +3,6 @@ import type { HoldoutBacktestSummary, WalkForwardBacktestSummary } from "../type
 
 export type AutoResearchMode = "holdout" | "walk-forward";
 export type AutoResearchRunOutcome = "completed" | "partial" | "aborted" | "invalid_config" | "failed";
-export type AutoResearchLoopVersion = "v1" | "v2";
 
 export type ResearchTimeframe = "1h" | "15m" | "5m" | "1m";
 export type ResearchStage = "block" | "portfolio" | "auto";
@@ -120,7 +119,6 @@ export type CandidateProposal = {
   parentCandidateIds?: string[];
   origin?:
     | "llm"
-    | "novelized"
     | "resume"
     | "artifact_seed"
     | "engine_mutation"
@@ -131,21 +129,6 @@ export type NormalizedCandidateProposal = CandidateProposal & {
   candidateId: string;
   strategyName: string;
   composition?: ResolvedStrategyFamilyComposition;
-};
-
-export type ResearchHypothesis = {
-  hypothesisId: string;
-  stage: "parametric" | "family" | "feature" | "code";
-  title: string;
-  thesis: string;
-  targetFamilyIds: string[];
-  parentHypothesisIds: string[];
-  evidence: string[];
-  proposedSpecChanges: ProposedStrategyFamily[];
-  proposedCodeTasks: CodeMutationTask[];
-  expectedMechanism: string;
-  riskNotes: string[];
-  origin: "llm" | "engine" | "artifact_seed" | "human_seed";
 };
 
 export type ExperimentPlan = {
@@ -367,10 +350,7 @@ export type ReviewDecision = {
 };
 
 export type ResearchIterationProvenance = {
-  proposalSource: "resume" | "llm" | "objective_continuation" | "objective_seed";
-  proposalFailureMessage?: string;
-  reviewUsedObjectiveGovernance: boolean;
-  reviewFailureMessage?: string;
+  proposalSource: "resume" | "llm";
 };
 
 export type PreparationExecutionResult = {
@@ -462,7 +442,6 @@ export type AutoResearchRunConfig = {
   seedArtifactPaths?: string[];
   seedCandidatesPerIteration?: number;
   candidateDiversificationMinDistance?: number;
-  loopVersion?: AutoResearchLoopVersion;
   autoPromote?: boolean;
   autoPromoteMaxCandidates?: number;
 

@@ -138,10 +138,6 @@ function formatPercent(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
 }
 
-function formatNumber(value: number): string {
-  return Number.isFinite(value) ? value.toFixed(2) : "0.00";
-}
-
 function strategySortScore(row: FollowupRow): number {
   const passes =
     Number(row.passesSufficiency) +

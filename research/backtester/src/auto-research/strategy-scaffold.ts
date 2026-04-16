@@ -1,5 +1,3 @@
-import type { GeneratedStrategyMetadata } from "./strategy-template.js";
-
 export type StrategyDesign = {
   familyId: string;
   strategyName: string;

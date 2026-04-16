@@ -26,7 +26,6 @@ function buildConfig(overrides: Partial<AutoResearchRunConfig> = {}): AutoResear
     allowDataCollection: false,
     allowFeatureCacheBuild: false,
     allowCodeMutation: false,
-    loopVersion: "v2",
     ...overrides
   };
 }
@@ -98,10 +97,80 @@ function buildEvaluation(candidate: NormalizedCandidateProposal, netReturn: numb
   };
 }
 
-test("research review repairs empty keep_searching batches with deterministic continuation", async () => {
+test("research review rejects empty keep_searching batches", async () => {
   const family = getStrategyFamilies(["relative-momentum-pullback"])[0]!;
   const candidate = normalizeCandidateProposal(
     {
+      familyId: family.familyId,
+      thesis: "base",
+      parameters: {
+        minStrengthPct: 0.8,
+        minRiskOn: 0.1,
+        pullbackZ: 1,
+        trailAtrMult: 2.2
+      },
+      invalidationSignals: []
+    },
+    [family],
+    0
+  );
+
+  await assert.rejects(
+    () => generateIterationReview({
+      llmClient: {
+        async proposeCandidates() {
+          throw new Error("not used");
+        },
+        async reviewIteration() {
+          return {
+            summary: "keep searching",
+            verdict: "keep_searching",
+            nextPreparation: [],
+            proposedFamilies: [],
+            codeTasks: [],
+            nextCandidates: [],
+            retireCandidateIds: [],
+            observations: []
+          };
+        }
+      },
+      config: buildConfig({
+        strategyFamilyIds: [family.familyId]
+      }),
+      families: [family],
+      history: [],
+      proposal: {
+        researchSummary: "proposal",
+        preparation: [],
+        proposedFamilies: [],
+        codeTasks: [],
+        candidates: [
+          {
+            candidateId: candidate.candidateId,
+            familyId: candidate.familyId,
+            thesis: candidate.thesis,
+            parameters: candidate.parameters,
+            invalidationSignals: candidate.invalidationSignals,
+            parentCandidateIds: candidate.parentCandidateIds,
+            origin: candidate.origin
+          }
+        ]
+      },
+      evaluations: [buildEvaluation(candidate, 0.02)],
+      preparationResults: [],
+      codeMutationResults: [],
+      validationResults: [],
+      iteration: 1
+    }),
+    /keep_searching without any unique next candidates/
+  );
+});
+
+test("research review keeps a valid LLM promotion decision", async () => {
+  const family = getStrategyFamilies(["relative-momentum-pullback"])[0]!;
+  const candidate = normalizeCandidateProposal(
+    {
+      candidateId: "llm-pick-1",
       familyId: family.familyId,
       thesis: "base",
       parameters: {
@@ -123,8 +192,9 @@ test("research review repairs empty keep_searching batches with deterministic co
       },
       async reviewIteration() {
         return {
-          summary: "keep searching",
-          verdict: "keep_searching",
+          summary: "promote the strongest hypothesis",
+          verdict: "promote_candidate",
+          promotedCandidateId: candidate.candidateId,
           nextPreparation: [],
           proposedFamilies: [],
           codeTasks: [],
@@ -135,7 +205,9 @@ test("research review repairs empty keep_searching batches with deterministic co
       }
     },
     config: buildConfig({
-      strategyFamilyIds: [family.familyId]
+      strategyFamilyIds: [family.familyId],
+      minTradesForPromotion: 20,
+      minNetReturnForPromotion: 0.1
     }),
     families: [family],
     history: [],
@@ -163,8 +235,6 @@ test("research review repairs empty keep_searching batches with deterministic co
     iteration: 1
   });
 
-  assert.equal(result.review.verdict, "keep_searching");
-  assert.ok(result.review.nextCandidates.length > 0);
-  assert.match(result.review.observations.join("\n"), /deterministic next batch/i);
-  assert.equal(result.usedObjectiveGovernance, true);
+  assert.equal(result.review.verdict, "promote_candidate");
+  assert.equal(result.review.promotedCandidateId, candidate.candidateId);
 });

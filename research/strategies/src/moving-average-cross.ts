@@ -1,4 +1,4 @@
-import type { Candle, Signal, Strategy, StrategyContext } from "./types.js";
+import type { Signal, Strategy, StrategyContext } from "./types.js";
 import { getSma } from "./factors/index.js";
 
 export function createMovingAverageCrossStrategy(params?: {

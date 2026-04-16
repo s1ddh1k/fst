@@ -1,59 +1,15 @@
 import type { AutoResearchRunReport } from "./types.js";
 import type { AutoResearchStatus } from "./run-manager.js";
-
-type AutoResearchLeaderboardEntry = {
-  iteration: number;
-  candidateId: string;
-  familyId: string;
-  netReturn: number;
-  maxDrawdown: number;
-  tradeCount: number;
-  buyAndHoldReturn?: number;
-  excessReturn?: number;
-  parameters?: Record<string, number>;
-};
-
-type AutoResearchCandidateLedgerEntry = {
-  fingerprint: string;
-  familyId: string;
-  parameters: Record<string, number>;
-  firstCandidateId: string;
-  lastCandidateId: string;
-  firstIteration: number;
-  lastIteration: number;
-  appearances: number;
-  bestNetReturn: number;
-  bestTradeCount: number;
-  positiveAppearances: number;
-  tradefulAppearances: number;
-};
-
-type AutoResearchFamilySummaryEntry = {
-  familyId: string;
-  evaluations: number;
-  uniqueCandidates: number;
-  positiveEvaluations: number;
-  tradefulEvaluations: number;
-  bestNetReturn: number;
-  bestTradeNetReturn?: number;
-  bestTradeCount: number;
-  totalTrades: number;
-  lastIteration: number;
-};
+import type {
+  AutoResearchCandidateGenealogyEntry,
+  AutoResearchCandidateLedgerEntry,
+  AutoResearchFamilySummaryEntry,
+  AutoResearchLeaderboardEntry
+} from "./artifact-summaries.js";
 
 type AutoResearchWindowSummary = NonNullable<
   NonNullable<AutoResearchRunReport["bestCandidate"]>["diagnostics"]["windows"]
 >;
-
-type AutoResearchCandidateGenealogyEntry = {
-  iteration: number;
-  candidateId: string;
-  familyId: string;
-  origin: string;
-  parentCandidateIds: string[];
-  netReturn: number;
-  tradeCount: number;
-};
 
 function pct(value: number | undefined): string {
   if (typeof value !== "number" || Number.isNaN(value)) {

@@ -1,5 +1,4 @@
-import type { Strategy, StrategyTimeframe } from "../../../../packages/shared/src/index.js";
-import type { ScoredStrategy } from "../../../strategies/src/types.js";
+import type { StrategyTimeframe } from "../../../../packages/shared/src/index.js";
 import type { ResearchParameterSpec, StrategyFamilyDefinition } from "./types.js";
 import { adaptScoredStrategy } from "../multi-strategy/index.js";
 import {

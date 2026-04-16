@@ -446,41 +446,6 @@ function runPortfolioRangeBacktest(params: {
   });
 }
 
-function toGhostSignalCount(result: MultiStrategyBacktestResult): number {
-  return Object.values(result.ghostSummary).reduce((sum, item) => sum + item.count, 0);
-}
-
-function universeSizeSummary(result: MultiStrategyBacktestResult): {
-  avg: number;
-  min: number;
-  max: number;
-  observationCount: number;
-} {
-  if (result.universeCoverageSummary.observationCount > 0) {
-    return result.universeCoverageSummary;
-  }
-
-  let total = 0;
-  let min = Number.POSITIVE_INFINITY;
-  let max = 0;
-  let observationCount = 0;
-
-  for (const snapshot of result.universeSnapshots) {
-    const size = snapshot.markets.length;
-    total += size;
-    min = Math.min(min, size);
-    max = Math.max(max, size);
-    observationCount += 1;
-  }
-
-  return {
-    avg: observationCount === 0 ? 0 : total / observationCount,
-    min: Number.isFinite(min) ? min : 0,
-    max: observationCount === 0 ? 0 : max,
-    observationCount
-  };
-}
-
 function calculateDrawdown(equityCurve: number[]): number {
   let peak = equityCurve[0] ?? 0;
   let maxDrawdown = 0;

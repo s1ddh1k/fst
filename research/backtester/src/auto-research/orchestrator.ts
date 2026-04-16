@@ -12,9 +12,8 @@ import { evaluateBlockCandidate } from "./block-evaluator.js";
 import { preloadMarketData } from "../scored-runner.js";
 import type { StrategyTimeframe } from "../../../../packages/shared/src/index.js";
 import type { Candle } from "../types.js";
-import { getStrategyFamilies, normalizeCandidateProposal } from "./catalog.js";
+import { getStrategyFamilies } from "./catalog.js";
 import { CliCodeMutationAgent, type CodeAgent } from "./code-agent.js";
-import { executeCodeMutationInWorktree, readWorktreePatch } from "./code-worktree.js";
 import { prepareExperimentKernel } from "./experiment-kernel.js";
 import { generateHypothesisProposal } from "./hypothesis-orchestrator.js";
 import {
@@ -46,12 +45,9 @@ import type {
   CandidateBacktestEvaluation,
   CodeMutationExecutionResult,
   CatalogEntryRecord,
-  CandidateProposal,
-  ExperimentPlan,
   NormalizedCandidateProposal,
   PreparationExecutionResult,
   ProposalBatch,
-  ResearchHypothesis,
   ResearchLineage,
   ResearchIterationRecord,
   ReviewDecision,
@@ -71,66 +67,25 @@ import {
 } from "./lineage-store.js";
 import { generateIterationReview } from "./research-review.js";
 import { renderAutoResearchHtmlWithOptions } from "./report-html.js";
+import { loadJournal } from "./research-journal.js";
+import { renderSessionContractMarkdown } from "./session-contract.js";
 import { runPostMutationValidation } from "./validation.js";
 import { autoPromoteAndLog } from "./auto-promote.js";
 import { discoverRuntimeScoredStrategyNames } from "./runtime-discovery.js";
-import { generateOptimizedCandidatesForFamilies } from "./parameter-optimizer.js";
 import { repairWalkForwardConfig } from "./walk-forward-config.js";
 import { calculateAutoResearchMinimumLimit, repairAutoResearchLimit } from "./limit-resolution.js";
+import { buildAutoResearchArtifactSummaries } from "./artifact-summaries.js";
 import {
-  calculateCandidateRiskAdjustedScore,
   compareCandidateEvaluations,
   passesPromotionGate,
   summarizeEvaluationRanking
 } from "./ranking.js";
-import {
-  MULTI_TF_REGIME_SWITCH_PORTFOLIO
-} from "./portfolio-runtime.js";
-
-function createSafeAppendLineageEvent(log: (msg: string) => Promise<void>) {
-  return async (params: Parameters<typeof appendLineageEvent>[0]): Promise<void> => {
-    try {
-      await appendLineageEvent(params);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await log(`[auto-research] lineage event write failed: ${message}`);
-    }
-  };
-}
 
 const SCREEN_FAMILY_TO_CONFIRM_FAMILY = new Map<string, string>([
   ["multi-tf-regime-switch-screen", "multi-tf-regime-switch"],
   ["multi-tf-trend-burst", "multi-tf-regime-switch"],
   ["multi-tf-defensive-reclaim", "multi-tf-regime-switch"]
 ]);
-
-const REGIME_SWITCH_CONFIRM_DEFAULT_PARAMETERS: Record<string, number> = {
-  microLookbackBars: 10,
-  microExtensionThreshold: 0.003,
-  microHoldingBarsMax: 8,
-  microStopAtrMult: 1.05,
-  microMinVolumeSpike: 0.95,
-  microMinRiskOnScore: 0.01,
-  microMinLiquidityScore: 0.03,
-  microProfitTarget: 0.004,
-  microMinRiskOnGate: 0.01,
-  microMinLiquidityGate: 0.03,
-  microMinVolatilityGate: 0.008
-};
-
-const DEFAULT_CANDIDATE_DIVERSIFICATION_MIN_DISTANCE = 0.08;
-
-type ArtifactSeedSnapshot = {
-  candidateId?: string;
-  familyId: string;
-  parameters: Record<string, number>;
-  netReturn?: number;
-  maxDrawdown?: number;
-  tradeCount?: number;
-  positiveWindowRatio?: number;
-  score?: number;
-  sourcePath: string;
-};
 
 function summarizeWindows(
   windows: CandidateBacktestEvaluation["diagnostics"]["windows"] | undefined
@@ -173,6 +128,33 @@ function summarizeWindows(
   }
 
   return lines;
+}
+
+function buildJournalNextActionHint(review: ReviewDecision): string | undefined {
+  const nextCandidate = review.nextCandidates[0];
+  if (nextCandidate) {
+    return `Probe the next ${nextCandidate.familyId} candidate with materially different parameters before widening scope.`;
+  }
+
+  const nextPreparation = review.nextPreparation[0];
+  if (nextPreparation) {
+    return `Run preparation step ${nextPreparation.kind} before proposing another batch.`;
+  }
+
+  const nextCodeTask = review.codeTasks[0];
+  if (nextCodeTask) {
+    return `Resolve code task "${nextCodeTask.title}" before trusting the next iteration.`;
+  }
+
+  if (review.verdict === "stop_no_edge") {
+    return "Rotate to a different family or evaluation shape; the current batch did not clear the promotion gate.";
+  }
+
+  if (review.verdict === "keep_searching") {
+    return "Keep searching, but force the next batch to be meaningfully different from the current parameters.";
+  }
+
+  return undefined;
 }
 
 function summarizeMarkdown(report: AutoResearchRunReport): string {
@@ -255,10 +237,6 @@ function summarizeMarkdown(report: AutoResearchRunReport): string {
   return `${lines.join("\n")}\n`;
 }
 
-function compareEvaluations(left: CandidateBacktestEvaluation, right: CandidateBacktestEvaluation): number {
-  return compareCandidateEvaluations(left, right);
-}
-
 function defaultOutcomeMessage(outcome: AutoResearchRunOutcome): string {
   switch (outcome) {
     case "completed":
@@ -274,52 +252,6 @@ function defaultOutcomeMessage(outcome: AutoResearchRunOutcome): string {
     default:
       return "Auto research run finished.";
   }
-}
-
-async function runShellCommand(command: string, cwd: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
-  return await new Promise((resolve, reject) => {
-    const child = spawn("bash", ["-lc", command], {
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ stdout, stderr, code }));
-  });
-}
-
-async function applyWorktreePatchToWorkspace(params: {
-  patchPath?: string;
-  repoRoot: string;
-}): Promise<{ status: "applied" | "skipped" | "failed"; detail: string }> {
-  const patchText = await readWorktreePatch(params.patchPath);
-  if (!patchText || patchText.trim().length === 0) {
-    return {
-      status: "skipped",
-      detail: "No patch generated from worktree execution."
-    };
-  }
-
-  const escapedPath = params.patchPath!.replace(/'/g, "'\\''");
-  const result = await runShellCommand(`git apply --index --whitespace=nowarn '${escapedPath}'`, params.repoRoot);
-  if (result.code !== 0) {
-    return {
-      status: "failed",
-      detail: result.stderr.trim() || result.stdout.trim() || "git apply failed"
-    };
-  }
-
-  return {
-    status: "applied",
-    detail: "Applied benchmarked worktree patch back to the main workspace."
-  };
 }
 
 function promotionGateConfig(config: AutoResearchRunConfig) {
@@ -492,54 +424,6 @@ async function resolveFallbackCandidateMarkets(params: {
     .filter((marketCode) => fallbackSets.every((eligible) => eligible.has(marketCode)));
 }
 
-function findTopPromotableEvaluation(
-  evaluations: CandidateBacktestEvaluation[],
-  config: AutoResearchRunConfig
-): CandidateBacktestEvaluation | undefined {
-  const gateConfig = promotionGateConfig(config);
-
-  return evaluations.find((evaluation) => passesPromotionGate(evaluation, gateConfig));
-}
-
-function shouldStageConfirmCandidate(evaluation: CandidateBacktestEvaluation): boolean {
-  if (evaluation.status !== "completed") {
-    return false;
-  }
-
-  if (evaluation.summary.tradeCount <= 0 || evaluation.summary.netReturn <= 0) {
-    return false;
-  }
-
-  const positiveWindowRatio = evaluation.diagnostics.windows.positiveWindowRatio;
-  if (typeof positiveWindowRatio === "number" && positiveWindowRatio <= 0) {
-    return false;
-  }
-
-  return true;
-}
-
-function normalizeCandidates(
-  proposals: CandidateProposal[],
-  familyIds: ReturnType<typeof getStrategyFamilies>
-): NormalizedCandidateProposal[] {
-  return proposals.map((proposal, index) => normalizeCandidateProposal(proposal, familyIds, index));
-}
-
-// toReviewProposalBatch is in research-review.ts
-
-function dedupeCandidates(candidates: NormalizedCandidateProposal[]): NormalizedCandidateProposal[] {
-  const seen = new Set<string>();
-  return candidates.filter((candidate) => {
-    const key = `${candidate.strategyName}:${JSON.stringify(candidate.parameters)}`;
-    if (seen.has(key)) {
-      return false;
-    }
-
-    seen.add(key);
-    return true;
-  });
-}
-
 async function runWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let nextIndex = 0;
@@ -581,1224 +465,6 @@ function classifyEvaluationFailureStage(
   return "backtest";
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined, label: string): Promise<T> {
-  if (!timeoutMs || timeoutMs <= 0) {
-    return promise;
-  }
-
-  return await new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    promise
-      .then((value) => {
-        clearTimeout(timer);
-        resolve(value);
-      })
-      .catch((error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-  });
-}
-
-type LiveLeaderboardEntry = {
-  iteration: number;
-  candidateId: string;
-  familyId: string;
-  riskAdjustedScore: number;
-  netReturn: number;
-  maxDrawdown: number;
-  tradeCount: number;
-  buyAndHoldReturn?: number;
-  excessReturn?: number;
-  parameters: Record<string, number>;
-};
-
-type CandidateLedgerEntry = {
-  fingerprint: string;
-  familyId: string;
-  parameters: Record<string, number>;
-  firstCandidateId: string;
-  lastCandidateId: string;
-  firstIteration: number;
-  lastIteration: number;
-  appearances: number;
-  bestNetReturn: number;
-  bestTradeCount: number;
-  positiveAppearances: number;
-  tradefulAppearances: number;
-};
-
-type FamilySummaryEntry = {
-  familyId: string;
-  evaluations: number;
-  uniqueCandidates: number;
-  positiveEvaluations: number;
-  tradefulEvaluations: number;
-  bestNetReturn: number;
-  bestTradeNetReturn?: number;
-  bestTradeCount: number;
-  totalTrades: number;
-  lastIteration: number;
-};
-
-type CandidateGenealogyEntry = {
-  iteration: number;
-  candidateId: string;
-  familyId: string;
-  origin: string;
-  parentCandidateIds: string[];
-  netReturn: number;
-  tradeCount: number;
-};
-
-function stableParametersKey(parameters: Record<string, number>): string {
-  return JSON.stringify(
-    Object.keys(parameters)
-      .sort((left, right) => left.localeCompare(right))
-      .reduce<Record<string, number>>((result, key) => {
-        result[key] = quantize(parameters[key] ?? 0);
-        return result;
-      }, {})
-  );
-}
-
-function candidateFingerprint(candidate: Pick<NormalizedCandidateProposal, "familyId" | "parameters">): string {
-  return `${candidate.familyId}:${stableParametersKey(candidate.parameters)}`;
-}
-
-function asFiniteNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function asNumericParameters(value: unknown): Record<string, number> | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, entry]) => typeof entry === "number" && Number.isFinite(entry))
-    .map(([key, entry]) => [key, entry as number] as const);
-
-  if (entries.length === 0) {
-    return undefined;
-  }
-
-  return Object.fromEntries(entries);
-}
-
-function snapshotFromArtifactNode(node: unknown, sourcePath: string): ArtifactSeedSnapshot | undefined {
-  if (!node || typeof node !== "object") {
-    return undefined;
-  }
-
-  const record = node as Record<string, unknown>;
-  const directFamilyId =
-    typeof record.familyId === "string"
-      ? record.familyId
-      : typeof record.strategyName === "string"
-        ? record.strategyName
-        : undefined;
-  const directParameters = asNumericParameters(record.parameters);
-
-  if (directFamilyId && directParameters) {
-    return {
-      candidateId: typeof record.candidateId === "string" ? record.candidateId : undefined,
-      familyId: directFamilyId,
-      parameters: directParameters,
-      netReturn: asFiniteNumber(record.netReturn) ?? asFiniteNumber(record.avgTestReturn),
-      maxDrawdown: asFiniteNumber(record.maxDrawdown),
-      tradeCount: asFiniteNumber(record.tradeCount) ?? asFiniteNumber(record.executedTradeCount),
-      positiveWindowRatio:
-        asFiniteNumber(record.positiveWindowRatio) ??
-        asFiniteNumber(record.positiveRate) ??
-        asFiniteNumber(record.neighborPositiveRate),
-      score: asFiniteNumber(record.score) ?? asFiniteNumber(record.avgTestReturn) ?? asFiniteNumber(record.netReturn),
-      sourcePath
-    };
-  }
-
-  const nestedCandidate = record.candidate;
-  if (!nestedCandidate || typeof nestedCandidate !== "object") {
-    return undefined;
-  }
-
-  const candidateRecord = nestedCandidate as Record<string, unknown>;
-  const familyId = typeof candidateRecord.familyId === "string" ? candidateRecord.familyId : undefined;
-  const parameters = asNumericParameters(candidateRecord.parameters);
-
-  if (!familyId || !parameters) {
-    return undefined;
-  }
-
-  const summary = record.summary && typeof record.summary === "object"
-    ? (record.summary as Record<string, unknown>)
-    : undefined;
-  const diagnostics = record.diagnostics && typeof record.diagnostics === "object"
-    ? (record.diagnostics as Record<string, unknown>)
-    : undefined;
-  const windows = diagnostics?.windows && typeof diagnostics.windows === "object"
-    ? (diagnostics.windows as Record<string, unknown>)
-    : undefined;
-
-  return {
-    candidateId: typeof candidateRecord.candidateId === "string" ? candidateRecord.candidateId : undefined,
-    familyId,
-    parameters,
-    netReturn: asFiniteNumber(summary?.netReturn),
-    maxDrawdown: asFiniteNumber(summary?.maxDrawdown),
-    tradeCount: asFiniteNumber(summary?.tradeCount),
-    positiveWindowRatio: asFiniteNumber(windows?.positiveWindowRatio),
-    score: asFiniteNumber(summary?.netReturn),
-    sourcePath
-  };
-}
-
-function collectArtifactSeedSnapshots(
-  node: unknown,
-  sourcePath: string,
-  snapshots: ArtifactSeedSnapshot[]
-): void {
-  const snapshot = snapshotFromArtifactNode(node, sourcePath);
-  if (snapshot) {
-    snapshots.push(snapshot);
-  }
-
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      collectArtifactSeedSnapshots(item, sourcePath, snapshots);
-    }
-    return;
-  }
-
-  if (!node || typeof node !== "object") {
-    return;
-  }
-
-  for (const value of Object.values(node as Record<string, unknown>)) {
-    collectArtifactSeedSnapshots(value, sourcePath, snapshots);
-  }
-}
-
-function scoreArtifactSeed(snapshot: ArtifactSeedSnapshot): number {
-  const baseScore = Number.isFinite(snapshot.score)
-    ? snapshot.score!
-    : (snapshot.netReturn ?? Number.NEGATIVE_INFINITY) - (snapshot.maxDrawdown ?? 0) * 0.7;
-  const tradeBoost = Math.min(snapshot.tradeCount ?? 0, 100) * 0.0002;
-  const windowBoost = Math.max(0, snapshot.positiveWindowRatio ?? 0) * 0.01;
-  return baseScore + tradeBoost + windowBoost;
-}
-
-function isViableArtifactSeed(snapshot: ArtifactSeedSnapshot): boolean {
-  if (Number.isFinite(snapshot.netReturn) && snapshot.netReturn! <= 0) {
-    return false;
-  }
-
-  if (Number.isFinite(snapshot.tradeCount) && snapshot.tradeCount! < 2) {
-    return false;
-  }
-
-  return true;
-}
-
-function calculateCandidateParameterDistance(
-  left: Pick<NormalizedCandidateProposal, "familyId" | "parameters">,
-  right: Pick<NormalizedCandidateProposal, "familyId" | "parameters">,
-  familyMap: Map<string, StrategyFamilyDefinition>
-): number {
-  if (left.familyId !== right.familyId) {
-    return 1;
-  }
-
-  const family = familyMap.get(left.familyId);
-  if (!family || family.parameterSpecs.length === 0) {
-    return 0;
-  }
-
-  let totalDistance = 0;
-  let contributingSpecs = 0;
-
-  for (const spec of family.parameterSpecs) {
-    const range = spec.max - spec.min;
-    if (range <= 0) {
-      continue;
-    }
-
-    const leftValue = left.parameters[spec.name];
-    const rightValue = right.parameters[spec.name];
-    if (!Number.isFinite(leftValue) || !Number.isFinite(rightValue)) {
-      continue;
-    }
-
-    totalDistance += Math.abs(leftValue - rightValue) / range;
-    contributingSpecs += 1;
-  }
-
-  if (contributingSpecs === 0) {
-    return 0;
-  }
-
-  return totalDistance / contributingSpecs;
-}
-
-function buildLeaderboard(
-  iterations: ResearchIterationRecord[],
-  liveEvaluations: CandidateBacktestEvaluation[] = []
-): LiveLeaderboardEntry[] {
-  const toEntry = (evaluation: CandidateBacktestEvaluation, iter: number) => {
-    const bh = evaluation.summary.buyAndHoldReturn;
-    return {
-      iteration: iter,
-      candidateId: evaluation.candidate.candidateId,
-      familyId: evaluation.candidate.familyId,
-      riskAdjustedScore: calculateCandidateRiskAdjustedScore(evaluation),
-      netReturn: evaluation.summary.netReturn,
-      maxDrawdown: evaluation.summary.maxDrawdown,
-      tradeCount: evaluation.summary.tradeCount,
-      buyAndHoldReturn: bh,
-      excessReturn: bh !== undefined ? evaluation.summary.netReturn - bh : undefined,
-      parameters: evaluation.candidate.parameters
-    };
-  };
-  return [
-    ...iterations.flatMap((iteration) =>
-      iteration.evaluations.map((evaluation) => toEntry(evaluation, iteration.iteration))
-    ),
-    ...liveEvaluations.map((evaluation) => toEntry(evaluation, iterations.length + 1))
-  ].sort((left, right) => {
-    if (right.riskAdjustedScore !== left.riskAdjustedScore) {
-      return right.riskAdjustedScore - left.riskAdjustedScore;
-    }
-
-    if (right.netReturn !== left.netReturn) {
-      return right.netReturn - left.netReturn;
-    }
-
-    if (left.maxDrawdown !== right.maxDrawdown) {
-      return left.maxDrawdown - right.maxDrawdown;
-    }
-
-    return right.tradeCount - left.tradeCount;
-  });
-}
-
-function buildUniqueLeaderboard(entries: LiveLeaderboardEntry[]): LiveLeaderboardEntry[] {
-  const bestByKey = new Map<string, LiveLeaderboardEntry>();
-
-  for (const entry of entries) {
-    const key = candidateFingerprint(entry);
-    if (!bestByKey.has(key)) {
-      bestByKey.set(key, entry);
-    }
-  }
-
-  return [...bestByKey.values()];
-}
-
-function buildCandidateLedger(
-  iterations: ResearchIterationRecord[],
-  liveEvaluations: CandidateBacktestEvaluation[] = []
-): CandidateLedgerEntry[] {
-  const ledger = new Map<string, CandidateLedgerEntry>();
-
-  const register = (iteration: number, evaluation: CandidateBacktestEvaluation) => {
-    const fingerprint = candidateFingerprint(evaluation.candidate);
-    const existing = ledger.get(fingerprint);
-
-    if (!existing) {
-      ledger.set(fingerprint, {
-        fingerprint,
-        familyId: evaluation.candidate.familyId,
-        parameters: evaluation.candidate.parameters,
-        firstCandidateId: evaluation.candidate.candidateId,
-        lastCandidateId: evaluation.candidate.candidateId,
-        firstIteration: iteration,
-        lastIteration: iteration,
-        appearances: 1,
-        bestNetReturn: evaluation.summary.netReturn,
-        bestTradeCount: evaluation.summary.tradeCount,
-        positiveAppearances: evaluation.summary.netReturn > 0 ? 1 : 0,
-        tradefulAppearances: evaluation.summary.tradeCount > 0 ? 1 : 0
-      });
-      return;
-    }
-
-    existing.lastCandidateId = evaluation.candidate.candidateId;
-    existing.lastIteration = iteration;
-    existing.appearances += 1;
-    existing.bestNetReturn = Math.max(existing.bestNetReturn, evaluation.summary.netReturn);
-    existing.bestTradeCount = Math.max(existing.bestTradeCount, evaluation.summary.tradeCount);
-    existing.positiveAppearances += evaluation.summary.netReturn > 0 ? 1 : 0;
-    existing.tradefulAppearances += evaluation.summary.tradeCount > 0 ? 1 : 0;
-  };
-
-  for (const iteration of iterations) {
-    for (const evaluation of iteration.evaluations) {
-      register(iteration.iteration, evaluation);
-    }
-  }
-
-  for (const evaluation of liveEvaluations) {
-    register(iterations.length + 1, evaluation);
-  }
-
-  return [...ledger.values()].sort((left, right) => {
-    if (right.bestNetReturn !== left.bestNetReturn) {
-      return right.bestNetReturn - left.bestNetReturn;
-    }
-
-    if (right.bestTradeCount !== left.bestTradeCount) {
-      return right.bestTradeCount - left.bestTradeCount;
-    }
-
-    return right.appearances - left.appearances;
-  });
-}
-
-function buildFamilySummary(ledger: CandidateLedgerEntry[]): FamilySummaryEntry[] {
-  const byFamily = new Map<string, FamilySummaryEntry>();
-
-  for (const entry of ledger) {
-    const current = byFamily.get(entry.familyId) ?? {
-      familyId: entry.familyId,
-      evaluations: 0,
-      uniqueCandidates: 0,
-      positiveEvaluations: 0,
-      tradefulEvaluations: 0,
-      bestNetReturn: Number.NEGATIVE_INFINITY,
-      bestTradeNetReturn: undefined,
-      bestTradeCount: 0,
-      totalTrades: 0,
-      lastIteration: 0
-    };
-
-    current.evaluations += entry.appearances;
-    current.uniqueCandidates += 1;
-    current.positiveEvaluations += entry.positiveAppearances;
-    current.tradefulEvaluations += entry.tradefulAppearances;
-    current.bestNetReturn = Math.max(current.bestNetReturn, entry.bestNetReturn);
-    if (entry.bestTradeCount > 0) {
-      current.bestTradeCount = Math.max(current.bestTradeCount, entry.bestTradeCount);
-      current.bestTradeNetReturn =
-        typeof current.bestTradeNetReturn === "number"
-          ? Math.max(current.bestTradeNetReturn, entry.bestNetReturn)
-          : entry.bestNetReturn;
-    }
-    current.totalTrades += entry.bestTradeCount;
-    current.lastIteration = Math.max(current.lastIteration, entry.lastIteration);
-    byFamily.set(entry.familyId, current);
-  }
-
-  return [...byFamily.values()].sort((left, right) => {
-    if (right.bestNetReturn !== left.bestNetReturn) {
-      return right.bestNetReturn - left.bestNetReturn;
-    }
-
-    if (right.tradefulEvaluations !== left.tradefulEvaluations) {
-      return right.tradefulEvaluations - left.tradefulEvaluations;
-    }
-
-    return right.evaluations - left.evaluations;
-  });
-}
-
-function midpointParameters(family: StrategyFamilyDefinition): Record<string, number> {
-  return family.parameterSpecs.reduce<Record<string, number>>((result, spec) => {
-    result[spec.name] = quantize((spec.min + spec.max) / 2);
-    return result;
-  }, {});
-}
-
-function buildCandidateGenealogy(
-  iterations: ResearchIterationRecord[],
-  liveEvaluations: CandidateBacktestEvaluation[] = []
-): CandidateGenealogyEntry[] {
-  const rows: CandidateGenealogyEntry[] = [];
-
-  for (const iteration of iterations) {
-    for (const evaluation of iteration.evaluations) {
-      rows.push({
-        iteration: iteration.iteration,
-        candidateId: evaluation.candidate.candidateId,
-        familyId: evaluation.candidate.familyId,
-        origin: evaluation.candidate.origin ?? "llm",
-        parentCandidateIds: evaluation.candidate.parentCandidateIds ?? [],
-        netReturn: evaluation.summary.netReturn,
-        tradeCount: evaluation.summary.tradeCount
-      });
-    }
-  }
-
-  for (const evaluation of liveEvaluations) {
-    rows.push({
-      iteration: iterations.length + 1,
-      candidateId: evaluation.candidate.candidateId,
-      familyId: evaluation.candidate.familyId,
-      origin: evaluation.candidate.origin ?? "llm",
-      parentCandidateIds: evaluation.candidate.parentCandidateIds ?? [],
-      netReturn: evaluation.summary.netReturn,
-      tradeCount: evaluation.summary.tradeCount
-    });
-  }
-
-  return rows.sort((left, right) => {
-    if (right.iteration !== left.iteration) {
-      return right.iteration - left.iteration;
-    }
-
-    return right.netReturn - left.netReturn;
-  });
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-function getStepFraction(iteration?: number): number {
-  if (iteration === undefined || iteration <= 3) return 0.10;
-  if (iteration <= 6) return 0.15;
-  return 0.25;
-}
-
-function quantize(value: number): number {
-  return Number(value.toFixed(4));
-}
-
-function isPortfolioFamilyDefinition(family: StrategyFamilyDefinition | undefined): boolean {
-  return family?.strategyName.startsWith("portfolio:") ?? false;
-}
-
-function buildStagedConfirmCandidate(params: {
-  evaluation: CandidateBacktestEvaluation;
-  family: StrategyFamilyDefinition | undefined;
-  iteration: number;
-  seed: number;
-  usedFingerprints: Set<string>;
-}): CandidateProposal | undefined {
-  const confirmFamilyId = SCREEN_FAMILY_TO_CONFIRM_FAMILY.get(params.evaluation.candidate.familyId);
-
-  if (
-    !confirmFamilyId ||
-    !params.family ||
-    params.family.familyId !== confirmFamilyId ||
-    params.family.strategyName !== MULTI_TF_REGIME_SWITCH_PORTFOLIO ||
-    !shouldStageConfirmCandidate(params.evaluation)
-  ) {
-    return undefined;
-  }
-
-  const sharedParameters = Object.fromEntries(
-    params.family.parameterSpecs
-      .map((spec) => {
-        const existing = params.evaluation.candidate.parameters[spec.name];
-        if (!Number.isFinite(existing)) {
-          return undefined;
-        }
-
-        return [spec.name, quantize(existing)];
-      })
-      .filter((entry): entry is [string, number] => Boolean(entry))
-  );
-  const parameters = {
-    ...midpointParameters(params.family),
-    ...REGIME_SWITCH_CONFIRM_DEFAULT_PARAMETERS,
-    ...sharedParameters
-  };
-  const invalidationSignals = [
-    "full confirm loses edge once 1m sleeve is enabled",
-    "micro sleeve dominates turnover without lifting net return",
-    "drawdown expands beyond the screen-stage parent"
-  ];
-  const proposal: CandidateProposal = {
-    candidateId: `${params.family.familyId}-engine-confirm-${String(params.iteration).padStart(2, "0")}-${String(params.seed).padStart(2, "0")}`,
-    familyId: params.family.familyId,
-    thesis: `Confirm full regime-switch candidate from ${params.evaluation.candidate.familyId} survivor ${params.evaluation.candidate.candidateId}.`,
-    parameters,
-    origin: "engine_seed",
-    parentCandidateIds: [
-      ...(params.evaluation.candidate.parentCandidateIds ?? []),
-      params.evaluation.candidate.candidateId
-    ].slice(-8),
-    invalidationSignals
-  };
-  const fingerprint = candidateFingerprint(proposal);
-
-  if (!params.usedFingerprints.has(fingerprint)) {
-    params.usedFingerprints.add(fingerprint);
-    return proposal;
-  }
-
-  const normalized = normalizeCandidateProposal(proposal, [params.family], 0);
-  const mutated = mutateCandidateToNovelVariant({
-    candidate: normalized,
-    family: params.family,
-    usedFingerprints: params.usedFingerprints,
-    seed: params.seed,
-    suffix: `engine-confirm-${String(params.iteration).padStart(2, "0")}`
-  });
-
-  if (!mutated) {
-    return undefined;
-  }
-
-  params.usedFingerprints.add(candidateFingerprint(mutated));
-  return {
-    candidateId: mutated.candidateId,
-    familyId: mutated.familyId,
-    thesis: mutated.thesis,
-    parameters: mutated.parameters,
-    origin: "engine_mutation",
-    parentCandidateIds: mutated.parentCandidateIds,
-    invalidationSignals
-  };
-}
-
-function mutateCandidateToNovelVariant(params: {
-  candidate: NormalizedCandidateProposal;
-  family: StrategyFamilyDefinition | undefined;
-  usedFingerprints: Set<string>;
-  seed: number;
-  suffix: string;
-  iteration?: number;
-}): NormalizedCandidateProposal | undefined {
-  if (!params.family || params.family.parameterSpecs.length === 0) {
-    return undefined;
-  }
-
-  const portfolioFamily = isPortfolioFamilyDefinition(params.family);
-  const directions = portfolioFamily ? [1, -1, 2, -2, 3, -3] : [1, -1, 2, -2];
-
-  for (let offset = 0; offset < params.family.parameterSpecs.length; offset += 1) {
-    const spec = params.family.parameterSpecs[(params.seed + offset) % params.family.parameterSpecs.length];
-    const width = spec.max - spec.min;
-    const current = params.candidate.parameters[spec.name];
-
-    if (!Number.isFinite(current) || width <= 0) {
-      continue;
-    }
-
-    const stepFraction = portfolioFamily ? 0.1 : getStepFraction(params.iteration);
-    const step = Math.max(width * stepFraction, width / (portfolioFamily ? 10 : 20));
-
-    for (const direction of directions) {
-      const next = clamp(current + step * direction, spec.min, spec.max);
-      if (Math.abs(next - current) < 1e-9) {
-        continue;
-      }
-
-      const candidate: NormalizedCandidateProposal = {
-        ...params.candidate,
-        candidateId: `${params.candidate.familyId}-${params.suffix}-${String(params.seed + offset + Math.abs(direction)).padStart(2, "0")}`,
-        thesis: `${params.candidate.thesis} Novelized from historical duplicate.`,
-        origin: "novelized",
-        parentCandidateIds: [
-          ...(params.candidate.parentCandidateIds ?? []),
-          params.candidate.candidateId
-        ].slice(-8),
-        parameters: {
-          ...params.candidate.parameters,
-          [spec.name]: quantize(next)
-        }
-      };
-      const fingerprint = candidateFingerprint(candidate);
-
-      if (!params.usedFingerprints.has(fingerprint)) {
-        return candidate;
-      }
-    }
-  }
-
-  if (!portfolioFamily || params.family.parameterSpecs.length < 2) {
-    return undefined;
-  }
-
-  const pairedDirections: Array<[number, number]> = [
-    [1, 1],
-    [1, -1],
-    [-1, 1],
-    [-1, -1],
-    [2, 1],
-    [1, 2]
-  ];
-
-  for (let offset = 0; offset < params.family.parameterSpecs.length; offset += 1) {
-    const firstSpec = params.family.parameterSpecs[(params.seed + offset) % params.family.parameterSpecs.length];
-    const secondSpec = params.family.parameterSpecs[(params.seed + offset + 1) % params.family.parameterSpecs.length];
-    const firstCurrent = params.candidate.parameters[firstSpec.name];
-    const secondCurrent = params.candidate.parameters[secondSpec.name];
-    const firstWidth = firstSpec.max - firstSpec.min;
-    const secondWidth = secondSpec.max - secondSpec.min;
-
-    if (
-      !Number.isFinite(firstCurrent) ||
-      !Number.isFinite(secondCurrent) ||
-      firstWidth <= 0 ||
-      secondWidth <= 0
-    ) {
-      continue;
-    }
-
-    const firstStep = Math.max(firstWidth * 0.08, firstWidth / 12);
-    const secondStep = Math.max(secondWidth * 0.08, secondWidth / 12);
-
-    for (const [firstDirection, secondDirection] of pairedDirections) {
-      const nextFirst = clamp(firstCurrent + firstStep * firstDirection, firstSpec.min, firstSpec.max);
-      const nextSecond = clamp(secondCurrent + secondStep * secondDirection, secondSpec.min, secondSpec.max);
-
-      if (
-        Math.abs(nextFirst - firstCurrent) < 1e-9 &&
-        Math.abs(nextSecond - secondCurrent) < 1e-9
-      ) {
-        continue;
-      }
-
-      const candidate: NormalizedCandidateProposal = {
-        ...params.candidate,
-        candidateId: `${params.candidate.familyId}-${params.suffix}-${String(params.seed + offset + Math.abs(firstDirection) + Math.abs(secondDirection)).padStart(2, "0")}`,
-        thesis: `${params.candidate.thesis} Novelized with a paired portfolio mutation.`,
-        origin: "novelized",
-        parentCandidateIds: [
-          ...(params.candidate.parentCandidateIds ?? []),
-          params.candidate.candidateId
-        ].slice(-8),
-        parameters: {
-          ...params.candidate.parameters,
-          [firstSpec.name]: quantize(nextFirst),
-          [secondSpec.name]: quantize(nextSecond)
-        }
-      };
-      const fingerprint = candidateFingerprint(candidate);
-
-      if (!params.usedFingerprints.has(fingerprint)) {
-        return candidate;
-      }
-    }
-  }
-
-  return undefined;
-}
-
-function ensureNovelCandidates(params: {
-  candidates: NormalizedCandidateProposal[];
-  families: StrategyFamilyDefinition[];
-  iterations: ResearchIterationRecord[];
-  iteration: number;
-}): NormalizedCandidateProposal[] {
-  const historicalFingerprints = new Set<string>(
-    params.iterations.flatMap((iteration) =>
-      iteration.evaluations.map((evaluation) => candidateFingerprint(evaluation.candidate))
-    )
-  );
-  const usedFingerprints = new Set<string>();
-  const result: NormalizedCandidateProposal[] = [];
-
-  for (const [index, candidate] of params.candidates.entries()) {
-    const fingerprint = candidateFingerprint(candidate);
-    if (!historicalFingerprints.has(fingerprint) && !usedFingerprints.has(fingerprint)) {
-      result.push(candidate);
-      usedFingerprints.add(fingerprint);
-      continue;
-    }
-
-    const family = params.families.find((item) => item.familyId === candidate.familyId);
-    const mutated = mutateCandidateToNovelVariant({
-      candidate,
-      family,
-      usedFingerprints: new Set([...historicalFingerprints, ...usedFingerprints]),
-      seed: index + params.iteration,
-      suffix: `novel-${String(params.iteration).padStart(2, "0")}`
-    });
-
-    if (mutated) {
-      result.push(mutated);
-      usedFingerprints.add(candidateFingerprint(mutated));
-    }
-  }
-
-  return result;
-}
-
-function topUpCandidatesForEvaluation(params: {
-  candidates: NormalizedCandidateProposal[];
-  families: StrategyFamilyDefinition[];
-  iterations: ResearchIterationRecord[];
-  iteration: number;
-  limit: number;
-}): NormalizedCandidateProposal[] {
-  if (params.candidates.length >= params.limit) {
-    return params.candidates;
-  }
-
-  const historicalFingerprints = new Set<string>(
-    params.iterations.flatMap((iteration) =>
-      iteration.evaluations.map((evaluation) => candidateFingerprint(evaluation.candidate))
-    )
-  );
-  const result = [...params.candidates];
-  const usedFingerprints = new Set<string>([
-    ...historicalFingerprints,
-    ...result.map((candidate) => candidateFingerprint(candidate))
-  ]);
-  let attempts = 0;
-  const maxAttempts = Math.max(params.limit * Math.max(1, params.candidates.length) * 4, 8);
-
-  while (result.length < params.limit && attempts < maxAttempts) {
-    const baseCandidate = params.candidates[attempts % params.candidates.length];
-    if (!baseCandidate) {
-      break;
-    }
-
-    const family = params.families.find((item) => item.familyId === baseCandidate.familyId);
-    const mutated = mutateCandidateToNovelVariant({
-      candidate: baseCandidate,
-      family,
-      usedFingerprints,
-      seed: params.iteration + attempts + result.length,
-      suffix: `proposal-topup-${String(params.iteration).padStart(2, "0")}`
-    });
-
-    attempts += 1;
-
-    if (!mutated) {
-      continue;
-    }
-
-    usedFingerprints.add(candidateFingerprint(mutated));
-    result.push(mutated);
-  }
-
-  return result;
-}
-
-function selectDiversifiedCandidates(
-  candidates: NormalizedCandidateProposal[],
-  families: StrategyFamilyDefinition[],
-  limit: number,
-  minDistance = DEFAULT_CANDIDATE_DIVERSIFICATION_MIN_DISTANCE
-): NormalizedCandidateProposal[] {
-  const byFamily = new Map<string, NormalizedCandidateProposal[]>();
-  const familyMap = new Map(families.map((family) => [family.familyId, family]));
-
-  for (const candidate of candidates) {
-    const bucket = byFamily.get(candidate.familyId) ?? [];
-    bucket.push(candidate);
-    byFamily.set(candidate.familyId, bucket);
-  }
-
-  const selected: NormalizedCandidateProposal[] = [];
-  for (const bucket of byFamily.values()) {
-    if (bucket[0]) {
-      selected.push(bucket[0]);
-    }
-  }
-
-  const remaining = candidates.filter((candidate) => !selected.includes(candidate));
-
-  while (selected.length < limit && remaining.length > 0) {
-    const sameFamilyPool = remaining.filter((candidate) => selected.some((picked) => picked.familyId === candidate.familyId));
-    const candidatePool = sameFamilyPool.length > 0 ? sameFamilyPool : remaining;
-    const distantPool = candidatePool.filter((candidate) => {
-      const sameFamilySelected = selected.filter((picked) => picked.familyId === candidate.familyId);
-      if (sameFamilySelected.length === 0) {
-        return true;
-      }
-
-      const closestDistance = Math.min(
-        ...sameFamilySelected.map((picked) => calculateCandidateParameterDistance(candidate, picked, familyMap))
-      );
-      return closestDistance >= minDistance;
-    });
-    const pool = distantPool.length > 0 ? distantPool : candidatePool;
-    let bestIndex = -1;
-    let bestScore = Number.NEGATIVE_INFINITY;
-
-    for (const candidate of pool) {
-      const position = remaining.indexOf(candidate);
-      const sameFamilySelected = selected.filter((picked) => picked.familyId === candidate.familyId);
-      const closestSameFamilyDistance = sameFamilySelected.length > 0
-        ? Math.min(
-            ...sameFamilySelected.map((picked) => calculateCandidateParameterDistance(candidate, picked, familyMap))
-          )
-        : 1;
-      const familyNoveltyBonus = sameFamilySelected.length === 0 ? 1 : 0;
-      const score = familyNoveltyBonus * 10 + closestSameFamilyDistance - position * 1e-4;
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestIndex = position;
-      }
-    }
-
-    if (bestIndex < 0) {
-      break;
-    }
-
-    selected.push(remaining[bestIndex]!);
-    remaining.splice(bestIndex, 1);
-  }
-
-  return selected.slice(0, limit);
-}
-
-async function buildArtifactSeedCandidates(params: {
-  config: AutoResearchRunConfig;
-  families: StrategyFamilyDefinition[];
-  hiddenFamilyIds: Set<string>;
-  usedFingerprints: Set<string>;
-  iteration: number;
-}): Promise<CandidateProposal[]> {
-  const seedPaths = (params.config.seedArtifactPaths ?? []).filter(Boolean);
-  if (seedPaths.length === 0) {
-    return [];
-  }
-
-  const seedBudget = Math.min(
-    params.config.candidatesPerIteration,
-    Math.max(1, params.config.seedCandidatesPerIteration ?? Math.ceil(params.config.candidatesPerIteration / 2))
-  );
-  if (seedBudget <= 0) {
-    return [];
-  }
-
-  const eligibleFamilies = params.families.filter((family) => !params.hiddenFamilyIds.has(family.familyId));
-  const eligibleFamilyIds = new Set(eligibleFamilies.map((family) => family.familyId));
-  if (eligibleFamilyIds.size === 0) {
-    return [];
-  }
-
-  const rankedByFingerprint = new Map<string, {
-    candidate: NormalizedCandidateProposal;
-    score: number;
-    sourcePath: string;
-  }>();
-
-  for (const seedPath of seedPaths) {
-    let parsed: unknown;
-
-    try {
-      parsed = JSON.parse(await readFile(seedPath, "utf8"));
-    } catch {
-      continue;
-    }
-
-    const snapshots: ArtifactSeedSnapshot[] = [];
-    collectArtifactSeedSnapshots(parsed, seedPath, snapshots);
-
-    for (const [index, snapshot] of snapshots.entries()) {
-      if (!isViableArtifactSeed(snapshot)) {
-        continue;
-      }
-
-      if (!eligibleFamilyIds.has(snapshot.familyId)) {
-        continue;
-      }
-
-      const family = eligibleFamilies.find((item) => item.familyId === snapshot.familyId);
-      if (!family) {
-        continue;
-      }
-
-      const artifactSlug = path.basename(snapshot.sourcePath).replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "seed";
-      const proposal: CandidateProposal = {
-        candidateId: `${snapshot.familyId}-${artifactSlug}-artifact-seed-${String(params.iteration).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`,
-        familyId: snapshot.familyId,
-        thesis: `Artifact seed from ${path.basename(snapshot.sourcePath)} with prior measured edge.`,
-        parameters: {
-          ...midpointParameters(family),
-          ...snapshot.parameters
-        },
-        origin: "artifact_seed",
-        parentCandidateIds: snapshot.candidateId ? [snapshot.candidateId] : [],
-        invalidationSignals: [
-          "prior measured edge does not reproduce under the current walk-forward split",
-          "edge collapses once candidate is evaluated on the current market set",
-          "trade adequacy or drawdown degrades versus the source artifact"
-        ]
-      };
-
-      let normalized: NormalizedCandidateProposal;
-      try {
-        normalized = normalizeCandidateProposal(proposal, eligibleFamilies, index);
-      } catch {
-        continue;
-      }
-
-      const fingerprint = candidateFingerprint(normalized);
-      if (params.usedFingerprints.has(fingerprint)) {
-        continue;
-      }
-
-      const score = scoreArtifactSeed(snapshot);
-      const existing = rankedByFingerprint.get(fingerprint);
-      if (!existing || score > existing.score) {
-        rankedByFingerprint.set(fingerprint, {
-          candidate: normalized,
-          score,
-          sourcePath: snapshot.sourcePath
-        });
-      }
-    }
-  }
-
-  const rankedCandidates = [...rankedByFingerprint.values()]
-    .sort((left, right) => {
-      if (right.score !== left.score) {
-        return right.score - left.score;
-      }
-
-      return left.sourcePath.localeCompare(right.sourcePath);
-    })
-    .map((item) => item.candidate);
-  const diversified = selectDiversifiedCandidates(
-    rankedCandidates,
-    eligibleFamilies,
-    seedBudget,
-    params.config.candidateDiversificationMinDistance ?? DEFAULT_CANDIDATE_DIVERSIFICATION_MIN_DISTANCE
-  );
-
-  for (const candidate of diversified) {
-    params.usedFingerprints.add(candidateFingerprint(candidate));
-  }
-
-  return diversified.map((candidate) => ({
-    candidateId: candidate.candidateId,
-    familyId: candidate.familyId,
-    thesis: candidate.thesis,
-    parameters: candidate.parameters,
-    origin: "artifact_seed",
-    parentCandidateIds: candidate.parentCandidateIds,
-    invalidationSignals: candidate.invalidationSignals
-  }));
-}
-
-async function buildEngineAugmentedCandidates(params: {
-  proposal: ProposalBatch;
-  config: AutoResearchRunConfig;
-  families: StrategyFamilyDefinition[];
-  history: ResearchIterationRecord[];
-  iteration: number;
-  hiddenFamilyIds: Set<string>;
-}): Promise<CandidateProposal[]> {
-  const representedFamilies = new Set(params.proposal.candidates.map((candidate) => candidate.familyId));
-  const historicalEvaluations = params.history
-    .flatMap((iteration) => iteration.evaluations)
-    .filter((evaluation) => evaluation.status === "completed")
-    .sort(compareEvaluations);
-  const usedFingerprints = new Set<string>([
-    ...params.proposal.candidates.map((candidate) => candidateFingerprint(candidate)),
-    ...historicalEvaluations.map((evaluation) => candidateFingerprint(evaluation.candidate))
-  ]);
-  const artifactSeedCandidates = await buildArtifactSeedCandidates({
-    config: params.config,
-    families: params.families,
-    hiddenFamilyIds: params.hiddenFamilyIds,
-    usedFingerprints,
-    iteration: params.iteration
-  });
-  const engineCandidates: CandidateProposal[] = [...artifactSeedCandidates];
-
-  for (const candidate of artifactSeedCandidates) {
-    representedFamilies.add(candidate.familyId);
-  }
-
-  if (params.history.length === 0) {
-    return engineCandidates;
-  }
-
-  const diversityTarget = Math.min(params.config.candidatesPerIteration, params.families.length);
-  const shouldAugment =
-    engineCandidates.length < params.config.candidatesPerIteration &&
-    (
-      params.proposal.candidates.length < params.config.candidatesPerIteration ||
-      representedFamilies.size < diversityTarget
-    );
-
-  if (!shouldAugment) {
-    return engineCandidates;
-  }
-  const stagedConfirmFamilies = new Set<string>();
-  const addMutationCandidate = (evaluation: CandidateBacktestEvaluation, seed: number) => {
-    if (engineCandidates.length >= params.config.candidatesPerIteration) {
-      return;
-    }
-
-    const family = params.families.find((item) => item.familyId === evaluation.candidate.familyId);
-    const mutated = mutateCandidateToNovelVariant({
-      candidate: evaluation.candidate,
-      family,
-      usedFingerprints,
-      seed,
-      suffix: `engine-mutation-${String(params.iteration).padStart(2, "0")}`
-    });
-
-    if (!mutated) {
-      return;
-    }
-
-    usedFingerprints.add(candidateFingerprint(mutated));
-    representedFamilies.add(mutated.familyId);
-    engineCandidates.push({
-      candidateId: mutated.candidateId,
-      familyId: mutated.familyId,
-      thesis: `Engine mutation from ${evaluation.candidate.candidateId} after measured edge.`,
-      parameters: mutated.parameters,
-      origin: "engine_mutation",
-      parentCandidateIds: [
-        ...(evaluation.candidate.parentCandidateIds ?? []),
-        evaluation.candidate.candidateId
-      ].slice(-8),
-      invalidationSignals: [
-        "measured edge does not persist after local mutation",
-        "trade count collapses",
-        "drawdown expands beyond prior parent candidate"
-      ]
-    });
-  };
-
-  let mutationSeed = params.iteration + params.history.length;
-
-  for (const evaluation of historicalEvaluations) {
-    if (engineCandidates.length >= params.config.candidatesPerIteration) {
-      break;
-    }
-
-    const confirmFamilyId = SCREEN_FAMILY_TO_CONFIRM_FAMILY.get(evaluation.candidate.familyId);
-    if (!confirmFamilyId || representedFamilies.has(confirmFamilyId) || stagedConfirmFamilies.has(confirmFamilyId)) {
-      continue;
-    }
-
-    const confirmFamily = params.families.find((item) => item.familyId === confirmFamilyId);
-    const confirmCandidate = buildStagedConfirmCandidate({
-      evaluation,
-      family: confirmFamily,
-      iteration: params.iteration,
-      seed: mutationSeed,
-      usedFingerprints
-    });
-    mutationSeed += 1;
-
-    if (!confirmCandidate) {
-      continue;
-    }
-
-    stagedConfirmFamilies.add(confirmFamilyId);
-    representedFamilies.add(confirmFamilyId);
-    engineCandidates.push(confirmCandidate);
-  }
-
-  for (const evaluation of historicalEvaluations) {
-    if (representedFamilies.has(evaluation.candidate.familyId)) {
-      continue;
-    }
-
-    addMutationCandidate(evaluation, mutationSeed);
-    mutationSeed += 1;
-  }
-
-  for (const family of params.families) {
-    if (engineCandidates.length >= params.config.candidatesPerIteration) {
-      break;
-    }
-
-    if (params.hiddenFamilyIds.has(family.familyId)) {
-      continue;
-    }
-
-    if (representedFamilies.has(family.familyId)) {
-      continue;
-    }
-
-    const seedCandidate: CandidateProposal = {
-      candidateId: `${family.familyId}-engine-seed-${String(params.iteration).padStart(2, "0")}-${String(engineCandidates.length + 1).padStart(2, "0")}`,
-      familyId: family.familyId,
-      thesis: `Engine seed for underexplored family ${family.familyId}.`,
-      parameters: midpointParameters(family),
-      origin: "engine_seed",
-      invalidationSignals: [
-        "still produces weak or zero-trade behavior",
-        "single market dominates pnl",
-        "worst window turns sharply negative"
-      ]
-    };
-    const fingerprint = candidateFingerprint(seedCandidate);
-    if (usedFingerprints.has(fingerprint)) {
-      continue;
-    }
-
-    usedFingerprints.add(fingerprint);
-    representedFamilies.add(family.familyId);
-    engineCandidates.push(seedCandidate);
-  }
-
-  for (const evaluation of historicalEvaluations) {
-    if (engineCandidates.length >= params.config.candidatesPerIteration) {
-      break;
-    }
-
-    addMutationCandidate(evaluation, mutationSeed);
-    mutationSeed += 1;
-  }
-
-  // Fill remaining budget with optimizer-generated candidates
-  // These use LHS exploration + Gaussian exploitation around best known params
-  const optimizerBudget = params.config.candidatesPerIteration - engineCandidates.length;
-  if (optimizerBudget > 0) {
-    const activeFamilies = params.families.filter(
-      (f) => !params.hiddenFamilyIds.has(f.familyId)
-    );
-    const optimizerCandidates = generateOptimizedCandidatesForFamilies({
-      families: activeFamilies,
-      previousEvaluations: historicalEvaluations,
-      iteration: params.iteration,
-      totalBudget: optimizerBudget,
-      config: {
-        minDistance: params.config.candidateDiversificationMinDistance ?? 0.08,
-        seed: params.iteration * 7919
-      }
-    });
-
-    for (const candidate of optimizerCandidates) {
-      if (engineCandidates.length >= params.config.candidatesPerIteration) break;
-      const fp = candidateFingerprint(candidate);
-      if (usedFingerprints.has(fp)) continue;
-      usedFingerprints.add(fp);
-      representedFamilies.add(candidate.familyId);
-      engineCandidates.push(candidate);
-    }
-  }
-
-  return engineCandidates;
-}
-
-async function augmentProposalBatchWithEngineCandidates(params: {
-  proposal: ProposalBatch;
-  config: AutoResearchRunConfig;
-  families: StrategyFamilyDefinition[];
-  history: ResearchIterationRecord[];
-  iteration: number;
-  hiddenFamilyIds: Set<string>;
-}): Promise<ProposalBatch> {
-  const engineCandidates = await buildEngineAugmentedCandidates(params);
-
-  if (engineCandidates.length === 0) {
-    return params.proposal;
-  }
-
-  const artifactSeedCount = engineCandidates.filter((candidate) => candidate.origin === "artifact_seed").length;
-  const mutationCount = engineCandidates.filter((candidate) => candidate.origin === "engine_mutation").length;
-  const seedCount = engineCandidates.filter((candidate) => candidate.origin === "engine_seed").length;
-  const artifactSeeds = engineCandidates.filter((candidate) => candidate.origin === "artifact_seed");
-  const runtimeSeeds = engineCandidates.filter((candidate) => candidate.origin !== "artifact_seed");
-
-  return {
-    ...params.proposal,
-    researchSummary: `${params.proposal.researchSummary} Engine augmentation added ${engineCandidates.length} candidates (${artifactSeedCount} artifact seeds, ${mutationCount} mutations, ${seedCount} seeds).`,
-    candidates: [...artifactSeeds, ...params.proposal.candidates, ...runtimeSeeds]
-  };
-}
-
 async function persistRunArtifacts(params: {
   outputDir: string;
   generatedAt: string;
@@ -1835,11 +501,16 @@ async function persistRunArtifacts(params: {
     verification: params.verification
   };
   const report = toReport(state);
-  const rawLeaderboard = buildLeaderboard(params.iterations, params.liveEvaluations);
-  const leaderboard = buildUniqueLeaderboard(rawLeaderboard);
-  const candidateLedger = buildCandidateLedger(params.iterations, params.liveEvaluations);
-  const familySummary = buildFamilySummary(candidateLedger);
-  const candidateGenealogy = buildCandidateGenealogy(params.iterations, params.liveEvaluations);
+  const {
+    rawLeaderboard,
+    leaderboard,
+    candidateLedger,
+    familySummary,
+    candidateGenealogy
+  } = buildAutoResearchArtifactSummaries({
+    iterations: params.iterations,
+    liveEvaluations: params.liveEvaluations
+  });
 
   await saveRunState(params.outputDir, state);
   await saveLeaderboard(params.outputDir, leaderboard);
@@ -1859,8 +530,11 @@ async function persistRunArtifacts(params: {
   }
   const reportMarkdownPath = path.join(params.outputDir, "report.md");
   const reportHtmlPath = path.join(params.outputDir, "report.html");
+  const sessionMarkdownPath = path.join(params.outputDir, "session.md");
   const reportMarkdownTempPath = `${reportMarkdownPath}.${process.pid}.${Date.now()}.tmp`;
   const reportHtmlTempPath = `${reportHtmlPath}.${process.pid}.${Date.now()}.tmp`;
+  const sessionMarkdownTempPath = `${sessionMarkdownPath}.${process.pid}.${Date.now()}.tmp`;
+  const journal = await loadJournal(params.outputDir);
   await writeFile(reportMarkdownTempPath, summarizeMarkdown(report));
   await rename(reportMarkdownTempPath, reportMarkdownPath);
   await writeFile(
@@ -1875,6 +549,22 @@ async function persistRunArtifacts(params: {
     })
   );
   await rename(reportHtmlTempPath, reportHtmlPath);
+  await writeFile(
+    sessionMarkdownTempPath,
+    renderSessionContractMarkdown({
+      generatedAt: params.generatedAt,
+      config: params.config,
+      outcome: params.outcome,
+      outcomeReason: params.outcomeReason,
+      families: params.families,
+      iterations: params.iterations.length,
+      bestCandidate: params.bestCandidate,
+      pendingProposal: params.pendingProposal,
+      status: params.status,
+      journal
+    })
+  );
+  await rename(sessionMarkdownTempPath, sessionMarkdownPath);
 
   if (params.status) {
     await saveRunStatus(params.outputDir, params.status);
@@ -1992,10 +682,6 @@ export function createAutoResearchOrchestrator(deps: {
     } catch {
       return ["1h", "5m"];
     }
-  }
-
-  function blockCandidateNeeds1m(familyId: string): boolean {
-    return getBlockCandidateRequiredTimeframes(familyId).includes("1m");
   }
 
   function groupCandidatesByTimeframes(
@@ -2204,19 +890,9 @@ export function createAutoResearchOrchestrator(deps: {
               inputConfig.seedCandidatesPerIteration ?? restored.config.seedCandidatesPerIteration,
             candidateDiversificationMinDistance:
               inputConfig.candidateDiversificationMinDistance ??
-              restored.config.candidateDiversificationMinDistance,
-            loopVersion: inputConfig.loopVersion ?? restored.config.loopVersion
+              restored.config.candidateDiversificationMinDistance
           }
         : inputConfig;
-      config = {
-        ...config,
-        loopVersion: config.loopVersion ?? "v1"
-      };
-      const originalStage = config.researchStage;
-      if (config.researchStage === "auto") {
-        config = { ...config, researchStage: "block" };
-      }
-
       let blockCatalog: ValidatedBlockCatalog | undefined;
       let selectedFamilies: StrategyFamilyDefinition[];
 
@@ -2314,7 +990,16 @@ export function createAutoResearchOrchestrator(deps: {
           console.error(message);
           await appendRunLog(config.outputDir, message);
         };
-        const safeAppendLineageEvent = createSafeAppendLineageEvent(log);
+        const safeAppendLineageEvent = async (
+          params: Parameters<typeof appendLineageEvent>[0]
+        ): Promise<void> => {
+          try {
+            await appendLineageEvent(params);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await log(`[auto-research] lineage event write failed: ${message}`);
+          }
+        };
         let lineage = await loadOrCreateResearchLineage({
           outputDir: config.outputDir,
           stage: config.researchStage ?? "auto",
@@ -2331,21 +1016,19 @@ export function createAutoResearchOrchestrator(deps: {
           outcome = "failed";
           outcomeReason = message;
           await log(`[auto-research] failed ${message}`);
-          if (config.loopVersion === "v2") {
-            await safeAppendLineageEvent({
-              outputDir: config.outputDir,
-              event: {
-                eventId: `${lineage.lineageId}-failed-${Date.now()}`,
-                lineageId: lineage.lineageId,
-                at: new Date().toISOString(),
-                type: "run_failed",
-                payload: {
-                  iteration: iterations.length,
-                  message
-                }
+          await safeAppendLineageEvent({
+            outputDir: config.outputDir,
+            event: {
+              eventId: `${lineage.lineageId}-failed-${Date.now()}`,
+              lineageId: lineage.lineageId,
+              at: new Date().toISOString(),
+              type: "run_failed",
+              payload: {
+                iteration: iterations.length,
+                message
               }
-            });
-          }
+            }
+          });
           await queueArtifactWrite(() => persistRunArtifacts({
             outputDir: config.outputDir,
             generatedAt: new Date().toISOString(),
@@ -2478,9 +1161,7 @@ export function createAutoResearchOrchestrator(deps: {
         const blockFamilyIds = new Set(
           config.researchStage === "block" ? selectedFamilies.map((f) => f.familyId) : []
         );
-        const blockFamilyConsecutiveZeroTrades = new Map<string, number>();
         const skippedFamilyIds = new Set<string>();
-        const CONSECUTIVE_ZERO_TRADE_SKIP_THRESHOLD = 3;
         const runStartedAt = Date.now();
         const maxRunDurationMs = config.maxRunDurationMs ?? 0;
         const iterationTimeoutMs = config.iterationTimeoutMs ?? 0;
@@ -2498,7 +1179,7 @@ export function createAutoResearchOrchestrator(deps: {
               const fid = evaluation.candidate.familyId;
               if (!blockFamilyIds.has(fid)) continue;
               const current = blockFamilyBestMap.get(fid);
-              if (!current || compareEvaluations(current, evaluation) > 0) {
+              if (!current || compareCandidateEvaluations(current, evaluation) > 0) {
                 blockFamilyBestMap.set(fid, evaluation);
               }
             }
@@ -2510,7 +1191,7 @@ export function createAutoResearchOrchestrator(deps: {
 
         // Restore lifecycle tracking from prior iterations
         if (iterations.length > 0) {
-          lifecycle.restoreFromHistory(iterations, blockFamilyIds, compareEvaluations);
+          lifecycle.restoreFromHistory(iterations, blockFamilyIds, compareCandidateEvaluations);
           const summary = lifecycle.getSummary();
           if (summary) await log(`[auto-research] restored lifecycle: ${summary}`);
         }
@@ -2558,14 +1239,9 @@ export function createAutoResearchOrchestrator(deps: {
           const isIterationTimedOut = (): boolean =>
             iterationTimeoutMs > 0 && (Date.now() - iterationStartedAt) >= iterationTimeoutMs;
 
-          // Discovery cycle: every N iterations OR when globally converged
+          // Discovery cycle: every N iterations in continuous mode
           const discoveryInterval = config.discoveryInterval ?? 5;
-          const forceDiscovery = lifecycle.isGloballyConverged();
-          if (forceDiscovery) {
-            await log(`[auto-research] global convergence detected — forcing discovery cycle`);
-            lifecycle.resetGlobalConvergence();
-          }
-          if (isContinuousMode && (forceDiscovery || (discoveryInterval > 0 && iteration > 1 && iteration % discoveryInterval === 0))) {
+          if (isContinuousMode && discoveryInterval > 0 && iteration > 1 && iteration % discoveryInterval === 0) {
             try {
               await log(`[auto-research] discovery cycle at iteration ${iteration}`);
               const { runDiscoveryCycle } = await import("./discovery-cycle.js");
@@ -2606,8 +1282,7 @@ export function createAutoResearchOrchestrator(deps: {
               history: iterations,
               iteration,
               nextProposal,
-              blockCatalog,
-              hiddenFamilyIds
+              blockCatalog
             });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -2621,136 +1296,56 @@ export function createAutoResearchOrchestrator(deps: {
 
           let proposal = proposalResult!.proposal;
           if (proposalResult!.source !== "llm") {
-            await log(
-              `[auto-research] proposal source=${proposalResult!.source}${proposalResult!.note ? ` detail=${proposalResult!.note}` : ""}`
-            );
+            await log(`[auto-research] proposal source=${proposalResult!.source}`);
           }
         catalog = mergeProposedFamilies(catalog, proposal.proposedFamilies);
         runtimeFamilies = mergeStrategyFamilies(buildRuntimeFamilies(catalog), configuredFamilies);
         await saveCatalogArtifact(config.outputDir, catalog);
-        let hypotheses: ResearchHypothesis[] = [];
-        if (config.loopVersion === "v2") {
-          hypotheses = proposalResult!.hypotheses;
-          await safeAppendLineageEvent({
-            outputDir: config.outputDir,
-            event: {
-              eventId: `${lineage.lineageId}-proposal-${iteration}`,
-              lineageId: lineage.lineageId,
-              at: new Date().toISOString(),
-              type: "proposal_recorded",
-              payload: {
-                iteration,
-                hypothesisCount: hypotheses.length,
-                candidateCount: proposal.candidates.length,
-                codeTaskCount: proposal.codeTasks.length,
-                familyCount: proposal.proposedFamilies.length
-              }
-            }
-          });
-        }
-
-        let experimentPlan: ExperimentPlan | undefined;
-        let normalizedCandidates: NormalizedCandidateProposal[];
-        let diversifiedCandidates: NormalizedCandidateProposal[];
-
-        if (config.loopVersion === "v2") {
-          const preparedKernel = await prepareExperimentKernel({
-            config,
-            proposal,
-            families: runtimeFamilies,
-            history: iterations,
-            iteration,
-            hiddenFamilyIds,
-            hypotheses
-          });
-          proposal = preparedKernel.proposal;
-          experimentPlan = preparedKernel.experimentPlan;
-          normalizedCandidates = preparedKernel.normalizedCandidates;
-          diversifiedCandidates = preparedKernel.diversifiedCandidates;
-        } else {
-          proposal = await augmentProposalBatchWithEngineCandidates({
-            proposal,
-            config,
-            families: runtimeFamilies,
-            history: iterations,
-            iteration,
-            hiddenFamilyIds
-          });
-          // Allow configured families plus families proposed in this iteration so new
-          // executable compositions can be evaluated immediately, while still blocking
-          // arbitrary candidate families outside the reviewed proposal scope.
-          const requestedFamilyIds = new Set([
-            ...configuredFamilies.map((f) => f.familyId),
-            ...proposal.proposedFamilies.map((family) => family.familyId)
-          ]);
-          normalizedCandidates = topUpCandidatesForEvaluation({
-            candidates: (() => {
-              const baseCandidates = dedupeCandidates(normalizeCandidates(proposal.candidates, runtimeFamilies))
-                .filter((c) => requestedFamilyIds.has(c.familyId));
-              const novelCandidates = ensureNovelCandidates({
-                candidates: baseCandidates,
-                families: runtimeFamilies,
-                iterations,
-                iteration
-              });
-              return novelCandidates.length > 0 ? novelCandidates : baseCandidates;
-            })(),
-            families: runtimeFamilies,
-            iterations,
-            iteration,
-            limit: config.candidatesPerIteration
-          });
-          diversifiedCandidates = selectDiversifiedCandidates(
-            skippedFamilyIds.size > 0
-              ? normalizedCandidates.filter((c) => !skippedFamilyIds.has(c.familyId))
-              : normalizedCandidates,
-            runtimeFamilies,
-            config.candidatesPerIteration,
-            config.candidateDiversificationMinDistance ?? DEFAULT_CANDIDATE_DIVERSIFICATION_MIN_DISTANCE
-          );
-        }
-
-        // Inject unevaluated families to ensure coverage
-        if (config.researchStage === "block") {
-          const evaluatedFamilyIds = new Set(diversifiedCandidates.map((c) => c.familyId));
-          const unevaluated = [...blockFamilyIds]
-            .filter((fid) => !lifecycle.getIterationCounts().has(fid) && !lifecycle.isRetired(fid) && !evaluatedFamilyIds.has(fid));
-          if (unevaluated.length > 0) {
-            const targetFid = unevaluated[0]!;
-            const familyDef = runtimeFamilies.find((f) => f.familyId === targetFid);
-            if (familyDef) {
-              const midpointParams = Object.fromEntries(
-                familyDef.parameterSpecs.map((p) => [p.name, (p.min + p.max) / 2])
-              );
-              const injected = normalizeCandidateProposal(
-                { familyId: targetFid, thesis: "unevaluated family — midpoint exploration", parameters: midpointParams, invalidationSignals: [], origin: "engine_seed" },
-                runtimeFamilies.map((f) => ({ ...f, familyId: f.familyId, strategyName: f.strategyName })),
-                diversifiedCandidates.length
-              );
-              diversifiedCandidates = [...diversifiedCandidates, injected];
-              await log(`[auto-research] injected unevaluated family: ${targetFid}`);
+        const hypothesisIds = proposalResult!.hypothesisIds;
+        await safeAppendLineageEvent({
+          outputDir: config.outputDir,
+          event: {
+            eventId: `${lineage.lineageId}-proposal-${iteration}`,
+            lineageId: lineage.lineageId,
+            at: new Date().toISOString(),
+            type: "proposal_recorded",
+            payload: {
+              iteration,
+              hypothesisCount: hypothesisIds.length,
+              candidateCount: proposal.candidates.length,
+              codeTaskCount: proposal.codeTasks.length,
+              familyCount: proposal.proposedFamilies.length
             }
           }
-        }
+        });
 
-        if (experimentPlan && config.loopVersion === "v2") {
-          await safeAppendLineageEvent({
-            outputDir: config.outputDir,
-            event: {
-              eventId: `${lineage.lineageId}-plan-${iteration}`,
-              lineageId: lineage.lineageId,
-              at: new Date().toISOString(),
-              type: "plan_compiled",
-              payload: {
-                iteration,
-                planId: experimentPlan.planId,
-                hypothesisId: experimentPlan.hypothesisId,
-                mode: experimentPlan.mode,
-                candidateCount: experimentPlan.candidates.length
-              }
+        const preparedKernel = prepareExperimentKernel({
+          config,
+          proposal,
+          families: runtimeFamilies,
+          iteration,
+          hiddenFamilyIds,
+          hypothesisIds
+        });
+        const experimentPlan = preparedKernel.experimentPlan;
+        const diversifiedCandidates = preparedKernel.diversifiedCandidates;
+
+        await safeAppendLineageEvent({
+          outputDir: config.outputDir,
+          event: {
+            eventId: `${lineage.lineageId}-plan-${iteration}`,
+            lineageId: lineage.lineageId,
+            at: new Date().toISOString(),
+            type: "plan_compiled",
+            payload: {
+              iteration,
+              planId: experimentPlan.planId,
+              hypothesisId: experimentPlan.hypothesisId,
+              mode: experimentPlan.mode,
+              candidateCount: experimentPlan.candidates.length
             }
-          });
-        }
+          }
+        });
         await log(
           `[auto-research] iteration ${iteration}/${config.iterations} candidates=${diversifiedCandidates.length} families=${Array.from(new Set(diversifiedCandidates.map((candidate) => candidate.familyId))).join(",") || "none"}`
         );
@@ -2786,63 +1381,18 @@ export function createAutoResearchOrchestrator(deps: {
             preparationResults.filter((result) => result.status === "failed").length
           }`
         );
-        const codeMutationResults = config.loopVersion === "v2"
-          ? await Promise.all(proposal.codeTasks.map(async (task, taskIndex) => {
-              const taskId = task.taskId ?? `code-task-${String(taskIndex + 1).padStart(2, "0")}`;
-              const worktreeResult = await executeCodeMutationInWorktree({
-                repoRoot: process.cwd(),
-                outputDir: path.join(
-                  config.outputDir,
-                  `iteration-${String(iteration).padStart(2, "0")}`,
-                  "code-worktrees",
-                  taskId
-                ),
-                task: {
-                  ...task,
-                  taskId
-                },
-                allowCodeMutation: config.allowCodeMutation,
-                provider: config.llmProvider,
-                model: config.llmModel
-              });
-              const applyResult = worktreeResult.mergeRecommendation === "merge"
-                ? await applyWorktreePatchToWorkspace({
-                    patchPath: worktreeResult.patchPath,
-                    repoRoot: process.cwd()
-                  })
-                : {
-                    status: "skipped" as const,
-                    detail: "Worktree benchmark did not recommend applying the patch."
-                  };
-
-              return {
-                task,
-                status:
-                  worktreeResult.codeAgentStatus === "executed" && applyResult.status === "applied"
-                    ? "executed" as const
-                    : worktreeResult.codeAgentStatus === "failed" || applyResult.status === "failed"
-                      ? "failed" as const
-                      : "skipped" as const,
-                detail: [
-                  `worktree=${worktreeResult.worktreePath}`,
-                  `benchmarks=${worktreeResult.benchmarkResults.map((result) => `${result.status}:${result.command}`).join(" | ") || "none"}`,
-                  `apply=${applyResult.status}:${applyResult.detail}`,
-                  worktreeResult.codeAgentDetail
-                ].join("\n")
-              };
-            }))
-          : await codeAgent.execute({
-              tasks: proposal.codeTasks,
-              outputDir: path.join(
-                config.outputDir,
-                `iteration-${String(iteration).padStart(2, "0")}`,
-                "code-agent"
-              ),
-              allowCodeMutation: config.allowCodeMutation,
-              cwd: process.cwd(),
-              provider: config.llmProvider,
-              model: config.llmModel
-            });
+        const codeMutationResults = await codeAgent.execute({
+          tasks: proposal.codeTasks,
+          outputDir: path.join(
+            config.outputDir,
+            `iteration-${String(iteration).padStart(2, "0")}`,
+            "code-agent"
+          ),
+          allowCodeMutation: config.allowCodeMutation,
+          cwd: process.cwd(),
+          provider: config.llmProvider,
+          model: config.llmModel
+        });
         const normalizedCodeMutationResults: CodeMutationExecutionResult[] = codeMutationResults.map((item): CodeMutationExecutionResult => ({
           taskId: item.task.taskId ?? item.task.title,
           familyId: item.task.familyId,
@@ -2851,7 +1401,7 @@ export function createAutoResearchOrchestrator(deps: {
           status: item.status,
           detail: item.detail
         }));
-        if (config.loopVersion === "v2" && normalizedCodeMutationResults.length > 0) {
+        if (normalizedCodeMutationResults.length > 0) {
           await safeAppendLineageEvent({
             outputDir: config.outputDir,
             event: {
@@ -2912,8 +1462,8 @@ export function createAutoResearchOrchestrator(deps: {
 
         const onCandidateEvaluated = async (evaluation: CandidateBacktestEvaluation) => {
           liveEvaluations.push(evaluation);
-          liveEvaluations.sort(compareEvaluations);
-          if (!bestCandidate || compareEvaluations(bestCandidate, liveEvaluations[0]) > 0) {
+          liveEvaluations.sort(compareCandidateEvaluations);
+          if (!bestCandidate || compareCandidateEvaluations(bestCandidate, liveEvaluations[0]) > 0) {
             bestCandidate = liveEvaluations[0];
           }
           const progressStatus: AutoResearchStatus = {
@@ -3016,44 +1566,25 @@ export function createAutoResearchOrchestrator(deps: {
             return evaluation;
           });
         }
-        evaluations.sort(compareEvaluations);
-        if (!bestCandidate || (evaluations[0] && compareEvaluations(bestCandidate, evaluations[0]) > 0)) {
+        evaluations.sort(compareCandidateEvaluations);
+        if (!bestCandidate || (evaluations[0] && compareCandidateEvaluations(bestCandidate, evaluations[0]) > 0)) {
           bestCandidate = evaluations[0];
         }
 
         if (config.researchStage === "block") {
-          // Track per-family best and consecutive zero-trade count
-          const familyTradeMap = new Map<string, boolean>();
+          // Track the best seen evaluation for each block family.
           for (const evaluation of evaluations) {
             const fid = evaluation.candidate.familyId;
             if (!blockFamilyIds.has(fid)) continue;
             const current = blockFamilyBestMap.get(fid);
-            if (!current || compareEvaluations(current, evaluation) > 0) {
+            if (!current || compareCandidateEvaluations(current, evaluation) > 0) {
               blockFamilyBestMap.set(fid, evaluation);
             }
-            if (evaluation.summary.tradeCount > 0) {
-              familyTradeMap.set(fid, true);
-            } else if (!familyTradeMap.has(fid)) {
-              familyTradeMap.set(fid, false);
-            }
           }
-          for (const [fid, hadTrades] of familyTradeMap) {
-            if (hadTrades) {
-              blockFamilyConsecutiveZeroTrades.set(fid, 0);
-            } else {
-              const count = (blockFamilyConsecutiveZeroTrades.get(fid) ?? 0) + 1;
-              blockFamilyConsecutiveZeroTrades.set(fid, count);
-              if (count >= CONSECUTIVE_ZERO_TRADE_SKIP_THRESHOLD && !skippedFamilyIds.has(fid)) {
-                skippedFamilyIds.add(fid);
-                await log(`[auto-research] skipping family ${fid} after ${count} consecutive 0-trade iterations`);
-              }
-            }
-          }
-
         }
 
         // Track per-family stagnation and budget (all stages)
-        const newlyRetired = lifecycle.trackIteration(evaluations, compareEvaluations);
+        const newlyRetired = lifecycle.trackIteration(evaluations, compareCandidateEvaluations);
         for (const fid of newlyRetired) {
           skippedFamilyIds.add(fid);
           await log(`[auto-research] retiring family ${fid} (${lifecycle.getSummary()})`);
@@ -3087,9 +1618,7 @@ export function createAutoResearchOrchestrator(deps: {
             codeMutationResults: normalizedCodeMutationResults,
             validationResults,
             iteration,
-            blockCatalog,
-            familyStagnationStreak: lifecycle.getStagnationStreak(),
-            familyIterationCounts: lifecycle.getIterationCounts()
+            blockCatalog
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -3099,29 +1628,21 @@ export function createAutoResearchOrchestrator(deps: {
           await failRun(`Invalid review decision: ${message}`, proposal);
         }
         const review = reviewResult!.review;
-        if (reviewResult!.reviewFailureMessage && config.loopVersion === "v2") {
-          await log(`[auto-research] review degraded to objective governance: ${reviewResult!.reviewFailureMessage}`);
-        }
-        if (reviewResult!.usedObjectiveGovernance && !reviewResult!.reviewFailureMessage) {
-          await log("[auto-research] review continued under objective governance.");
-        }
-        if (config.loopVersion === "v2") {
-          await safeAppendLineageEvent({
-            outputDir: config.outputDir,
-            event: {
-              eventId: `${lineage.lineageId}-review-${iteration}`,
-              lineageId: lineage.lineageId,
-              at: new Date().toISOString(),
-              type: "iteration_reviewed",
-              payload: {
-                iteration,
-                verdict: review.verdict,
-                promotedCandidateId: review.promotedCandidateId,
-                nextCandidateCount: review.nextCandidates.length
-              }
+        await safeAppendLineageEvent({
+          outputDir: config.outputDir,
+          event: {
+            eventId: `${lineage.lineageId}-review-${iteration}`,
+            lineageId: lineage.lineageId,
+            at: new Date().toISOString(),
+            type: "iteration_reviewed",
+            payload: {
+              iteration,
+              verdict: review.verdict,
+              promotedCandidateId: review.promotedCandidateId,
+              nextCandidateCount: review.nextCandidates.length
             }
-          });
-        }
+          }
+        });
         catalog = mergeProposedFamilies(catalog, review.proposedFamilies);
         catalog = refreshCatalogImplementations(catalog);
         runtimeFamilies = mergeStrategyFamilies(buildRuntimeFamilies(catalog), configuredFamilies);
@@ -3162,10 +1683,7 @@ export function createAutoResearchOrchestrator(deps: {
           validationResults,
           evaluations,
           provenance: {
-            proposalSource: proposalResult!.source,
-            proposalFailureMessage: proposalResult!.note,
-            reviewUsedObjectiveGovernance: reviewResult!.usedObjectiveGovernance,
-            reviewFailureMessage: reviewResult!.reviewFailureMessage
+            proposalSource: proposalResult!.source
           },
           review: {
             ...review,
@@ -3180,23 +1698,22 @@ export function createAutoResearchOrchestrator(deps: {
           path.join(config.outputDir, `iteration-${String(iteration).padStart(2, "0")}.json`),
           record
         );
-        if (config.loopVersion === "v2") {
-          lineage = await updateResearchLineageFromIterations({
-            outputDir: config.outputDir,
-            lineage,
-            iterations
-          });
-        }
+        lineage = await updateResearchLineageFromIterations({
+          outputDir: config.outputDir,
+          lineage,
+          iterations
+        });
 
         // Update research journal with evaluation results
         try {
-          const { appendJournalEntry, createEvaluationEntry } = await import("./research-journal.js");
+          const { appendJournalEntry, createEvaluationEntry, createObservationEntry } = await import("./research-journal.js");
+          const journalEntries = [];
           const topEval = evaluations[0];
           if (topEval) {
             const promoted = review.verdict === "promote_candidate" &&
               review.promotedCandidateId === topEval.candidate.candidateId;
             const familyDef = runtimeFamilies.find((f) => f.familyId === topEval.candidate.familyId);
-            await appendJournalEntry(config.outputDir, createEvaluationEntry({
+            journalEntries.push(createEvaluationEntry({
               iteration,
               familyId: topEval.candidate.familyId,
               title: familyDef?.title ?? topEval.candidate.familyId,
@@ -3204,8 +1721,53 @@ export function createAutoResearchOrchestrator(deps: {
               netReturn: topEval.summary.netReturn,
               tradeCount: topEval.summary.tradeCount,
               maxDrawdown: topEval.summary.maxDrawdown,
-              promoted
+              promoted,
+              candidateId: topEval.candidate.candidateId,
+              reviewVerdict: review.verdict,
+              nextActionHint: buildJournalNextActionHint(review),
+              observations: review.observations
             }));
+          }
+
+          for (const item of codeMutationResults.filter((result) => result.status === "failed")) {
+            journalEntries.push(createObservationEntry({
+              iteration,
+              title: `Code mutation failed: ${item.task.title}`,
+              thesis: item.task.rationale,
+              outcome: "failure",
+              outcomeReason: item.detail,
+              relatedFamilyIds: item.task.familyId ? [item.task.familyId] : [],
+              failureMode: "code_mutation_failed",
+              nextActionHint: "Tighten the mutation scope or simplify the implementation ask before retrying.",
+              evidence: [
+                `task=${item.task.taskId ?? item.task.title}`,
+                `intent=${item.task.intent}`,
+                `targets=${item.task.targetFiles.join(", ")}`
+              ],
+              tags: ["code-mutation", item.status]
+            }));
+          }
+
+          for (const item of validationResults.filter((result) => result.status === "failed")) {
+            journalEntries.push(createObservationEntry({
+              iteration,
+              title: `Validation failed: ${item.command}`,
+              thesis: item.command,
+              outcome: "failure",
+              outcomeReason: item.detail,
+              relatedFamilyIds: topEval ? [topEval.candidate.familyId] : [],
+              candidateId: topEval?.candidate.candidateId,
+              relatedCandidateIds: topEval ? [topEval.candidate.candidateId] : undefined,
+              reviewVerdict: review.verdict,
+              failureMode: "validation_failed",
+              nextActionHint: "Reproduce the failure locally and narrow the change before running another iteration.",
+              evidence: [`command=${item.command}`],
+              tags: ["validation", item.command]
+            }));
+          }
+
+          for (const entry of journalEntries) {
+            await appendJournalEntry(config.outputDir, entry);
           }
         } catch { /* journal is best-effort */ }
         await log(
@@ -3292,11 +1854,9 @@ export function createAutoResearchOrchestrator(deps: {
               const stagnationStreak = lifecycle.getStagnationStreak();
               const iterCounts = lifecycle.getIterationCounts();
               const stagnatedCount = [...skippedFamilyIds].filter((fid) => (stagnationStreak.get(fid) ?? 0) >= (config.stagnationRetireThreshold ?? 8)).length;
-              const zeroTradeCount = [...skippedFamilyIds].filter((fid) => (blockFamilyConsecutiveZeroTrades.get(fid) ?? 0) >= CONSECUTIVE_ZERO_TRADE_SKIP_THRESHOLD).length;
               const budgetExhaustedCount = [...skippedFamilyIds].filter((fid) => (iterCounts.get(fid) ?? 0) >= (config.familyIterationBudget ?? 20)).length;
               const blockSummary = `${promotedFamilyIds.size} block families validated, ${skippedCount} skipped`
                 + (stagnatedCount > 0 ? ` (${stagnatedCount} stagnated)` : "")
-                + (zeroTradeCount > 0 ? ` (${zeroTradeCount} 0-trade)` : "")
                 + (budgetExhaustedCount > 0 ? ` (${budgetExhaustedCount} budget-exhausted)` : "")
                 + `.`;
 
@@ -3365,6 +1925,22 @@ export function createAutoResearchOrchestrator(deps: {
         if (abortRequested && outcome !== "aborted") {
           outcome = "aborted";
           outcomeReason = `Received ${abortSignal ?? "termination signal"}.`;
+        }
+
+        if (
+          outcome === "partial" &&
+          isContinuousMode &&
+          !abortRequested &&
+          lifecycle.getIterationCounts().size > 0
+        ) {
+          const hasActiveFamilies = config.researchStage === "block"
+            ? lifecycle.hasActiveFamily(blockFamilyIds)
+            : lifecycle.hasActiveFamily(lifecycle.getIterationCounts().keys());
+
+          if (!hasActiveFamilies) {
+            outcome = "completed";
+            outcomeReason = "All active families retired.";
+          }
         }
 
         if (
@@ -3451,24 +2027,22 @@ export function createAutoResearchOrchestrator(deps: {
           await log(`[auto-research] artifact-audit failed ${artifactAudit.failureReason ?? "unknown mismatch"}`);
         }
 
-        if (config.loopVersion === "v2") {
-          await safeAppendLineageEvent({
-            outputDir: config.outputDir,
-            event: {
-              eventId: `${lineage.lineageId}-completed-${Date.now()}`,
-              lineageId: lineage.lineageId,
-              at: new Date().toISOString(),
-              type: outcome === "failed" ? "run_failed" : "run_completed",
-              payload: {
-                outcome,
-                outcomeReason,
-                iterations: iterations.length,
-                bestCandidateId: bestCandidate?.candidate.candidateId,
-                artifactAuditOk: artifactAudit.ok
-              }
+        await safeAppendLineageEvent({
+          outputDir: config.outputDir,
+          event: {
+            eventId: `${lineage.lineageId}-completed-${Date.now()}`,
+            lineageId: lineage.lineageId,
+            at: new Date().toISOString(),
+            type: outcome === "failed" ? "run_failed" : "run_completed",
+            payload: {
+              outcome,
+              outcomeReason,
+              iterations: iterations.length,
+              bestCandidateId: bestCandidate?.candidate.candidateId,
+              artifactAuditOk: artifactAudit.ok
             }
-          });
-        }
+          }
+        });
 
         const finalReport = await queueArtifactWrite(() => persistRunArtifacts({
           outputDir: config.outputDir,

@@ -1,7 +1,6 @@
 import type { StrategyTimeframe } from "../../../../packages/shared/src/index.js";
 import { loadCandlesForMarkets } from "../db.js";
 import {
-  normalizeToFullGrid,
   runMultiStrategyBacktest
 } from "../multi-strategy/index.js";
 import type { Candle } from "../types.js";
@@ -179,43 +178,6 @@ async function createBlockStrategy(familyId: string, candidateId: string, params
   throw new Error(`Cannot create block strategy for family: ${familyId}`);
 }
 
-function aggregate5mCandlesTo15m(candlesByMarket: CandleMap): CandleMap {
-  return Object.fromEntries(
-    Object.entries(candlesByMarket).map(([marketCode, candles]) => {
-      const buckets = new Map<number, Candle[]>();
-      for (const candle of candles) {
-        const bucketMs = 15 * 60_000;
-        const bucket = Math.floor(candle.candleTimeUtc.getTime() / bucketMs) * bucketMs;
-        const existing = buckets.get(bucket) ?? [];
-        existing.push(candle);
-        buckets.set(bucket, existing);
-      }
-
-      const aggregated = Array.from(buckets.entries())
-        .sort((left, right) => left[0] - right[0])
-        .map(([, bucketCandles]) => {
-          const sorted = bucketCandles.slice().sort((a, b) => a.candleTimeUtc.getTime() - b.candleTimeUtc.getTime());
-          const first = sorted[0]!;
-          const last = sorted[sorted.length - 1]!;
-          return {
-            marketCode,
-            timeframe: "15m",
-            candleTimeUtc: new Date(Math.floor(first.candleTimeUtc.getTime() / (15 * 60_000)) * (15 * 60_000)),
-            openPrice: first.openPrice,
-            highPrice: Math.max(...sorted.map((c) => c.highPrice)),
-            lowPrice: Math.min(...sorted.map((c) => c.lowPrice)),
-            closePrice: last.closePrice,
-            volume: sorted.reduce((sum, c) => sum + c.volume, 0),
-            quoteVolume: sorted.reduce((sum, c) => sum + (c.quoteVolume ?? c.closePrice * c.volume), 0),
-            isSynthetic: sorted.every((c) => c.isSynthetic ?? false)
-          } satisfies Candle;
-        });
-
-      return [marketCode, aggregated];
-    })
-  );
-}
-
 function chooseReferenceCandles(candlesByMarket: CandleMap, _timeframe: StrategyTimeframe): Candle[] {
   // Use the longest market's candles as reference timeline.
   // Previously used normalizeToFullGrid which clips to the SHORTEST market's range,
@@ -264,7 +226,6 @@ export async function evaluateBlockCandidate(params: {
   const { config, candidate, marketCodes } = params;
   const familyDef = getBlockFamilyById(candidate.familyId);
   const requiredTimeframes = (familyDef.requiredData ?? [familyDef.timeframe]) as StrategyTimeframe[];
-  const loadCandles = params.loadCandles ?? loadCandlesForMarkets;
 
   // Load candles: use the provided loader (orchestrator cache) when available,
   // fall back to centralized candle-loader for standalone usage
@@ -481,7 +442,6 @@ export async function evaluateBlockCandidate(params: {
     };
   }
 
-  // walk-forward with early exit for 0-trade candidates
   const trainingDays = config.trainingDays ?? config.holdoutDays * 2;
   const stepDays = config.stepDays ?? config.holdoutDays;
   let windows = buildWalkForwardRanges({ candles: referenceCandles, trainingDays, holdoutDays: config.holdoutDays, stepDays });
@@ -496,47 +456,14 @@ export async function evaluateBlockCandidate(params: {
     throw new Error("No valid block walk-forward windows.");
   }
 
-  // Progressive early exit: bail on hopeless candidates to save compute
-  const EARLY_EXIT_WINDOW_COUNT = Math.min(4, windows.length);
   const results: Array<{ trainRange: { start: Date; end: Date }; testRange: { start: Date; end: Date }; test: ReturnType<typeof runBacktest> }> = [];
-  let earlyExitZeroTrade = false;
 
-  for (let i = 0; i < windows.length; i++) {
-    const w = windows[i];
+  for (const w of windows) {
     results.push({
       trainRange: w.trainRange,
       testRange: w.testRange,
       test: runBacktest(w.testRange)
     });
-
-    // Check after first EARLY_EXIT_WINDOW_COUNT windows
-    if (i + 1 === EARLY_EXIT_WINDOW_COUNT) {
-      const totalTrades = results.reduce((s, r) => s + r.test.completedTrades.length, 0);
-      const allNegative = results.every((r) => r.test.metrics.netReturn < 0);
-      const avgReturn = results.reduce((s, r) => s + r.test.metrics.netReturn, 0) / results.length;
-
-      // Exit 1: zero or near-zero trades — entry conditions are too restrictive
-      if (totalTrades < 3) {
-        earlyExitZeroTrade = true;
-        break;
-      }
-
-      // Exit 2: all windows losing AND average return below -3% — consistently bad
-      if (allNegative && avgReturn < -0.03) {
-        earlyExitZeroTrade = true;
-        break;
-      }
-
-      // Exit 3: losing to buy-and-hold in every window with meaningful margin
-      const windowBhReturns = results.map((r) => computeBuyAndHoldReturn(referenceCandleMap, r.testRange));
-      const allBelowBH = results.every((r, idx) =>
-        r.test.metrics.netReturn < windowBhReturns[idx] - 0.01
-      );
-      if (allBelowBH && avgReturn < 0) {
-        earlyExitZeroTrade = true;
-        break;
-      }
-    }
   }
 
   const testReturns = results.map((r) => r.test.metrics.netReturn);

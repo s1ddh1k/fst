@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { generateStrategyScaffold } from "../src/auto-research/strategy-scaffold.js";
 import { isValidGeneratedModule } from "../src/auto-research/strategy-template.js";
-import { loadJournal, saveJournal, appendJournalEntry, createEvaluationEntry, buildJournalSummary } from "../src/auto-research/research-journal.js";
+import { loadJournal, saveJournal, appendJournalEntry, createEvaluationEntry, createObservationEntry, buildJournalSummary } from "../src/auto-research/research-journal.js";
 import { buildDiscoveryPrompt, buildDesignPrompt, buildImplementationPrompt } from "../src/auto-research/discovery-prompts.js";
 import { classifyLlmError, resolveFallbackChain } from "../src/auto-research/cli-llm.js";
 
@@ -250,6 +250,51 @@ describe("research journal", () => {
 
     assert.equal(entry.outcome, "success");
     assert.ok(entry.outcomeReason.includes("Promoted"));
+  });
+
+  it("captures blocked evaluations with next action hints", () => {
+    const entry = createEvaluationEntry({
+      iteration: 3,
+      familyId: "almost-there",
+      title: "Almost There",
+      thesis: "good but not strong enough",
+      netReturn: 0.03,
+      tradeCount: 12,
+      maxDrawdown: 0.06,
+      promoted: false,
+      candidateId: "candidate-03",
+      reviewVerdict: "stop_no_edge",
+      nextActionHint: "Rotate to a different family before retrying.",
+      observations: ["buy-and-hold still wins after costs"]
+    });
+
+    assert.equal(entry.failureMode, "promotion_blocked");
+    assert.equal(entry.reviewVerdict, "stop_no_edge");
+    assert.equal(entry.candidateId, "candidate-03");
+    assert.equal(entry.nextActionHint, "Rotate to a different family before retrying.");
+    assert.ok(entry.evidence?.some((item) => item.includes("buy-and-hold")));
+  });
+
+  it("creates observation entries for infrastructure failures", () => {
+    const entry = createObservationEntry({
+      iteration: 4,
+      title: "Validation failed: backtester tests",
+      thesis: "post-mutation validation",
+      outcome: "failure",
+      outcomeReason: "test suite failed",
+      relatedFamilyIds: ["relative-momentum-pullback"],
+      relatedCandidateIds: ["cand-04"],
+      reviewVerdict: "keep_searching",
+      nextActionHint: "Narrow the patch and rerun focused tests.",
+      failureMode: "validation_failed",
+      evidence: ["command=backtester tests"],
+      tags: ["validation", "tests"]
+    });
+
+    assert.equal(entry.category, "observation");
+    assert.equal(entry.failureMode, "validation_failed");
+    assert.equal(entry.relatedCandidateIds?.[0], "cand-04");
+    assert.ok(entry.lessonsLearned.includes("Narrow the patch and rerun focused tests."));
   });
 
   it("builds journal summary for prompt injection", async () => {

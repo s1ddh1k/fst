@@ -25,7 +25,7 @@ const AUTO_RESEARCH_GLOBAL_PROMPT = `
 Global research policy:
 - Use only the structured JSON facts provided in the prompt.
 - Focus on STRATEGY STRUCTURE and LOGIC — which indicators, entry/exit rules, regime filters.
-- DO NOT spend effort fine-tuning numeric parameters. A numeric optimizer handles parameter search automatically. Your parameter values are starting points, not final.
+- Do not spend effort on tiny numeric nudges. Change the thesis, entry logic, exit logic, or family structure when the evidence says the current idea is weak.
 - Favor diverse strategy STRUCTURES over narrow parameter twitching of existing strategies.
 - Prefer walk-forward candidates with positive window breadth, tolerable worst-window outcomes, and non-trivial closed-trade counts (minimum 10 trades across all windows).
 - Strategies that underperform buy-and-hold are useless — focus on generating genuine edge.
@@ -62,21 +62,390 @@ export function compactEvaluation(evaluation: CandidateBacktestEvaluation) {
   };
 }
 
+export type EvaluationDiagnosis = {
+  primaryFailureMode:
+    | "failed_evaluation"
+    | "blocked_signals"
+    | "too_few_trades"
+    | "cost_drag"
+    | "no_edge"
+    | "regime_fragility"
+    | "risk_pressure"
+    | "healthy_edge"
+    | "mixed";
+  blockingLayer: "strategy" | "risk" | "execution" | "coordinator" | "mixed" | "none";
+  summary: string;
+  prescriptions: string[];
+  dominantReasons: string[];
+  feesAteProfits: boolean;
+  fewTrades: boolean;
+  tooFewTradesForStatistics: boolean;
+  underperformsBaseline: boolean;
+  highGhostRatio: boolean;
+  windowSpread: number;
+  signalsGenerated: number;
+  signalsBlocked: number;
+};
+
+function sumReasonCounts(reasonMap: Record<string, number>): number {
+  return Object.values(reasonMap).reduce((sum, count) => sum + count, 0);
+}
+
+function topReasonEntries(reasonMap: Record<string, number>, limit = 3): string[] {
+  return Object.entries(reasonMap)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, limit)
+    .map(([reason, count]) => `${reason}(${count})`);
+}
+
+function collectTopRejectReasons(diagnostics: CandidateBacktestEvaluation["diagnostics"]): string[] {
+  return [
+    ...Object.entries(diagnostics.reasons.strategy).map(([reason, count]) => [`strategy:${reason}`, count] as const),
+    ...Object.entries(diagnostics.reasons.strategyTags).map(([reason, count]) => [`strategy_tag:${reason}`, count] as const),
+    ...Object.entries(diagnostics.reasons.risk).map(([reason, count]) => [`risk:${reason}`, count] as const),
+    ...Object.entries(diagnostics.reasons.execution).map(([reason, count]) => [`execution:${reason}`, count] as const),
+    ...Object.entries(diagnostics.reasons.coordinator).map(([reason, count]) => [`coordinator:${reason}`, count] as const)
+  ]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 5)
+    .map(([reason, count]) => `${reason}(${count})`);
+}
+
+function dominantBlockingLayer(diagnostics: CandidateBacktestEvaluation["diagnostics"]): {
+  blockingLayer: EvaluationDiagnosis["blockingLayer"];
+  dominantReasons: string[];
+} {
+  const layers = [
+    {
+      layer: "strategy" as const,
+      count: sumReasonCounts(diagnostics.reasons.strategy) + sumReasonCounts(diagnostics.reasons.strategyTags),
+      reasons: [
+        ...topReasonEntries(diagnostics.reasons.strategy, 2),
+        ...topReasonEntries(diagnostics.reasons.strategyTags, 1)
+      ]
+    },
+    {
+      layer: "risk" as const,
+      count: sumReasonCounts(diagnostics.reasons.risk),
+      reasons: topReasonEntries(diagnostics.reasons.risk)
+    },
+    {
+      layer: "execution" as const,
+      count: sumReasonCounts(diagnostics.reasons.execution),
+      reasons: topReasonEntries(diagnostics.reasons.execution)
+    },
+    {
+      layer: "coordinator" as const,
+      count: sumReasonCounts(diagnostics.reasons.coordinator),
+      reasons: topReasonEntries(diagnostics.reasons.coordinator)
+    }
+  ].sort((left, right) => right.count - left.count);
+
+  const top = layers[0];
+  const second = layers[1];
+
+  if (!top || top.count <= 0) {
+    return {
+      blockingLayer: "none",
+      dominantReasons: []
+    };
+  }
+
+  if (second && second.count > 0 && second.count >= top.count * 0.85) {
+    return {
+      blockingLayer: "mixed",
+      dominantReasons: [...top.reasons, ...second.reasons].filter(Boolean).slice(0, 3)
+    };
+  }
+
+  return {
+    blockingLayer: top.layer,
+    dominantReasons: top.reasons
+  };
+}
+
+function failedEvaluationDiagnosis(
+  evaluation: CandidateBacktestEvaluation
+): EvaluationDiagnosis {
+  const stage = evaluation.failure?.stage ?? "unknown";
+  const message = evaluation.failure?.message ?? "evaluation failed";
+  const stagePrescriptionMap: Record<string, string[]> = {
+    worker: [
+      "Stabilize the evaluation worker path before tuning strategy logic.",
+      "Treat this as infrastructure debt, not a trading signal."
+    ],
+    preload: [
+      "Fix market data availability or preload assumptions before changing strategy parameters.",
+      "Do not trust performance conclusions until the data path is stable."
+    ],
+    split: [
+      "Repair the train/test or walk-forward split before tuning the strategy.",
+      "Use a valid window layout or a longer candle span before retesting."
+    ],
+    backtest: [
+      "Fix the backtest/runtime failure before interpreting performance.",
+      "Do not continue parameter search until the strategy executes end to end."
+    ]
+  };
+
+  return {
+    primaryFailureMode: "failed_evaluation",
+    blockingLayer: "none",
+    summary: `Evaluation failed at ${stage}: ${message}`.slice(0, 220),
+    prescriptions: stagePrescriptionMap[stage] ?? stagePrescriptionMap.backtest,
+    dominantReasons: [],
+    feesAteProfits: false,
+    fewTrades: true,
+    tooFewTradesForStatistics: true,
+    underperformsBaseline: false,
+    highGhostRatio: false,
+    windowSpread: 0,
+    signalsGenerated: 0,
+    signalsBlocked: 0
+  };
+}
+
+export function deriveEvaluationDiagnosis(
+  evaluation: CandidateBacktestEvaluation
+): EvaluationDiagnosis {
+  if (evaluation.status !== "completed") {
+    return failedEvaluationDiagnosis(evaluation);
+  }
+
+  const s = evaluation.summary;
+  const d = evaluation.diagnostics;
+  const w = d.windows;
+  const totalClosedTrades = w.totalClosedTrades ?? s.tradeCount;
+  const signalsGenerated = d.coverage.signalCount;
+  const signalsBlocked =
+    d.coverage.ghostSignalCount +
+    d.coverage.rejectedOrdersCount +
+    d.coverage.cooldownSkipsCount;
+  const fewTrades = totalClosedTrades < 5;
+  const tooFewTradesForStatistics = totalClosedTrades < 10;
+  const highGhostRatio =
+    signalsGenerated > 0 &&
+    d.coverage.ghostSignalCount > signalsGenerated * 1.5;
+  const feesAteProfits =
+    s.grossReturn > 0 &&
+    (s.netReturn <= 0 || (s.grossReturn - s.netReturn) >= Math.max(s.grossReturn * 0.5, 0.01));
+  const windowSpread = (w.bestWindowNetReturn ?? s.netReturn) - (w.worstWindowNetReturn ?? s.netReturn);
+  const buyAndHoldReturn = s.buyAndHoldReturn;
+  const excessReturn =
+    typeof buyAndHoldReturn === "number"
+      ? s.netReturn - buyAndHoldReturn
+      : undefined;
+  const underperformsBaseline =
+    typeof excessReturn === "number"
+      ? excessReturn <= 0
+      : s.netReturn <= 0;
+  const { blockingLayer, dominantReasons } = dominantBlockingLayer(d);
+  const positiveWindowRatio = w.positiveWindowRatio ?? 0;
+  const regimeFragility =
+    (w.windowCount ?? 0) >= 3 &&
+    (
+      positiveWindowRatio < 0.6 ||
+      (windowSpread >= 0.12 && (w.worstWindowNetReturn ?? s.netReturn) < 0)
+    );
+  const blockedSignals =
+    signalsGenerated > 0 &&
+    (
+      signalsBlocked >= Math.max(signalsGenerated, 5) ||
+      highGhostRatio
+    );
+  const topRejectReasons = collectTopRejectReasons(d);
+
+  if (blockedSignals) {
+    return {
+      primaryFailureMode: "blocked_signals",
+      blockingLayer,
+      summary:
+        blockingLayer === "none"
+          ? `Signals are firing (${signalsGenerated}) but ${signalsBlocked} are being blocked before turning into trades.`
+          : `Signals are firing (${signalsGenerated}) but ${signalsBlocked} are being blocked mainly by ${blockingLayer}: ${dominantReasons.join(", ") || "no dominant reason recorded"}.`,
+      prescriptions: [
+        blockingLayer === "strategy"
+          ? "Relax the dominant strategy filters before changing exits or risk caps."
+          : blockingLayer === "risk"
+            ? "Tune stops, cooldowns, or risk caps before changing entry logic."
+            : blockingLayer === "execution"
+              ? "Fix order sizing, min-notional, or execution constraints before adding new signals."
+              : blockingLayer === "coordinator"
+                ? "Relax portfolio coordination bottlenecks such as ranking or slot limits before tuning indicators."
+                : "Separate true signal generation from downstream blocking before the next tuning pass.",
+        "Do not interpret net return until enough of the generated signals can actually turn into trades."
+      ],
+      dominantReasons: dominantReasons.length > 0 ? dominantReasons : topRejectReasons,
+      feesAteProfits,
+      fewTrades,
+      tooFewTradesForStatistics,
+      underperformsBaseline,
+      highGhostRatio,
+      windowSpread: +(windowSpread * 100).toFixed(2),
+      signalsGenerated,
+      signalsBlocked
+    };
+  }
+
+  if (tooFewTradesForStatistics) {
+    return {
+      primaryFailureMode: "too_few_trades",
+      blockingLayer,
+      summary: `Only ${totalClosedTrades} closed trades were observed, so the measured return is still mostly noise.`,
+      prescriptions: [
+        "Relax entry conditions or widen trigger bands until the candidate clears at least 10 closed trades.",
+        "Do not overfit this candidate's return until trade count becomes statistically meaningful."
+      ],
+      dominantReasons: dominantReasons.length > 0 ? dominantReasons : topRejectReasons,
+      feesAteProfits,
+      fewTrades,
+      tooFewTradesForStatistics,
+      underperformsBaseline,
+      highGhostRatio,
+      windowSpread: +(windowSpread * 100).toFixed(2),
+      signalsGenerated,
+      signalsBlocked
+    };
+  }
+
+  if (feesAteProfits) {
+    return {
+      primaryFailureMode: "cost_drag",
+      blockingLayer,
+      summary: `Gross return ${(s.grossReturn * 100).toFixed(2)}% is being dragged down to net ${(s.netReturn * 100).toFixed(2)}% by costs and turnover.`,
+      prescriptions: [
+        "Reduce turnover with wider thresholds, slower exits, or fewer low-conviction trades.",
+        "Prefer higher-conviction trades before adding more signal complexity."
+      ],
+      dominantReasons: dominantReasons.length > 0 ? dominantReasons : topRejectReasons,
+      feesAteProfits,
+      fewTrades,
+      tooFewTradesForStatistics,
+      underperformsBaseline,
+      highGhostRatio,
+      windowSpread: +(windowSpread * 100).toFixed(2),
+      signalsGenerated,
+      signalsBlocked
+    };
+  }
+
+  if (underperformsBaseline) {
+    return {
+      primaryFailureMode: "no_edge",
+      blockingLayer,
+      summary:
+        typeof excessReturn === "number"
+          ? `Net return ${(s.netReturn * 100).toFixed(2)}% trails buy-and-hold by ${(Math.abs(excessReturn) * 100).toFixed(2)}%, so the current structure is not producing real edge.`
+          : `Net return ${(s.netReturn * 100).toFixed(2)}% does not show enough edge after costs.`,
+      prescriptions: [
+        "Change the strategy structure or family rather than nudging the same parameters again.",
+        "Keep only hypotheses that can beat passive holding after costs."
+      ],
+      dominantReasons: dominantReasons.length > 0 ? dominantReasons : topRejectReasons,
+      feesAteProfits,
+      fewTrades,
+      tooFewTradesForStatistics,
+      underperformsBaseline,
+      highGhostRatio,
+      windowSpread: +(windowSpread * 100).toFixed(2),
+      signalsGenerated,
+      signalsBlocked
+    };
+  }
+
+  if (regimeFragility) {
+    return {
+      primaryFailureMode: "regime_fragility",
+      blockingLayer,
+      summary: `The candidate has edge in some windows but the ${+(windowSpread * 100).toFixed(2)}% window spread and ${(positiveWindowRatio * 100).toFixed(1)}% positive-window ratio show regime fragility.`,
+      prescriptions: [
+        "Add or tighten regime filters so the bad windows are explicitly screened out.",
+        "Tune for smoother worst-window behavior before chasing higher peak returns."
+      ],
+      dominantReasons: dominantReasons.length > 0 ? dominantReasons : topRejectReasons,
+      feesAteProfits,
+      fewTrades,
+      tooFewTradesForStatistics,
+      underperformsBaseline,
+      highGhostRatio,
+      windowSpread: +(windowSpread * 100).toFixed(2),
+      signalsGenerated,
+      signalsBlocked
+    };
+  }
+
+  if (blockingLayer === "risk" || blockingLayer === "execution" || blockingLayer === "coordinator") {
+    return {
+      primaryFailureMode: "risk_pressure",
+      blockingLayer,
+      summary: `The strategy appears viable, but ${blockingLayer} constraints dominate the bottleneck: ${dominantReasons.join(", ") || "no dominant reason recorded"}.`,
+      prescriptions: [
+        "Tune the bottleneck layer first instead of rewriting the entry thesis.",
+        "Use the next candidate batch to isolate whether risk, execution, or coordination is throttling the edge."
+      ],
+      dominantReasons: dominantReasons.length > 0 ? dominantReasons : topRejectReasons,
+      feesAteProfits,
+      fewTrades,
+      tooFewTradesForStatistics,
+      underperformsBaseline,
+      highGhostRatio,
+      windowSpread: +(windowSpread * 100).toFixed(2),
+      signalsGenerated,
+      signalsBlocked
+    };
+  }
+
+  if (
+    !underperformsBaseline &&
+    totalClosedTrades >= 10
+  ) {
+    return {
+      primaryFailureMode: "healthy_edge",
+      blockingLayer,
+      summary: `The candidate is beating baseline with ${totalClosedTrades} closed trades; the next step is to preserve the thesis while improving robustness and drawdown.`,
+      prescriptions: [
+        "Preserve the core entry logic and tune worst-window behavior, drawdown, or costs around it.",
+        "Prefer robustness improvements over a full structural rewrite."
+      ],
+      dominantReasons: dominantReasons.length > 0 ? dominantReasons : topRejectReasons,
+      feesAteProfits,
+      fewTrades,
+      tooFewTradesForStatistics,
+      underperformsBaseline,
+      highGhostRatio,
+      windowSpread: +(windowSpread * 100).toFixed(2),
+      signalsGenerated,
+      signalsBlocked
+    };
+  }
+
+  return {
+    primaryFailureMode: "mixed",
+    blockingLayer,
+    summary: "The candidate is neither clearly broken nor clearly strong; inspect the dominant reject reasons before the next tuning pass.",
+    prescriptions: [
+      "Change one structural assumption at a time so the next evaluation isolates the main bottleneck.",
+      "Use the dominant reject reasons to decide whether to relax filters, change exits, or rotate families."
+    ],
+    dominantReasons: dominantReasons.length > 0 ? dominantReasons : topRejectReasons,
+    feesAteProfits,
+    fewTrades,
+    tooFewTradesForStatistics,
+    underperformsBaseline,
+    highGhostRatio,
+    windowSpread: +(windowSpread * 100).toFixed(2),
+    signalsGenerated,
+    signalsBlocked
+  };
+}
+
 export function buildEvaluationAnalysis(evaluation: CandidateBacktestEvaluation) {
   const s = evaluation.summary;
   const d = evaluation.diagnostics;
   const w = d.windows;
-  const feesAteProfits = s.grossReturn > 0 && s.netReturn <= 0;
-  const fewTrades = s.tradeCount < 5;
-  const tooFewTradesForStatistics = (w.totalClosedTrades ?? s.tradeCount) < 10;
-  const highGhostRatio = d.coverage.ghostSignalCount > d.coverage.signalCount * 2;
-  const windowSpread = (w.bestWindowNetReturn ?? 0) - (w.worstWindowNetReturn ?? 0);
-  const topRejectReasons = Object.entries({ ...d.reasons.strategy, ...d.reasons.risk })
-    .sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k}(${v})`);
-
+  const diagnosis = deriveEvaluationDiagnosis(evaluation);
   const buyAndHoldReturn = s.buyAndHoldReturn;
   const excessReturn = buyAndHoldReturn !== undefined ? s.netReturn - buyAndHoldReturn : undefined;
-  const underperformsBaseline = excessReturn !== undefined && excessReturn <= 0;
 
   return {
     candidateId: evaluation.candidate.candidateId,
@@ -95,17 +464,7 @@ export function buildEvaluationAnalysis(evaluation: CandidateBacktestEvaluation)
     bestWindow: +(( w.bestWindowNetReturn ?? 0) * 100).toFixed(2),
     worstWindow: +((w.worstWindowNetReturn ?? 0) * 100).toFixed(2),
     windowCount: w.windowCount ?? 0,
-    diagnosis: {
-      feesAteProfits,
-      fewTrades,
-      tooFewTradesForStatistics,
-      underperformsBaseline,
-      highGhostRatio,
-      windowSpread: +(windowSpread * 100).toFixed(2),
-      topRejectReasons,
-      signalsGenerated: d.coverage.signalCount,
-      signalsBlocked: d.coverage.ghostSignalCount + d.coverage.rejectedOrdersCount
-    }
+    diagnosis
   };
 }
 
@@ -253,6 +612,8 @@ export function compactFamilyPerformance(history: ResearchIterationRecord[]) {
     bestNetReturn: number;
     bestTradeCount: number;
     topReasons: Record<string, number>;
+    topFailureModes: Record<string, number>;
+    blockingLayers: Record<string, number>;
   }>();
 
   for (const iteration of history) {
@@ -263,8 +624,11 @@ export function compactFamilyPerformance(history: ResearchIterationRecord[]) {
         positive: 0,
         bestNetReturn: Number.NEGATIVE_INFINITY,
         bestTradeCount: 0,
-        topReasons: {}
+        topReasons: {},
+        topFailureModes: {},
+        blockingLayers: {}
       };
+      const diagnosis = deriveEvaluationDiagnosis(evaluation);
 
       current.evaluations += 1;
       current.tradeful += evaluation.summary.tradeCount > 0 ? 1 : 0;
@@ -274,6 +638,10 @@ export function compactFamilyPerformance(history: ResearchIterationRecord[]) {
       for (const [reason, count] of Object.entries(evaluation.diagnostics.reasons.strategy)) {
         current.topReasons[reason] = (current.topReasons[reason] ?? 0) + count;
       }
+      current.topFailureModes[diagnosis.primaryFailureMode] =
+        (current.topFailureModes[diagnosis.primaryFailureMode] ?? 0) + 1;
+      current.blockingLayers[diagnosis.blockingLayer] =
+        (current.blockingLayers[diagnosis.blockingLayer] ?? 0) + 1;
       byFamily.set(evaluation.candidate.familyId, current);
     }
   }
@@ -288,7 +656,13 @@ export function compactFamilyPerformance(history: ResearchIterationRecord[]) {
       bestTradeCount: value.bestTradeCount,
       topStrategyReasons: Object.entries(value.topReasons)
         .sort((left, right) => right[1] - left[1])
-        .slice(0, 5)
+        .slice(0, 5),
+      topFailureModes: Object.entries(value.topFailureModes)
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 4),
+      topBlockingLayers: Object.entries(value.blockingLayers)
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 4)
     }))
     .sort((left, right) => right.bestNetReturn - left.bestNetReturn);
 }
@@ -326,33 +700,23 @@ ${jsonBlock({
   familyPerformanceSummary: compactFamilyPerformance(params.history),
   candidateLedgerSummary: compactCandidateLedger(params.history),
   candidateGenealogy: compactCandidateGenealogy(params.history),
+  recentEvaluationAnalyses: params.history.slice(-2).flatMap((iteration) =>
+    iteration.evaluations.map(buildEvaluationAnalysis)
+  ),
   priorHistory: compactHistory(params.history)
 })}
 
 Task:
 1. Think like an auto-research agent, not a human explainer.
-2. Generate executable candidates only from the listed families.
-3. If useful, request preparation actions such as feature cache build or candle refresh.
-4. Prefer diverse hypotheses, not tiny parameter nudges of the same idea.
-5. Keep each thesis short and falsifiable.
-6. Use the JSON facts above directly. Do not assume hidden heuristics. If the history shows repeated zero-signal or failed evaluations, propose candidates or data/code actions that specifically target those failure modes.
+2. Read recentEvaluationAnalyses[*].diagnosis before proposing the next batch.
+3. Generate executable candidates only from the listed families.
+4. Prefer diverse hypotheses and material logic changes over tiny parameter nudges.
+5. If the evidence points to data or code debt instead of strategy debt, use preparation or codeTasks explicitly.
 
 Return JSON only:
 {
   "researchSummary": "short summary",
-  "preparation": [
-    {
-      "kind": "build_feature_cache" | "sync_latest_batch" | "backfill_batch",
-      "timeframe": "1h" | "15m" | "5m" | "1m",
-      "timeframes": ["1h"],
-      "pages": 4,
-      "reason": "why this is worth doing",
-      "familyId": "relative-momentum-pullback",
-      "marketLimit": 10,
-      "limit": 40000,
-      "minCandles": 5000
-    }
-  ],
+  "preparation": [],
   "proposedFamilies": [
     {
       "familyId": "momentum-reacceleration-v1",
@@ -369,29 +733,14 @@ Return JSON only:
           "max": 0.95
         }
       ],
-      "requiredData": ["1h", "feature_cache:breadth"],
+      "requiredData": ["1h"],
       "implementationNotes": ["what code would need to change"],
       "composition": {
         "mode": "weighted_vote",
-        "buyThreshold": 0.55,
-        "sellThreshold": 0.55,
         "components": [
           {
             "familyId": "leader-pullback-state-machine",
-            "weight": 1.0,
-            "parameterBindings": {
-              "strengthFloor": "leaderStrengthFloor",
-              "trailAtrMult": "sharedTrailAtrMult"
-            }
-          },
-          {
-            "familyId": "momentum-reacceleration",
-            "weight": 0.8,
-            "parameterBindings": {
-              "strengthFloor": "resetStrengthFloor",
-              "minRiskOn": "sharedMinRiskOn",
-              "trailAtrMult": "sharedTrailAtrMult"
-            }
+            "weight": 1.0
           }
         ]
       }
@@ -399,12 +748,8 @@ Return JSON only:
   ],
   "codeTasks": [
     {
-      "taskId": "optional-id",
-      "familyId": "momentum-reacceleration-v1",
-      "strategyName": "momentum-reacceleration-v1",
       "title": "implement new family",
       "intent": "implement_strategy",
-      "rationale": "why code change is worth doing",
       "acceptanceCriteria": ["criterion"],
       "targetFiles": ["research/strategies/src/example.ts"],
       "prompt": "precise coding task"
@@ -481,6 +826,7 @@ ${jsonBlock({
   latestCodeMutationResults: compactCodeMutationResults(params.codeMutationResults),
   latestValidationResults: params.validationResults,
   latestEvaluations: params.evaluations.map(compactEvaluation),
+  latestEvaluationAnalyses: params.evaluations.map(buildEvaluationAnalysis),
   familyPerformanceSummary: compactFamilyPerformance(params.history),
   candidateLedgerSummary: compactCandidateLedger(params.history),
   candidateGenealogy: compactCandidateGenealogy(params.history),
@@ -488,14 +834,11 @@ ${jsonBlock({
 })}
 
 Task:
-1. Decide whether one candidate is worth promoting now, whether to keep searching, or whether to stop because no edge is visible.
-2. Explicitly retire failed ideas when appropriate.
+1. Decide whether to promote, keep searching, or stop because no edge is visible.
+2. Base the decision on the structured JSON facts in this iteration, especially latestEvaluationAnalyses[*].diagnosis.
 3. If searching should continue, propose the next executable candidate batch.
-4. Favor robustness over one-off lucky net returns.
-5. Base your decision on the structured JSON facts, including failed evaluations, zero-signal runs, preparation outcomes, and validation results.
-6. Use diagnostics.coverage and diagnostics.reasons to explain whether no-trade outcomes came from strategy filters, portfolio coordination, risk blocks, or execution rejects.
-7. The orchestrator may apply objective promotion gates and local candidate augmentation. Your verdict remains important, but it is not the only control signal.
-8. Optimize for risk-constrained growth. Do not promote candidates that rely on fragile drawdown-heavy performance.
+4. Favor robustness and credible trade count over one-off lucky returns.
+5. Retire failed ideas explicitly when appropriate.
 
 Return JSON only:
 {
@@ -571,35 +914,17 @@ CRITICAL — Previous iteration diagnosis (you MUST address these issues):
 - Issues found: ${params.previousDiagnosis.observations.join("; ")}
 Your next candidates MUST fix these specific problems. Do NOT repeat the same mistakes.
 ` : ""}
-Task — think like a researcher:
-1. Look at recentEvaluations.diagnosis for each candidate:
-   - underperformsBaseline=true → strategy has NO edge over buy-and-hold. Consider a DIFFERENT strategy structure.
-   - tooFewTradesForStatistics=true → fewer than 10 trades total, results are noise. MUST relax entry conditions significantly.
-   - feesAteProfits=true → reduce trade frequency (widen thresholds, increase rebalanceBars)
-   - fewTrades=true → relax entry conditions (lower RSI threshold, widen regime gate)
-   - highGhostRatio=true → signals generated but blocked — relax position limits or cooldown
-   - worstWindow much worse than bestWindow → strategy is regime-dependent, tighten regime gate
-   - topRejectReasons tells you exactly what's blocking trades — address those specific reasons
-2. Each nextCandidate must state in its thesis WHAT problem it's fixing from the previous evaluation.
-3. Focus on strategy STRUCTURE changes (different indicator combos, entry/exit logic) rather than tweaking parameter values. A numeric optimizer handles parameter search automatically.
-4. Generate executable candidates from the listed block families only.
+Task:
+1. Read recentEvaluations[*].diagnosis first. Use diagnosis.summary, prescriptions, topRejectReasons, and excessReturn to decide what to change.
+2. Every next candidate must say in its thesis what failure it is trying to fix.
+3. Prefer material changes to thesis, entry/exit logic, or regime controls over tiny numeric nudges.
+4. If the evidence says there is no edge over buy-and-hold, rotate to a meaningfully different block idea instead of repeating the same shape.
+5. Generate executable candidates from the listed block families only.
 
 Return JSON only:
 {
   "researchSummary": "short summary",
-  "preparation": [
-    {
-      "kind": "build_feature_cache" | "sync_latest_batch" | "backfill_batch",
-      "timeframe": "1h" | "15m" | "5m" | "1m",
-      "timeframes": ["1h"],
-      "pages": 4,
-      "reason": "why this is worth doing",
-      "familyId": "block:leader-1h-trend-up",
-      "marketLimit": 10,
-      "limit": 40000,
-      "minCandles": 5000
-    }
-  ],
+  "preparation": [],
   "proposedFamilies": [],
   "codeTasks": [],
   "candidates": [
@@ -665,33 +990,12 @@ ${jsonBlock({
   familyPerformanceSummary: compactFamilyPerformance(params.history)
 })}
 
-Task — analyze like a researcher, not a parameter optimizer:
-
-1. DIAGNOSE: For each candidate, analyze WHY it performed the way it did:
-   - Check excessReturn — is the strategy actually beating buy-and-hold? underperformsBaseline=true means it has NO real edge.
-   - Check totalClosedTrades — strategies with fewer than 10 total trades are STATISTICALLY MEANINGLESS, don't promote them.
-   - Check costs.totalCostsPaid vs summary.grossReturn — is the strategy profitable before fees but killed by costs? → reduce trade frequency
-   - Check windows.positiveWindowRatio — does it win in some periods and lose in others? → identify which market conditions work
-   - Check windows.bestWindowNetReturn vs worstWindowNetReturn — how wide is the spread? → strategy may need regime filtering
-   - Check coverage.ghostSignalCount vs signalCount — are signals being generated but not executed? → position limits or cooldown too tight
-   - Check reasons.strategy / reasons.risk — what's blocking trades? → these are specific strategy rejection reasons
-
-2. EXPLAIN: In your summary, state the specific failure mechanism:
-   - "excessReturn=-1.2% → strategy underperforms simply holding the market, no real edge detected"
-   - "Only 4 total closed trades → results are noise, need to relax entry to generate at least 10+ trades"
-   - "Gross return +2.3% but fees ate 3.1% → need fewer trades with higher conviction"
-   - "4 out of 6 windows profitable but window 3 lost -5% → strategy fails in downtrends, add trend filter"
-   - "Only 3 trades in 90 days → entry conditions too restrictive, relax RSI threshold from 25 to 35"
-   NOT just "keep searching" or "weak performance"
-
-3. PRESCRIBE: Your nextCandidates should address the SPECIFIC diagnosed issue:
-   - If fees too high → widen entry/exit thresholds to reduce trade count
-   - If regime-dependent → change regime gate parameters
-   - If signals blocked → relax position limits or cooldown
-   - If one bad window → add drawdown protection or trend alignment
-   Do NOT just nudge parameters randomly. Each change must address a diagnosed problem.
-
-4. PROMOTE only if: net return > 0, positive window ratio >= 0.5, and trade count >= 10.
+Task:
+1. Start from diagnosis.primaryFailureMode, diagnosis.summary, and diagnosis.prescriptions for each candidate.
+2. In your summary, name the actual mechanism: no edge vs baseline, too few trades, cost drag, regime fragility, blocked execution, or genuine healthy edge.
+3. If you continue searching, turn the diagnosis into concrete nextCandidates. Each next candidate must address a specific problem from this iteration.
+4. Do not propose random nudges. Change only what the evidence justifies.
+5. Promote only when the evidence shows positive return, acceptable robustness, and enough trades to matter.
 
 Return JSON only — the verdict field MUST be exactly one of these three strings:
 {
@@ -816,6 +1120,8 @@ ${jsonBlock({
   families: compactFamilies(params.families),
   latestProposal: params.latestProposal,
   latestEvaluations: params.evaluations.map(compactEvaluation),
+  latestEvaluationAnalyses: params.evaluations.map(buildEvaluationAnalysis),
+  familyPerformanceSummary: compactFamilyPerformance(params.history),
   priorHistory: compactHistory(params.history),
   validatedBlocks: params.blockCatalog.blocks.map((b) => ({
     blockId: b.blockId,
@@ -828,6 +1134,7 @@ ${jsonBlock({
 Task:
 1. Evaluate whether the allocation produces a well-diversified portfolio.
 2. If searching should continue, propose different sleeve allocations or portfolio-level params.
+3. Use latestEvaluationAnalyses[*].diagnosis.summary and prescriptions to distinguish edge failure from coordination, risk, or execution bottlenecks.
 
 Return JSON only — the verdict field MUST be exactly one of these three strings:
 {

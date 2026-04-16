@@ -464,7 +464,6 @@ export async function loadMarketStateFeatureSeries(params: {
 }): Promise<Record<string, MarketStateContext>> {
   const db = getDb();
   const hasRange = Boolean(params.range);
-  const resolvedConfig = resolveMarketStateConfig(params.config);
   const configKey = getMarketStateConfigKey(params.config, params.benchmarkMarketCode);
   const rows = db.prepare(
     `

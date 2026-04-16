@@ -4,8 +4,7 @@ import { replaceStrategyRegimes } from "../db.js";
 import {
   calculateCandidateRiskAdjustedScore,
   compareCandidateEvaluations,
-  passesPromotionGate,
-  summarizeEvaluationRanking
+  passesPromotionGate
 } from "./ranking.js";
 import type {
   AutoResearchRunConfig,

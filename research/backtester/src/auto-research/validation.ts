@@ -2,7 +2,6 @@ import { mkdir, writeFile, access } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import type { ValidationCommandResult } from "./types.js";
-import { isValidGeneratedModule } from "./strategy-template.js";
 
 function runCommand(command: string, args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {

@@ -35,3 +35,6 @@ data/
 coverage/
 .coverage
 htmlcov/
+
+# Generated research artifacts
+research/backtester/artifacts/auto-research/

@@ -1,7 +1,6 @@
 import type {
   AccountView,
   PositionIntent,
-  PositionView,
   PortfolioDecision,
   StrategySignal,
   SleeveId

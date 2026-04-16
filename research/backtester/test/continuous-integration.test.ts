@@ -96,7 +96,6 @@ function buildConfig(outputDir: string, overrides: Partial<AutoResearchRunConfig
     allowDataCollection: false,
     allowFeatureCacheBuild: false,
     allowCodeMutation: false,
-    loopVersion: "v2",
     minNetReturnForPromotion: 0.05,
     allowStaleData: true,
     ...overrides
@@ -181,22 +180,20 @@ test("continuous mode retires stagnant families and completes", async () => {
     assert.equal(report.outcome, "completed");
     assert.ok(evalCount >= 3, `Should have evaluated at least 3 times, got ${evalCount}`);
 
-    // Check that the run log mentions stagnation
+    // Check that the run log records retirement progress
     const runLog = await readFile(path.join(outputDir, "run.log"), "utf8");
-    // Either stagnation or stop_no_edge should appear
     assert.ok(
-      runLog.includes("stagnant") || runLog.includes("stop_no_edge") || runLog.includes("Anti self-bias"),
-      "Run log should mention stagnation or anti self-bias"
+      runLog.includes("retiring family") || runLog.includes("stagnant") || runLog.includes("stop_no_edge"),
+      "Run log should mention family retirement progress"
     );
   } finally {
     await rm(outputDir, { recursive: true, force: true });
   }
 });
 
-// Integration test 2: LLM failure → V2 objective governance continues
-test("orchestrator continues with objective governance when LLM fails", async () => {
+// Integration test 2: LLM failure fails the run directly
+test("orchestrator fails immediately when LLM is unavailable", async () => {
   const outputDir = await mkdtemp(path.join(os.tmpdir(), "fst-cont-llm-fail-"));
-  let evalCount = 0;
 
   try {
     const failingLlm: ResearchLlmClient = {
@@ -211,7 +208,6 @@ test("orchestrator continues with objective governance when LLM fails", async ()
     const orchestrator = createAutoResearchOrchestrator({
       llmClient: failingLlm,
       async evaluateCandidate({ candidate }) {
-        evalCount++;
         return buildEvaluation(candidate, 0.03, 5);
       },
       async prepareActions() { return []; },
@@ -220,19 +216,12 @@ test("orchestrator continues with objective governance when LLM fails", async ()
       async preloadReferenceCandles() { return []; }
     });
 
-    const report = await orchestrator.run(buildConfig(outputDir, {
-      iterations: 3,
-      loopVersion: "v2"
-    }));
-
-    // V2 should have run all 3 iterations despite LLM failure
-    assert.equal(report.iterations.length, 3);
-    assert.ok(evalCount >= 3, `Should have evaluated at least 3 times, got ${evalCount}`);
-    // Check objective governance was used
-    const usedGovernance = report.iterations.some((iter) =>
-      iter.provenance?.proposalSource === "objective_seed" || iter.provenance?.proposalSource === "objective_continuation"
+    await assert.rejects(
+      () => orchestrator.run(buildConfig(outputDir, {
+        iterations: 3,
+      })),
+      /LLM proposal failed: LLM_ALL_PROVIDERS_EXHAUSTED: all failed/
     );
-    assert.ok(usedGovernance, "Should have used objective governance as fallback");
   } finally {
     await rm(outputDir, { recursive: true, force: true });
   }

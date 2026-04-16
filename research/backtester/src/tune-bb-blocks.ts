@@ -339,33 +339,6 @@ function mutateParams(
   return normalizeBbParams(next);
 }
 
-function collectMatchingArrays(node: unknown, familyId: string, matches: Record<string, number>[]): void {
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      if (
-        item &&
-        typeof item === "object" &&
-        "familyId" in item &&
-        (item as { familyId?: unknown }).familyId === familyId &&
-        "parameters" in item &&
-        typeof (item as { parameters?: unknown }).parameters === "object"
-      ) {
-        matches.push((item as { parameters: Record<string, number> }).parameters);
-      }
-      collectMatchingArrays(item, familyId, matches);
-    }
-    return;
-  }
-
-  if (!node || typeof node !== "object") {
-    return;
-  }
-
-  for (const value of Object.values(node as Record<string, unknown>)) {
-    collectMatchingArrays(value, familyId, matches);
-  }
-}
-
 function scoreSeedCandidate(node: Record<string, unknown>): number {
   const netReturn = typeof node.netReturn === "number" ? node.netReturn : 0;
   const positiveWindowRatio = typeof node.positiveWindowRatio === "number" ? node.positiveWindowRatio : 0;
